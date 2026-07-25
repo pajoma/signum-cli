@@ -6,6 +6,17 @@ this document and the issues must stay in sync.
 
 **Status:** DRAFT — collected 2026-07-25, not yet reviewed.
 
+## What a requirement is here
+
+A requirement states **what the CLI must do**. It is not a user story and carries **no
+acceptance criteria** — do not add them to this document or to the mirroring issues.
+
+Implementation work is tracked separately and references a requirement ID. One requirement may
+spawn several pieces of work, or none; the register describes the system, not the plan.
+
+Requirement IDs (`REQ-nnn`) are stable and permanent. Issue numbers are a convenience and are
+not a substitute for them.
+
 ## Scope
 
 A **self-contained native executable** that talks to a running Signum Framework application

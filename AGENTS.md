@@ -24,9 +24,13 @@ exposes *itself* as an MCP server so agents can drive any Signum app
 **Requirements** are collected in [`docs/requirements.md`](docs/requirements.md) — 47 of them,
 mirrored as issues `#1`–`#47` labelled
 [`requirement`](https://github.com/pajoma/signum-cli/labels/requirement) plus `v1`/`v2`/`spike`.
-That document is the source of truth; keep it and the issues in sync. Two requirements are
-research spikes whose outcome may be "not feasible" — REQ-004 (browser login) and REQ-005
-(external IdPs).
+That document is the source of truth; keep it and the issues in sync. Two are research spikes
+whose outcome may be "not feasible" — REQ-004 (browser login) and REQ-005 (external IdPs).
+
+**Requirements are not user stories.** They state what the CLI must do and carry **no
+acceptance criteria** — do not add any, to the document or the issues. Implementation work is
+tracked separately and references a requirement ID. When editing the register, regenerate the
+issue bodies from the document rather than hand-editing both, so wording cannot drift.
 
 ## Read before working
 
