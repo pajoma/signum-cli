@@ -11,6 +11,10 @@ behaviour are cited to `file:line`.
 **Roles used below:** *developer* (interactive terminal), *operator* (scripted/CI), *agent*
 (MCP or direct invocation by Claude Code), *administrator* (provisions access in the target app).
 
+> **Target application uses Entra.** [STORY-10](#story-10--entra-device-code-login) is therefore the
+> primary path, not an add-on — see [ADR 0004](../decisions/0004-entra-primary-identity-provider.md).
+> The other stories remain required: they cover other deployments, CI, and fallbacks.
+
 ---
 
 ## What the framework actually accepts
@@ -32,6 +36,12 @@ rule, one redaction rule**, regardless of how the user authenticated.
 ## STORY-01 — Browser login (`gh`-style)
 
 Traces to: REQ-001, REQ-004 · Priority: **v1** · Feasibility: **confirmed possible today**
+
+> **Scope note.** This is the path for deployments using `Signum.Authorization.OpenID`. The
+> **target application uses Entra**, whose primary path is [STORY-10](#story-10--entra-device-code-login).
+> If the target app fronts Entra via the *OpenID* module rather than the *AzureAD* module, this
+> story becomes its path instead — that is [ADR 0004](../decisions/0004-entra-primary-identity-provider.md)
+> open question 1.
 
 **As a developer**, I want to run `signum auth login --web`, complete authentication in my normal
 browser, and have the CLI end up logged in, so that I never type credentials into a terminal and
@@ -211,24 +221,44 @@ prompt, so that I never hang waiting for input that cannot arrive.
 
 ---
 
-## STORY-10 — Entra / AzureAD device code
+## STORY-10 — Entra device code login
 
-Traces to: REQ-005 · Priority: **v2**
+Traces to: REQ-005 · Priority: **v1 — this is the primary path for the target application**
 
-**As a developer** at an organisation on Entra ID, I want to authenticate with a device code, so
-that I can log in from a headless or remote machine without a loopback redirect.
+**As a developer or operator** at an organisation on Entra, I want to authenticate with a device
+code, so that I log in with corporate SSO and MFA from any machine — including headless and remote
+ones — without a browser on that machine and without ever handling a password.
 
-Feasible because `POST api/auth/loginWithAzureAD` accepts a **raw `idToken`** and validates
-`aud == ApplicationID` and `iss == login.microsoftonline.com/{DirectoryID}/v2.0`
-(`AzureAuthenticationServer.cs:81-107`). This is a genuine token exchange, so the CLI can run its
-own MSAL device-code flow and hand over the result.
+Feasible because `POST api/auth/loginWithAzureAD` is `[SignumAllowAnonymous]` and accepts a **raw
+`idToken`**, validating it against the tenant's JWKS with `ValidAudience = config.ApplicationID`
+and, for workforce Entra, `ValidIssuer = https://login.microsoftonline.com/{DirectoryID}/v2.0`
+(`AzureAuthenticationServer.cs:81-106`). A genuine token exchange: the CLI acquires a token by any
+means and hands it over.
+
+Per [ADR 0004](../decisions/0004-entra-primary-identity-provider.md), the device code grant is
+**hand-rolled over plain HTTP — no MSAL** — so Entra support costs nothing in binary size or
+NativeAOT risk.
 
 **Acceptance Criteria:**
-- AC-10.1: The CLI runs an MSAL device-code flow, prints the code and URL, polls for completion, then posts the resulting `idToken`.
-- AC-10.2: `ApplicationID` and `DirectoryID` are configurable per profile — the framework ships **no** device-code client, so nothing is discoverable here.
-- AC-10.3: Audience/issuer rejection is reported as a configuration mismatch naming which claim failed, not as a generic auth failure.
-- AC-10.4: This path is additive; it never becomes a prerequisite for non-Entra deployments.
-- AC-10.5: MSAL must not compromise the NativeAOT build (REQ-071). **If it cannot be made AOT-clean, this story is deferred, not worked around.**
+- AC-10.1: The CLI performs the OAuth 2.0 device authorization grant directly against Entra: `POST /oauth2/v2.0/devicecode`, then polls `POST /oauth2/v2.0/token` with `grant_type=urn:ietf:params:oauth:grant-type:device_code`.
+- AC-10.2: The user code and verification URL are printed prominently; the CLI polls at the server-supplied `interval` and honours `slow_down` by increasing it.
+- AC-10.3: `authorization_pending`, `slow_down`, `expired_token`, and `authorization_declined` are each handled distinctly — `expired_token` and `authorization_declined` terminate rather than loop.
+- AC-10.4: The resulting `idToken` is posted to `api/auth/loginWithAzureAD`, and the returned Signum bearer token is persisted per STORY-04. Every Entra login funnels into the same credential store as every other path.
+- AC-10.5: No MSAL or other identity SDK is taken as a dependency. The implementation is `HttpClient` + `JsonNode` only, so it stays AOT-clean (REQ-071).
+- AC-10.6: Tenant id, client id, scopes, and `AzureADType` are configurable per profile. **None of it is discoverable** — the framework ships no device-code client and exposes these values only to the browser.
+- AC-10.7: The issuer is derived from `AzureADType` (`AzureAD` | `B2C` | `ExternalID` — `AzureADConfigurationEmbedded.cs:132-139`). `login.microsoftonline.com` is **never hardcoded**; B2C and Entra External ID have different authorities.
+- AC-10.8: An `aud` or `iss` rejection is reported as a **configuration mismatch naming the failing claim and the expected value**, never as a generic auth failure. This is the single most likely first-run failure — see the audience note below.
+- AC-10.9: `accessToken` is sent alongside `idToken`, since it feeds the Graph-backed user context (`AzureClaimsAutoCreateUserContext`). If auto-user-creation needs a Graph scope, that scope is configurable. **[TEST]**
+- AC-10.10: If the tenant blocks the device code grant by Conditional Access, the error names that as the likely cause and points at the `--web` and API-key alternatives.
+- AC-10.11: The device code and the resulting tokens are never written to logs or trace output (STORY-11).
+
+> **The audience trap.** Signum validates `aud == ApplicationID` — the *web app's* registration —
+> and an `id_token`'s `aud` is whichever client requested it. So a CLI with its own registration
+> gets a token Signum rejects, unless the target app opts in via
+> `AzureAuthenticationServer.ExtraValidAudiences` (`:78,93`), a static hook that exists for exactly
+> this and needs **no framework change**. ADR 0004 lays out the three options; **which one applies
+> is still open** and is a tenant-configuration question. Until it is answered, AC-10.8 is what
+> makes the failure diagnosable instead of baffling.
 
 ---
 
@@ -263,7 +293,7 @@ approve its use against production.
 | STORY-07 Log out | REQ-001, REQ-006 | v1 |
 | STORY-08 Understand a denial | REQ-007, REQ-052 | v1 |
 | STORY-09 Non-interactive | REQ-050, REQ-054, REQ-074 | v1 |
-| STORY-10 Entra device code | REQ-005 | v2 |
+| STORY-10 Entra device code | REQ-005 | **v1** — primary path for the target app |
 | STORY-11 No credential leakage | REQ-006, REQ-053, REQ-074 | v1 |
 
 ## Deliberately not covered

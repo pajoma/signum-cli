@@ -75,9 +75,9 @@ The owner's guidance: **behave like `gh`** — authenticate either by pasting an
 |---|---|---|
 | REQ-001 | v1 | **Connection profiles.** Named profiles for multiple target apps/environments, resolved in the order: `--url`/`--profile` flag → env var → config file → error. `signum auth login`, `auth status`, `auth logout`, `auth switch`. Never require a config file to exist. |
 | REQ-002 | v1 | **API-key authentication.** `X-ApiKey` header. **Never** the `apiKey` query parameter — `RestLogFilter.cs:36-38` persists whole query strings into `RestLogEntity.QueryString`, so a key in a URL is written to the customer's database in plaintext. Detect and report clearly when the target app lacks `Signum.Rest`. |
-| REQ-003 | v1 | **Username/password → bearer.** `POST api/auth/login` → `Authorization: Bearer`. **Must adopt the `New_Token` response header** (`AuthTokensServer.cs:66-102`) or the client silently 403s after ~30 min. Token is opaque (not a JWT) — never parse it for expiry. |
+| REQ-003 | v1 | **Username/password → bearer.** `POST api/auth/login` → `Authorization: Bearer`. **Must adopt the `New_Token` response header** (`AuthTokensServer.cs:85-94`): tokens never expire, so ignoring it does *not* 403 — it costs a DB hit per request and **freezes the user's role permanently** (`RoleEntity.cs:33`). Token is opaque (not a JWT, no MAC) — never parse it. A bad token degrades silently to anonymous, so verify via `api/auth/currentUser` after loading one. Never auto-retry a failed login: `MaxFailedLoginAttempts` deactivates the account. |
 | REQ-004 | v1 | **Browser-based login.** `gh auth login --web` equivalent. **Confirmed feasible with no framework changes** (spike 2026-07-25): `POST api/auth/loginWithOpenID` is `[SignumAllowAnonymous]`, takes `{Code, RedirectUri}`, and Signum does not validate the redirect URI — so a loopback callback works and the CLI needs no `client_secret`. Requires the target app to run `Signum.Authorization.OpenID`. Two known limits: PKCE is unimplemented server-side, and `client_id`/scopes must be configured until a 2-line upstream change exposes them. See [STORY-01](stories/auth.md). |
-| REQ-005 | v2 | **External IdP authentication.** `loginWithAzureAD` accepts a raw `idToken` with `aud`/`iss` validation — a genuine token exchange, so the CLI can run its own MSAL device-code flow ([STORY-10](stories/auth.md)). `WindowsAD` integrated auth is Windows-and-browser only, but its LDAP bind is reachable through plain `api/auth/login` with no client change. SPNEGO is out of scope. |
+| REQ-005 | v1 | **External IdP authentication.** **The target application uses Entra, making this the primary auth path** ([ADR 0004](decisions/0004-entra-primary-identity-provider.md), [STORY-10](stories/auth.md)); the device code grant is hand-rolled over plain HTTP with no MSAL, to protect the NativeAOT build. `loginWithAzureAD` accepts a raw `idToken` with `aud`/`iss` validation — a genuine token exchange, so the CLI runs its own device-code flow and hands the token over. `WindowsAD` integrated auth is Windows-and-browser only, but its LDAP bind is reachable through plain `api/auth/login` with no client change. SPNEGO is out of scope. |
 | REQ-006 | v1 | **Credential handling.** Tokens and keys stored with owner-only file permissions (or OS keychain where available), never in the repo, never in shell history via required flags, never in logs, traces, error messages, or crash output. Prefer env vars for CI. Redaction is REQ-053's responsibility to enforce. |
 | REQ-007 | v1 | **Identity check.** `signum auth status` / `whoami` — confirm reachability, auth mechanism in use, authenticated user, and app version, in one call. First thing anyone runs when something is wrong. |
 
@@ -191,8 +191,10 @@ Not yet answerable; each blocks a requirement.
    (ADR 0003)
 4. **What is the filter expression syntax?** (REQ-021) Needs a concrete proposal — it is the
    primary interface for three of the four consumer types.
-5. **Which Signum app do we test against?** Southwind, or an internal instance? Gates REQ-077
-   and all verification.
+5. **Entra integration specifics.** The target app uses Entra, so testing is against it, later.
+   Still unknown and blocking STORY-10's criteria: which Signum module fronts Entra (`AzureAD` or
+   `OpenID`), which audience strategy the tenant permits, which `AzureADType`, and whether
+   Conditional Access allows the device code grant. See ADR 0004.
 6. **What is `queryKey`, exactly, in user terms?** Whether users address queries by type name,
    by registered query key, or both, affects REQ-011 and REQ-020 ergonomics.
 
