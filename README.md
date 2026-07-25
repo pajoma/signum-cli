@@ -9,8 +9,8 @@ against a running Signum app.
 > (see [`docs/requirements.md`](docs/requirements.md) and the issues labelled
 > [`requirement`](https://github.com/pajoma/signum-cli/labels/requirement)).
 
-Planned shape: a **self-contained native executable** — one file, no runtime to install —
-built with C# / .NET 10 and NativeAOT.
+Planned shape: a **self-contained native executable** — one file, no runtime to install — written
+in **Rust** ([ADR 0005](docs/decisions/0005-rust-implementation.md)).
 
 ## Why
 
@@ -40,12 +40,14 @@ carefully-sourced hypothesis, and see the verification note at the end of `docs/
 
 ## Decisions
 
-**Settled.** [C# / .NET 10, NativeAOT single binary](docs/decisions/0001-implementation-language.md).
-Less obvious than it looks: because the API is generic the client must be metadata-driven in
-any language, and because the binary must be dependency-free, AOT rules out reusing
-`Signum.Utilities`. Both technical arguments for C# therefore evaporate — it wins on audience
-and ecosystem fit. [Distribution mechanics](docs/decisions/0003-self-contained-distribution.md)
-cover the AOT constraints and per-platform release story.
+**Settled.** [Rust, statically linked single binary](docs/decisions/0005-rust-implementation.md).
+The API is generic, so the client must be metadata-driven and no framework code is reusable in *any*
+language — which left the earlier C# choice resting on audience alone
+([ADR 0001](docs/decisions/0001-implementation-language.md), now superseded). Rust was chosen while
+reversal was still free, partly because the two highest-stakes correctness risks — `ResultTable`
+de-interning and `modified` propagation, both of which fail *silently* — can be made unrepresentable
+in the type system rather than merely tested.
+[Distribution mechanics](docs/decisions/0003-self-contained-distribution.md) cover the release story.
 
 **Open.** [MCP relationship](docs/decisions/0002-mcp-vs-http.md) — `Extensions/Signum.Agent`
 already ships a real MCP server whose skills overlap this CLI's scope. Recommendation: build

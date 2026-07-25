@@ -13,9 +13,9 @@ Do not rebuild those here.
 
 **Status: pre-implementation.** No code exists yet.
 
-**Decided:** C# / .NET 10, shipped as a **NativeAOT self-contained single binary** — one file,
-no runtime to install ([ADR 0001](docs/decisions/0001-implementation-language.md),
-[ADR 0003](docs/decisions/0003-self-contained-distribution.md)).
+**Decided:** **Rust**, shipped as a statically linked single binary — one file, no runtime to
+install ([ADR 0005](docs/decisions/0005-rust-implementation.md), which supersedes ADR 0001;
+[ADR 0003](docs/decisions/0003-self-contained-distribution.md) for distribution mechanics).
 
 **Decided:** deterministic HTTP core, depending on nothing server-side; the CLI additionally
 exposes *itself* as an MCP server so agents can drive any Signum app
@@ -139,27 +139,36 @@ server, mark it `✅ verified against <version>`. When you find a doc claim to b
 it in the same change. Nothing in `docs/` has been exercised against a running server yet —
 it is all read from source at `74bd24693d`.
 
-### Stay NativeAOT-clean
+### Stay statically self-contained
 
-The binary must be self-contained with no dependencies, which forbids a specific list of
-things. Full table and rationale in [ADR 0003](docs/decisions/0003-self-contained-distribution.md);
-the ones you will actually reach for by reflex:
+The binary must be one file with no dependencies (REQ-070,
+[ADR 0003](docs/decisions/0003-self-contained-distribution.md),
+[ADR 0005](docs/decisions/0005-rust-implementation.md)). Non-negotiable:
 
-- **No `ProjectReference` to `Signum.Utilities` or `Signum`.** The framework is a reference to
-  *read*, not a dependency — its `ExpressionTrees/` calls `.Compile()` and its `Csv`/
-  `DescriptionManager`/`GenericInvoker` are reflection-driven, none of which survives AOT. This
-  repo needs no framework submodule. Write the console layer.
-- **No `Expression.Compile()`, `Reflection.Emit`, `Assembly.Load`, or
-  `Activator.CreateInstance` on open-ended types.**
-- **No reflection-based `JsonSerializer.Serialize<T>(obj)`.** Use `JsonNode`/`JsonDocument`
-  for the dynamic entity and `ResultTable` payloads, and a source-generated
-  `JsonSerializerContext` for our own fixed DTOs.
-- **No shelling out** to `dotnet`, `curl`, `jq`, or `git`. In-process only.
-- **Must run with zero setup** — flags and env vars, never a required external config file.
+- **`rustls`, never `native-tls`/OpenSSL.** An OpenSSL dependency breaks static linking and
+  reintroduces a system dependency. Applies transitively — check any crate that does TLS.
+- **`serde_json` with the `preserve_order` feature.** The default `Map` is a `BTreeMap`
+  (alphabetical); AC-31.4 requires entity JSON to emit special properties **first**, which needs
+  insertion order (IndexMap). Without this, writes can be rejected and the cause is non-obvious.
+- **Build for `x86_64-unknown-linux-musl`** so the Linux binary is fully static.
+- **`#![forbid(unsafe_code)]`.** Nothing here needs `unsafe`.
+- **Warnings and clippy lints deny in CI.**
+- **No shelling out** to `curl`, `jq`, or `git`. In-process only.
+- **Must run with zero setup** — flags and env vars, never a required config file.
+- **Keep the dependency set minimal.** Every crate is a supply-chain and audit cost; the approved
+  direction is in ADR 0005. The filter-DSL parser is deliberately hand-rolled.
 
-`IL2xxx`/`IL3xxx` trim and AOT warnings are **errors**. Do not suppress them to make a build
-pass; fix the cause or raise it. Retrofitting AOT-cleanliness is far more expensive than
-maintaining it.
+### Encode the two silent-corruption risks in the type system
+
+The highest-stakes requirements are the two that fail *quietly*, producing output that looks right:
+
+- `ResultTable` de-interning (STORY-21) — use distinct types for a raw versus resolved result table so
+  no renderer can accept an un-de-interned row.
+- `modified` propagation (STORY-32) — make a write payload constructible **only** via the propagating
+  serializer.
+
+Rust was chosen partly because these can be made unrepresentable rather than merely tested
+([ADR 0005](docs/decisions/0005-rust-implementation.md)). Do not weaken them to plain runtime checks.
 
 ## Conventions
 
@@ -191,11 +200,12 @@ wrapper around remote code execution is a materially worse problem than the web 
 
 ## Environment
 
-**No .NET SDK installed** — nothing builds until .NET 10.x is present. Node v22.23.1 exists but
-is irrelevant now that ADR 0001 chose C#.
+**No Rust toolchain installed** — check `cargo --version` and install via rustup before any build.
+Node v22.23.1 is present but irrelevant, and no .NET SDK is needed now.
 
-Before building anything substantial, do a hello-world `PublishAot=true` publish and record the
-real binary size, startup time, and warning cleanliness in ADR 0003 — every AOT number in these
-docs is a documented-behaviour expectation, **not a measurement**.
+First implementation task: a hello-world `x86_64-unknown-linux-musl` build with the real dependency
+set, then record actual binary size and startup time in
+[ADR 0005](docs/decisions/0005-rust-implementation.md). Every figure in these docs is currently an
+expectation, **not a measurement**.
 
 Reading the framework needs no toolchain at all.

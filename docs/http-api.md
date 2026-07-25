@@ -127,9 +127,9 @@ Caveats: **PKCE is not implemented** (zero repo-wide hits), and `client_id`/scop
 by any API. Full flow and acceptance criteria: [`stories/auth.md`](stories/auth.md) STORY-01.
 
 `POST api/auth/loginWithAzureAD` accepts a raw `idToken`, validating `aud`/`iss` — a genuine token
-exchange, so a CLI can run its own device-code flow and hand the token over. **The target
-application uses Entra, making this the primary auth path** — the grant is hand-rolled over plain
-HTTP with no MSAL, to keep the NativeAOT build clean. See
+exchange, so a CLI can run its own device-code flow and hand the token over. The grant is hand-rolled over plain HTTP
+(no identity SDK). **Note:** for the target application this path is *blocked* on an Entra
+app-registration change; see the target profile. See
 [`decisions/0004-entra-primary-identity-provider.md`](decisions/0004-entra-primary-identity-provider.md)
 and STORY-10. Note the audience trap: Signum validates `aud == ApplicationID`, so a CLI with its own
 app registration needs the app to opt in via `AzureAuthenticationServer.ExtraValidAudiences`.

@@ -8,11 +8,11 @@ Quick orientation:
 - **Status:** pre-implementation — currently collecting requirements
   ([`docs/requirements.md`](docs/requirements.md), tracked as GitHub issues labelled
   `requirement`).
-- **Decided:** C# / .NET 10 as a **NativeAOT self-contained single binary**
-  ([ADR 0001](docs/decisions/0001-implementation-language.md),
-  [ADR 0003](docs/decisions/0003-self-contained-distribution.md)). Consequence: **no
-  `ProjectReference` to the framework** — it is reference-only, and AOT forbids reflection,
-  `Expression.Compile()`, and reflection-based JSON.
+- **Decided:** **Rust**, as a statically linked single binary
+  ([ADR 0005](docs/decisions/0005-rust-implementation.md), superseding ADR 0001;
+  [ADR 0003](docs/decisions/0003-self-contained-distribution.md)). The framework is a **reference to
+  read, never a dependency** — nothing is reusable from it in any language, because the API is
+  generic. Hard rules: `rustls` never OpenSSL, and `serde_json` with `preserve_order`.
 - **Still open:** [ADR 0002](docs/decisions/0002-mcp-vs-http.md) — MCP relationship.
 - **Before writing request code:** read [`docs/http-api.md`](docs/http-api.md).
 - **The framework** is a sibling checkout at `../signum-framework` — read it, never modify it.

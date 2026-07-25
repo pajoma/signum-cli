@@ -254,15 +254,15 @@ and, for workforce Entra, `ValidIssuer = https://login.microsoftonline.com/{Dire
 means and hands it over.
 
 Per [ADR 0004](../decisions/0004-entra-primary-identity-provider.md), the device code grant is
-**hand-rolled over plain HTTP — no MSAL** — so Entra support costs nothing in binary size or
-NativeAOT risk.
+**hand-rolled over plain HTTP** — two calls plus polling — so Entra support costs nothing in binary
+size or dependency risk.
 
 **Acceptance Criteria:**
 - AC-10.1: The CLI performs the OAuth 2.0 device authorization grant directly against Entra: `POST /oauth2/v2.0/devicecode`, then polls `POST /oauth2/v2.0/token` with `grant_type=urn:ietf:params:oauth:grant-type:device_code`.
 - AC-10.2: The user code and verification URL are printed prominently; the CLI polls at the server-supplied `interval` and honours `slow_down` by increasing it.
 - AC-10.3: `authorization_pending`, `slow_down`, `expired_token`, and `authorization_declined` are each handled distinctly — `expired_token` and `authorization_declined` terminate rather than loop.
 - AC-10.4: The resulting `idToken` is posted to `api/auth/loginWithAzureAD`, and the returned Signum bearer token is persisted per STORY-04. Every Entra login funnels into the same credential store as every other path.
-- AC-10.5: No MSAL or other identity SDK is taken as a dependency. The implementation is `HttpClient` + `JsonNode` only, so it stays AOT-clean (REQ-071).
+- AC-10.5: No identity SDK is taken as a dependency; the implementation is plain HTTP + JSON, keeping the dependency set minimal (REQ-071).
 - AC-10.6: Tenant id, client id, scopes, and `AzureADType` are configurable per profile. **None of it is discoverable** — the framework ships no device-code client and exposes these values only to the browser.
 - AC-10.7: The issuer is derived from `AzureADType` (`AzureAD` | `B2C` | `ExternalID` — `AzureADConfigurationEmbedded.cs:132-139`). `login.microsoftonline.com` is **never hardcoded**; B2C and Entra External ID have different authorities.
 - AC-10.8: An `aud` or `iss` rejection is reported as a **configuration mismatch naming the failing claim and the expected value**, never as a generic auth failure. This is the single most likely first-run failure — see the audience note below.

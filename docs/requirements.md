@@ -23,7 +23,7 @@ A **self-contained native executable** that talks to a running Signum Framework 
 over HTTP: dynamic queries, entity retrieve/save, operation execution — plus an MCP server
 mode so agents can drive any Signum app.
 
-Decided: [C# / .NET 10 + NativeAOT](decisions/0001-implementation-language.md) ·
+Decided: [Rust, statically linked](decisions/0005-rust-implementation.md) ·
 [self-contained distribution](decisions/0003-self-contained-distribution.md) ·
 [MCP relationship](decisions/0002-mcp-vs-http.md).
 
@@ -61,8 +61,7 @@ Explicitly out of scope. Recorded so they are not re-proposed:
   execution paths with known authorization gaps
   ([overview §14](architecture-overview.md)); a convenient CLI wrapper around them would be
   materially worse than the web endpoint. Requires explicit discussion to revisit.
-- **A "typed mode"** that loads an app's entity assemblies. Incompatible with NativeAOT; would
-  be a different tool.
+- **A "typed mode"** that loads an app's entity assemblies. Impossible in Rust and pointless besides — the API is generic; it would be a different tool.
 
 ### Priority key
 
@@ -85,7 +84,7 @@ The owner's guidance: **behave like `gh`** — authenticate either by pasting an
 | REQ-002 | v2 | **API-key authentication.** **Not available on the target application — it has no `Signum.Rest`**, so there is no `X-ApiKey` authenticator and `api/restApiKey/*` is absent; retained because the CLI must work against any Signum app (REQ-075). `X-ApiKey` header. **Never** the `apiKey` query parameter — `RestLogFilter.cs:36-38` persists whole query strings into `RestLogEntity.QueryString`, so a key in a URL is written to the customer's database in plaintext. Detect and report clearly when the target app lacks `Signum.Rest`. |
 | REQ-003 | v2 | **Username/password → bearer.** **Cannot work for the target application:** `AzureADAuthorizer.Login()` delegates to the local password check (`AzureADAuthorizer.cs:15-18`) and Entra-provisioned users get `PasswordHash = null` (`:43`), which `AuthLogic.cs:434` turns into `IncorrectPasswordException`. Must never be attempted automatically — failures count toward `MaxFailedLoginAttempts` and can deactivate the account. `POST api/auth/login` → `Authorization: Bearer`. **Must adopt the `New_Token` response header** (`AuthTokensServer.cs:85-94`): tokens never expire, so ignoring it does *not* 403 — it costs a DB hit per request and **freezes the user's role permanently** (`RoleEntity.cs:33`). Token is opaque (not a JWT, no MAC) — never parse it. A bad token degrades silently to anonymous, so verify via `api/auth/currentUser` after loading one. Never auto-retry a failed login: `MaxFailedLoginAttempts` deactivates the account. |
 | REQ-004 | v1 | **Browser-based login.** `gh auth login --web` equivalent. **Confirmed feasible with no framework changes** (spike 2026-07-25): `POST api/auth/loginWithOpenID` is `[SignumAllowAnonymous]`, takes `{Code, RedirectUri}`, and Signum does not validate the redirect URI — so a loopback callback works and the CLI needs no `client_secret`. Requires the target app to run `Signum.Authorization.OpenID`. Two known limits: PKCE is unimplemented server-side, and `client_id`/scopes must be configured until a 2-line upstream change exposes them. See [STORY-01](stories/auth.md). |
-| REQ-005 | v2 | **External IdP authentication.** The target application uses Entra, but this path is **blocked on an Entra app-registration change we cannot currently make** — Signum validates `aud == ApplicationID` and we control neither the app config nor the tenant, so REQ-008 is the primary path instead ([ADR 0004](decisions/0004-entra-primary-identity-provider.md), [STORY-10](stories/auth.md)); the device code grant is hand-rolled over plain HTTP with no MSAL, to protect the NativeAOT build. `loginWithAzureAD` accepts a raw `idToken` with `aud`/`iss` validation — a genuine token exchange, so the CLI runs its own device-code flow and hands the token over. `WindowsAD` integrated auth is Windows-and-browser only, but its LDAP bind is reachable through plain `api/auth/login` with no client change. SPNEGO is out of scope. |
+| REQ-005 | v2 | **External IdP authentication.** The target application uses Entra, but this path is **blocked on an Entra app-registration change we cannot currently make** — Signum validates `aud == ApplicationID` and we control neither the app config nor the tenant, so REQ-008 is the primary path instead ([ADR 0004](decisions/0004-entra-primary-identity-provider.md), [STORY-10](stories/auth.md)); the device code grant is hand-rolled over plain HTTP (no identity SDK), keeping the dependency set minimal. `loginWithAzureAD` accepts a raw `idToken` with `aud`/`iss` validation — a genuine token exchange, so the CLI runs its own device-code flow and hands the token over. `WindowsAD` integrated auth is Windows-and-browser only, but its LDAP bind is reachable through plain `api/auth/login` with no client change. SPNEGO is out of scope. |
 | REQ-006 | v1 | **Credential handling.** Tokens and keys stored with owner-only file permissions (or OS keychain where available), never in the repo, never in shell history via required flags, never in logs, traces, error messages, or crash output. Prefer env vars for CI. Redaction is REQ-053's responsibility to enforce. |
 | REQ-008 | v1 | **Browser token handoff.** `auth login --with-token` accepts a Signum bearer token obtained from an existing browser session (`sessionStorage.authToken`, `AuthClient.tsx:189,198`), read from **stdin only**. **The *only* viable mechanism for the target application** (ADR 0004 Decision 4: no `Signum.Rest` rules out API keys, and null `PasswordHash` rules out password login), because it needs no change to the Signum configuration and none to the Entra tenant — the browser satisfies SSO/MFA/Conditional Access. Auto-upgrades to a durable API key via `GET api/restApiKey/current` where that endpoint exists (a silent no-op on the target app) ([ADR 0004](decisions/0004-entra-primary-identity-provider.md) Decision 3, [STORY-12](stories/auth.md)). |
 | REQ-007 | v1 | **Identity check.** `signum auth status` / `whoami` — confirm reachability, auth mechanism in use, authenticated user, and app version, in one call. First thing anyone runs when something is wrong. |
@@ -179,9 +178,9 @@ Resolves [ADR 0002](decisions/0002-mcp-vs-http.md) option C2. Motivated by "AI a
 | ID | Priority | Requirement |
 |---|---|---|
 | REQ-070 | v1 | **Self-contained, no dependencies.** One executable, dropped anywhere, runs — no runtime install, no external tools, no required config file. Per [ADR 0003](decisions/0003-self-contained-distribution.md). |
-| REQ-071 | v1 | **NativeAOT-clean.** No reflection-based JSON, no `Expression.Compile()`, no `Reflection.Emit`, no `Assembly.Load`, no `ProjectReference` to the framework. `IL2xxx`/`IL3xxx` warnings are **errors** from the first commit. |
+| REQ-071 | v1 | **Statically self-contained build.** `rustls` never `native-tls`/OpenSSL (an OpenSSL dependency breaks static linking); `serde_json` with the `preserve_order` feature (AC-31.4 needs insertion-ordered keys); target `x86_64-unknown-linux-musl`; `#![forbid(unsafe_code)]`; warnings and clippy deny in CI; minimal dependency set. No framework code is a dependency — it is reference-only. See [ADR 0005](decisions/0005-rust-implementation.md). |
 | REQ-072 | v2 | **Startup budget.** Fast enough for interactive and per-invocation agent use. Set a concrete budget once measured — **no AOT figure in these docs has been measured** (no .NET SDK on the dev machine yet). |
-| REQ-073 | v2 | **Cross-platform releases.** linux-x64 first; then linux-arm64, osx-arm64, osx-x64, win-x64. Needs one CI runner per OS family (NativeAOT does not cross-compile comfortably). Publish checksums; decide signing before the first public release — unsigned macOS binaries are Gatekeeper-quarantined. |
+| REQ-073 | v2 | **Cross-platform releases.** linux-x64 first; then linux-arm64, osx-arm64, osx-x64, win-x64. Linux and Windows targets are reachable from one host via `cargo-zigbuild`/`cross`; macOS realistically still wants a macOS runner. Publish checksums; decide signing before the first public release — unsigned macOS binaries are Gatekeeper-quarantined. |
 | REQ-074 | v1 | **No credential leakage.** No key, token, or password may appear in stdout, stderr, logs, traces, telemetry, crash output, or any file except the credential store. Tested, not merely intended. |
 | REQ-075 | v1 | **Works against any Signum app.** No server-side module required. The one documented exception is API-key auth (REQ-002), which needs `Signum.Rest` — degrade to REQ-003 with a clear message. |
 | REQ-076 | v2 | **Version and capability detection.** Detect the target app's framework version and available modules; degrade gracefully and say so, rather than failing obscurely, when something is absent. |
@@ -196,8 +195,8 @@ Not yet answerable; each blocks a requirement.
 1. **Is browser-based login possible at all** without framework changes? (REQ-004) — the
    single largest unknown, and it gates the `gh`-like experience the owner asked for.
 2. **Which IdP flows work headlessly** for `WindowsAD` / `AzureAD` / `OpenID`? (REQ-005)
-3. **Is `System.CommandLine` AOT-clean** in its current release, or do we hand-roll parsing?
-   (ADR 0003)
+3. **Is the `rmcp` Rust MCP SDK mature enough** for REQ-060, or do we hand-roll JSON-RPC over stdio?
+   (ADR 0005)
 4. **What is the filter expression syntax?** (REQ-021) Needs a concrete proposal — it is the
    primary interface for three of the four consumer types.
 5. **Entra integration specifics.** The target app uses Entra, so testing is against it, later.
@@ -291,7 +290,7 @@ Requirement IDs are stable; issue numbers are not a substitute for them.
 | ID | Issue | Priority | Title |
 |---|---|---|---|
 | REQ-070 | [#40](https://github.com/pajoma/signum-cli/issues/40) | `v1` | Self-contained, no dependencies |
-| REQ-071 | [#41](https://github.com/pajoma/signum-cli/issues/41) | `v1` | NativeAOT-clean |
+| REQ-071 | [#41](https://github.com/pajoma/signum-cli/issues/41) | `v1` | Statically self-contained build |
 | REQ-072 | [#42](https://github.com/pajoma/signum-cli/issues/42) | `v2` | Startup budget |
 | REQ-073 | [#43](https://github.com/pajoma/signum-cli/issues/43) | `v2` | Cross-platform releases |
 | REQ-074 | [#44](https://github.com/pajoma/signum-cli/issues/44) | `v1` | No credential leakage |

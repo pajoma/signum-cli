@@ -83,7 +83,7 @@ Why not `Microsoft.Identity.Client` (MSAL.NET):
   interactive flows — is small when we only need one grant type and already have our own
   credential store (STORY-04).
 
-This also means Entra support costs the binary nothing in size or AOT risk.
+This also means Entra support costs the binary nothing in size or dependency risk. **Still valid under [ADR 0005](0005-rust-implementation.md)** — MSAL was never an option in Rust either, and the grant remains two HTTP calls plus polling, now `ureq` + `serde_json` rather than `HttpClient` + `JsonNode`.
 
 > Reversal trigger: if we later need interactive/broker/WAM flows or certificate-based client
 > auth, re-evaluate. A `--web` loopback flow (STORY-01) is likewise plain HTTP and needs no MSAL.

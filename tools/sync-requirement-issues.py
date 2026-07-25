@@ -64,6 +64,7 @@ for c in created:
     bf = pathlib.Path(f"/tmp/body-{r['id']}.md")
     bf.write_text(body_for(r), encoding="utf-8")
     p = subprocess.run(["gh", "issue", "edit", c["number"], "--repo", REPO,
+                        "--title", f"{r['id']} — {r['title']}",
                         "--body-file", str(bf)], capture_output=True, text=True)
     bf.unlink(missing_ok=True)
     if p.returncode != 0:

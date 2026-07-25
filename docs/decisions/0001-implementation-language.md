@@ -1,6 +1,14 @@
 # ADR 0001 — Implementation language
 
-**Status:** ACCEPTED — C# / .NET 10, built as a NativeAOT single binary
+**Status:** ⚠️ **SUPERSEDED** by [ADR 0005 — Rust](0005-rust-implementation.md) on 2026-07-25.
+
+> Kept because its central analysis still holds and underpins the replacement: the Signum API is
+> generic, so no DTO or converter reuse is possible in *any* language, and NativeAOT forbids reusing
+> `Signum.Utilities`. Those findings left C# winning on audience alone — a thin enough basis that the
+> decision was revisited while reversal was still free. **The language conclusion below is no longer
+> in force.**
+
+**Original status:** ACCEPTED — C# / .NET 10, built as a NativeAOT single binary
 **Date raised:** 2026-07-25
 **Date decided:** 2026-07-25
 **Constraint added by owner:** the CLI must be a **self-contained executable with no

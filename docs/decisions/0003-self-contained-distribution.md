@@ -6,7 +6,24 @@
 dependencies** — one file, dropped anywhere, runs. No .NET runtime install, no `node_modules`,
 no PATH prerequisites.
 
-Language decision and why AOT: [ADR 0001](0001-implementation-language.md).
+Language decision: [ADR 0005 — Rust](0005-rust-implementation.md), which supersedes ADR 0001.
+
+> **Updated 2026-07-25.** The *requirement* — one file, no dependencies — is unchanged. Only the
+> mechanics below changed with the move from C#/NativeAOT to Rust. Where this document still describes
+> `PublishAot`, `IL2xxx`, or `dotnet publish`, read it as historical; the Rust equivalents are:
+>
+> | Was (C#/AOT) | Now (Rust) |
+> |---|---|
+> | `dotnet publish -r <rid> -p:PublishAot=true` | `cargo build --release --target <triple>` |
+> | `PublishSingleFile` fallback | no fallback needed — static linking is the default output |
+> | `IL2xxx`/`IL3xxx` warnings as errors | `deny(warnings)` + clippy in CI; `#![forbid(unsafe_code)]` |
+> | no reflection / no `Expression.Compile()` | not applicable — Rust has no reflection |
+> | `InvariantGlobalization=false` to keep ICU | no ICU dependency; culture handling is explicit in code |
+> | per-RID, one CI runner per OS family | `x86_64-unknown-linux-musl` first; Linux+Windows from one host via `cargo-zigbuild`/`cross`, macOS still wants a macOS runner |
+>
+> Two Rust-specific hard requirements are recorded in ADR 0005: **`rustls` never OpenSSL** (an OpenSSL
+> dependency breaks static self-containment) and **`serde_json` with `preserve_order`** (needed for
+> AC-31.4's key ordering).
 
 ## Decision
 
