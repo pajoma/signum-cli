@@ -6,7 +6,12 @@
 dependencies** — one file, dropped anywhere, runs. No .NET runtime install, no `node_modules`,
 no PATH prerequisites.
 
-Language decision: [ADR 0005 — Rust](0005-rust-implementation.md), which supersedes ADR 0001.
+Language decision: [ADR 0006 — TypeScript + Bun](0006-typescript-bun.md), which supersedes ADR 0005 and ADR 0001.
+
+> **Superseded mechanics.** The was/now table below documents the C#→Rust move and is retained as
+> history. The current build is `bun build --compile --target=<t>`, and **cross-compilation is solved** —
+> all five targets build from one Linux host (measured, ADR 0006), so the per-OS CI matrix this document
+> worries about no longer applies.
 
 > **Updated 2026-07-25.** The *requirement* — one file, no dependencies — is unchanged. Only the
 > mechanics below changed with the move from C#/NativeAOT to Rust. Where this document still describes

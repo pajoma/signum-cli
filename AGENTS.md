@@ -13,16 +13,18 @@ Do not rebuild those here.
 
 **Status: pre-implementation.** No code exists yet.
 
-**Decided:** **Rust**, shipped as a statically linked single binary — one file, no runtime to
-install ([ADR 0005](docs/decisions/0005-rust-implementation.md), which supersedes ADR 0001;
-[ADR 0003](docs/decisions/0003-self-contained-distribution.md) for distribution mechanics).
+**Decided:** **TypeScript compiled with Bun** to a single executable — one file, no runtime to
+install ([ADR 0006](docs/decisions/0006-typescript-bun.md), superseding ADR 0005 and ADR 0001;
+[ADR 0003](docs/decisions/0003-self-contained-distribution.md) for distribution). This is the first
+language choice backed by **measurements on this hardware**: 91 MB, 24 ms startup, and all five release
+targets cross-compiled from one Linux host.
 
 **Decided:** deterministic HTTP core, depending on nothing server-side; the CLI additionally
 exposes *itself* as an MCP server so agents can drive any Signum app
 ([ADR 0002](docs/decisions/0002-mcp-vs-http.md)).
 
-**Requirements** are collected in [`docs/requirements.md`](docs/requirements.md) — 48 of them,
-mirrored as issues `#1`–`#47` and `#49`, labelled
+**Requirements** are collected in [`docs/requirements.md`](docs/requirements.md) — 51 of them,
+mirrored as issues `#1`–`#47` and `#49`–`#52`, labelled
 [`requirement`](https://github.com/pajoma/signum-cli/labels/requirement) plus a milestone. That
 document is the source of truth; keep it and the issues in sync, via
 `tools/sync-requirement-issues.py`.
@@ -31,8 +33,8 @@ document is the source of truth; keep it and the issues in sync, via
 
 | | Count | Scope |
 |---|---|---|
-| [`m1`](https://github.com/pajoma/signum-cli/labels/m1) | 12 | **Read-only core.** No mutations. Safe to point at production. |
-| [`m2`](https://github.com/pajoma/signum-cli/labels/m2) | 12 | Writes, entity fidelity, concurrency, profiles, tracing. |
+| [`m1`](https://github.com/pajoma/signum-cli/labels/m1) | 13 | **Read-only core.** No mutations. Safe to point at production. |
+| [`m2`](https://github.com/pajoma/signum-cli/labels/m2) | 14 | Writes, entity fidelity, concurrency, profiles, tracing. |
 | [`m3`](https://github.com/pajoma/signum-cli/labels/m3) | 18 | MCP, scale, and the auth paths unreachable on the target app. |
 | [`always`](https://github.com/pajoma/signum-cli/labels/always) | 6 | Cross-cutting constraints; apply from the first commit, never "done". |
 
@@ -41,7 +43,7 @@ document is the source of truth; keep it and the issues in sync, via
 right to be pointed at production.
 
 **User stories** live in [`docs/stories/`](docs/stories/) and *do* carry acceptance criteria,
-tracing back to requirement ids. Written so far: [`auth.md`](docs/stories/auth.md) (STORY-01…12),
+tracing back to requirement ids. Written so far: [`auth.md`](docs/stories/auth.md) (STORY-01…12), [`privacy.md`](docs/stories/privacy.md) (STORY-50…53),
 [`query.md`](docs/stories/query.md) (STORY-20…27), [`entities.md`](docs/stories/entities.md)
 (STORY-30…34), [`operations.md`](docs/stories/operations.md) (STORY-40…46). All of REQ-001…REQ-046 is
 now storied; output/UX (REQ-050…055), MCP (REQ-060…062) and non-functional (REQ-070…077) are not.
@@ -152,36 +154,61 @@ server, mark it `✅ verified against <version>`. When you find a doc claim to b
 it in the same change. Nothing in `docs/` has been exercised against a running server yet —
 it is all read from source at `74bd24693d`.
 
-### Stay statically self-contained
+### Stay self-contained (TypeScript + Bun)
 
-The binary must be one file with no dependencies (REQ-070,
-[ADR 0003](docs/decisions/0003-self-contained-distribution.md),
-[ADR 0005](docs/decisions/0005-rust-implementation.md)). Non-negotiable:
+One executable, no runtime to install (REQ-070,
+[ADR 0006](docs/decisions/0006-typescript-bun.md)). Measured: 91 MB linux-x64, 24 ms startup, and
+**all five targets cross-compile from one Linux host**.
 
-- **`rustls`, never `native-tls`/OpenSSL.** An OpenSSL dependency breaks static linking and
-  reintroduces a system dependency. Applies transitively — check any crate that does TLS.
-- **`serde_json` with the `preserve_order` feature.** The default `Map` is a `BTreeMap`
-  (alphabetical); AC-31.4 requires entity JSON to emit special properties **first**, which needs
-  insertion order (IndexMap). Without this, writes can be rejected and the cause is non-obvious.
-- **Build for `x86_64-unknown-linux-musl`** so the Linux binary is fully static.
-- **`#![forbid(unsafe_code)]`.** Nothing here needs `unsafe`.
-- **Warnings and clippy lints deny in CI.**
+- **Build with `bun build --compile`.** There is **no npm-install distribution path** — that would
+  violate REQ-070.
+- **`fetch` and `JSON` are built in.** No HTTP client library, no TLS crate. Verified working inside a
+  `--compile` bundle.
+- **Keep the dependency tree small.** Every dependency is a supply-chain cost, and it must survive
+  bundling.
 - **No shelling out** to `curl`, `jq`, or `git`. In-process only.
-- **Must run with zero setup** — flags and env vars, never a required config file.
-- **Keep the dependency set minimal.** Every crate is a supply-chain and audit cost; the approved
-  direction is in ADR 0005. The filter-DSL parser is deliberately hand-rolled.
+- **Must run with zero setup** — flags and env vars, never a required config file. (The one accepted
+  exception is the *optional* pseudonymization policy, REQ-057.)
+- "Self-contained" means **no runtime to install**, not statically linked: the linux build links
+  `libc.so.6`. Do not over-claim it.
 
-### Encode the two silent-corruption risks in the type system
+### Types erase at runtime — so the tests are the safety net
 
-The highest-stakes requirements are the two that fail *quietly*, producing output that looks right:
+This is the concession made when we moved off Rust
+([ADR 0006](docs/decisions/0006-typescript-bun.md) cost 5). The two highest-stakes requirements fail
+*quietly*, producing output that looks correct:
 
-- `ResultTable` de-interning (STORY-21) — use distinct types for a raw versus resolved result table so
-  no renderer can accept an un-de-interned row.
-- `modified` propagation (STORY-32) — make a write payload constructible **only** via the propagating
-  serializer.
+- `ResultTable` de-interning (STORY-21) — `rows[i].columns[j]` may be an **index** into
+  `uniqueValues[...]`.
+- `modified` propagation (STORY-32) — miss an ancestor and the server reports success and discards the
+  write.
 
-Rust was chosen partly because these can be made unrepresentable rather than merely tested
-([ADR 0005](docs/decisions/0005-rust-implementation.md)). Do not weaken them to plain runtime checks.
+Required discipline:
+
+- `strict` + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes`.
+- **Branded/opaque types at the boundary**, with a single parse-and-validate layer as their *only*
+  producer. `JSON.parse` returns `any`; one cast defeats the whole scheme, so keep casts confined to
+  that layer.
+- **AC-21.3, AC-21.4, AC-31.6 and AC-32.3 are release-blocking tests.** In Rust they were
+  belt-and-braces; here they are the belt. Do not downgrade them.
+
+### Never leak personal data to a model
+
+See [ADR 0007](docs/decisions/0007-ai-caller-detection-and-pseudonymization.md) and
+[`docs/stories/privacy.md`](docs/stories/privacy.md).
+
+- **Caller detection is not a security boundary.** Every signal (`AI_AGENT`, `CLAUDECODE`, parent
+  process, TTY state) is spoofable in both directions and absent for unknown agents. It exists only to
+  pick a **stricter** default, and it must **fail closed** — anything not provably `interactive` is at
+  least `automated`. Never describe it as a guarantee, in code comments or help text.
+- **m1 refuses to emit row data under a detected `agent` context** without an explicit acknowledgement
+  flag (AC-51.2). Enforce this at the **output boundary**, in one place, so no new command can bypass it.
+- **The framework gives us nothing.** There is no `[PersonalData]` attribute or sensitivity metadata
+  anywhere in Signum, and this CLI is generic, so correct automatic classification is **impossible in
+  principle**. Heuristics are a default, not a solution — say so in output (AC-52.6).
+- **Pseudonymize, never redact** — stable surrogates keep the data usable. The surrogate→real mapping
+  **never** appears in stdout, `--json`, MCP results, traces, logs, or telemetry (AC-53.3).
+- **Never claim compliance.** Pseudonymized data is still personal data under GDPR Art. 4(5).
 
 ## Conventions
 
@@ -213,12 +240,13 @@ wrapper around remote code execution is a materially worse problem than the web 
 
 ## Environment
 
-**No Rust toolchain installed** — check `cargo --version` and install via rustup before any build.
-Node v22.23.1 is present but irrelevant, and no .NET SDK is needed now.
+Node v22.23.1 is installed. **Bun is not on `PATH`** — install it (`npm i -g bun`, or locally per
+project) before building. Nothing else is required; there is no .NET SDK or Rust toolchain and none is
+needed.
 
-First implementation task: a hello-world `x86_64-unknown-linux-musl` build with the real dependency
-set, then record actual binary size and startup time in
-[ADR 0005](docs/decisions/0005-rust-implementation.md). Every figure in these docs is currently an
-expectation, **not a measurement**.
+Unlike every earlier iteration of these docs, the build figures here are **measured**
+([ADR 0006](docs/decisions/0006-typescript-bun.md)): 91 MB linux-x64 (35 MB gzipped), 24 ms startup, and
+five targets cross-compiled from one Linux host. Still unmeasured: the darwin/windows/arm64 artifacts
+running on their actual platforms, and the MCP SDK inside a `--compile` bundle.
 
 Reading the framework needs no toolchain at all.

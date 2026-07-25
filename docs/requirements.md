@@ -23,7 +23,7 @@ A **self-contained native executable** that talks to a running Signum Framework 
 over HTTP: dynamic queries, entity retrieve/save, operation execution — plus an MCP server
 mode so agents can drive any Signum app.
 
-Decided: [Rust, statically linked](decisions/0005-rust-implementation.md) ·
+Decided: [TypeScript + Bun single executable](decisions/0006-typescript-bun.md) ·
 [self-contained distribution](decisions/0003-self-contained-distribution.md) ·
 [MCP relationship](decisions/0002-mcp-vs-http.md).
 
@@ -70,8 +70,8 @@ release — it was the whole product. This replaces it.
 
 | | Count | Meaning |
 |---|---|---|
-| **m1** | 12 | **Read-only core.** The smallest CLI that is genuinely useful and safe to point at production. No mutations at all. |
-| **m2** | 12 | **Writes and ergonomics.** Operations, entity round-trip fidelity, concurrency, profiles, tracing. |
+| **m1** | 13 | **Read-only core.** The smallest CLI that is genuinely useful and safe to point at production. No mutations at all. |
+| **m2** | 14 | **Writes and ergonomics.** Operations, entity round-trip fidelity, concurrency, profiles, tracing. |
 | **m3** | 18 | **MCP, scale, and other deployments.** Includes the four auth mechanisms unreachable on the target app. |
 | **always** | 6 | **Cross-cutting constraints**, not scheduled features. They apply from the first commit and are never "done". |
 
@@ -176,6 +176,9 @@ The owner's guidance: **behave like `gh`** — authenticate either by pasting an
 | REQ-052 | m1 | **Actionable error mapping.** Translate the server's vocabulary into remediable messages: 403 covers both "not authenticated" and "not authorized" (there is no 401) — disambiguate them; 400 carries `ValidationProblemDetails`; 500 may be a `ConcurrencyException`. Never surface a bare status code. |
 | REQ-053 | m2 | **`--explain` and tracing.** `--explain` prints the exact HTTP request that would be sent, without sending it. `-v`/`--trace` shows real request/response traffic. **Both must redact credentials** — headers, tokens, keys — with redaction tested. |
 | REQ-054 | m2 | **Input from files and stdin.** Accept entity JSON and id/Lite lists via `@file` and `-` (stdin), so the CLI composes in pipelines and agents can pass structured input without shell-quoting hazards. |
+| REQ-056 | m1 | **Caller-context detection.** Resolve `interactive` / `automated` / `agent` from TTY state, agent env markers (`AI_AGENT`, `CLAUDECODE`, `CLAUDE_CODE_*`), parent process, and `signum mcp` mode. **Fail closed** — anything not provably interactive is at least `automated`. Overridable, with loosening logged. **Never a security boundary:** every signal is spoofable in both directions and absent for unknown agents; its only job is to pick a stricter default. Under `agent`, m1 refuses to emit row data without an explicit acknowledgement flag. See [ADR 0007](decisions/0007-ai-caller-detection-and-pseudonymization.md), [STORY-50/51](stories/privacy.md). |
+| REQ-057 | m2 | **Pseudonymization.** Replace sensitive values with **stable surrogates** (not redaction), so agents can still group and correlate. Modes `off`/`heuristic`/`strict`. **The framework offers no sensitivity metadata whatsoever** — no `[PersonalData]`, nothing GDPR-aware — and the CLI is generic, so correct automatic classification is impossible in principle; heuristics (English + German member names) are a default, an explicit per-profile policy overrides them, and `strict` is allowlist-only. Must state what it pseudonymized, warn that coverage is incomplete, and **never claim compliance** — pseudonymized data remains personal data under GDPR Art. 4(5). See [STORY-52](stories/privacy.md). |
+| REQ-058 | m2 | **Local re-identification mapping.** Emit opaque `ref:…` handles in place of `Lite` keys so an agent can act on a record it cannot identify; accept `ref:…` wherever a `Lite` is taken and resolve locally before the request. Mapping stored `0600` and **never** emitted in stdout, `--json`, MCP results, traces, or telemetry. Human-only `de-pseudonymize` command; mutations via a handle are audit-logged against the real target. See [STORY-53](stories/privacy.md). |
 | REQ-055 | m3 | **Culture handling.** Dates, numbers and decimals come from a business database and Signum apps are multi-culture. Support `--culture`; document the default. Related: `InvariantGlobalization` is deliberately **off** (ADR 0003). |
 
 ---
@@ -198,9 +201,9 @@ Resolves [ADR 0002](decisions/0002-mcp-vs-http.md) option C2. Motivated by "AI a
 | ID | Priority | Requirement |
 |---|---|---|
 | REQ-070 | always | **Self-contained, no dependencies.** One executable, dropped anywhere, runs — no runtime install, no external tools, no required config file. Per [ADR 0003](decisions/0003-self-contained-distribution.md). |
-| REQ-071 | always | **Statically self-contained build.** `rustls` never `native-tls`/OpenSSL (an OpenSSL dependency breaks static linking); `serde_json` with the `preserve_order` feature (AC-31.4 needs insertion-ordered keys); target `x86_64-unknown-linux-musl`; `#![forbid(unsafe_code)]`; warnings and clippy deny in CI; minimal dependency set. No framework code is a dependency — it is reference-only. See [ADR 0005](decisions/0005-rust-implementation.md). |
+| REQ-071 | always | **Self-contained build hygiene.** `bun build --compile` single executable per target; TypeScript `strict` + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes`; branded types at the parse boundary with a single parse-and-validate layer as their only producer; minimal dependency tree; no npm-install distribution path (that would violate REQ-070). Because TS types erase at runtime, the correctness tests (AC-21.3/21.4, AC-31.6, AC-32.3) are **release-blocking** — see [ADR 0006](decisions/0006-typescript-bun.md) cost 5. |
 | REQ-072 | m3 | **Startup budget.** Fast enough for interactive and per-invocation agent use. Set a concrete budget once measured — **no AOT figure in these docs has been measured** (no .NET SDK on the dev machine yet). |
-| REQ-073 | m3 | **Cross-platform releases.** linux-x64 first; then linux-arm64, osx-arm64, osx-x64, win-x64. Linux and Windows targets are reachable from one host via `cargo-zigbuild`/`cross`; macOS realistically still wants a macOS runner. Publish checksums; decide signing before the first public release — unsigned macOS binaries are Gatekeeper-quarantined. |
+| REQ-073 | m3 | **Cross-platform releases.** linux-x64 first; then linux-arm64, osx-arm64, osx-x64, win-x64. **Measured 2026-07-25:** Bun cross-compiles linux-x64, linux-x64-musl, linux-arm64, darwin-arm64 and windows-x64 from a single Linux host, so this collapses to one CI job rather than a per-OS matrix. Publish checksums; decide signing before the first public release — unsigned macOS binaries are Gatekeeper-quarantined. |
 | REQ-074 | always | **No credential leakage.** No key, token, or password may appear in stdout, stderr, logs, traces, telemetry, crash output, or any file except the credential store. Tested, not merely intended. |
 | REQ-075 | always | **Works against any Signum app.** No server-side module required. The one documented exception is API-key auth (REQ-002), which needs `Signum.Rest` — degrade to REQ-003 with a clear message. |
 | REQ-076 | m3 | **Version and capability detection.** Detect the target app's framework version and available modules; degrade gracefully and say so, rather than failing obscurely, when something is absent. |
@@ -296,6 +299,9 @@ Requirement IDs are stable; issue numbers are not a substitute for them.
 | REQ-053 | [#34](https://github.com/pajoma/signum-cli/issues/34) | `m2` | `--explain` and tracing |
 | REQ-054 | [#35](https://github.com/pajoma/signum-cli/issues/35) | `m2` | Input from files and stdin |
 | REQ-055 | [#36](https://github.com/pajoma/signum-cli/issues/36) | `m3` | Culture handling |
+| REQ-056 | [#50](https://github.com/pajoma/signum-cli/issues/50) | `m1` | Caller-context detection |
+| REQ-057 | [#51](https://github.com/pajoma/signum-cli/issues/51) | `m2` | Pseudonymization |
+| REQ-058 | [#52](https://github.com/pajoma/signum-cli/issues/52) | `m2` | Local re-identification mapping |
 
 **G. MCP server mode**
 

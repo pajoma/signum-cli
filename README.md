@@ -9,8 +9,9 @@ against a running Signum app.
 > (see [`docs/requirements.md`](docs/requirements.md) and the issues labelled
 > [`requirement`](https://github.com/pajoma/signum-cli/labels/requirement)).
 
-Planned shape: a **self-contained native executable** — one file, no runtime to install — written
-in **Rust** ([ADR 0005](docs/decisions/0005-rust-implementation.md)).
+Planned shape: a **self-contained executable** — one file, no runtime to install — written in
+**TypeScript** and compiled with **Bun** ([ADR 0006](docs/decisions/0006-typescript-bun.md)).
+Measured: 91 MB, 24 ms startup, and all five release targets cross-compiled from one Linux host.
 
 ## Why
 
@@ -43,7 +44,7 @@ carefully-sourced hypothesis, and see the verification note at the end of `docs/
 
 ## Decisions
 
-**Settled.** [Rust, statically linked single binary](docs/decisions/0005-rust-implementation.md).
+**Settled.** [TypeScript + Bun single executable](docs/decisions/0006-typescript-bun.md).
 The API is generic, so the client must be metadata-driven and no framework code is reusable in *any*
 language — which left the earlier C# choice resting on audience alone
 ([ADR 0001](docs/decisions/0001-implementation-language.md), now superseded). Rust was chosen while

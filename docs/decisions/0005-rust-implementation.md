@@ -1,6 +1,14 @@
 # ADR 0005 — Rust as the implementation language
 
-**Status:** ACCEPTED — supersedes [ADR 0001](0001-implementation-language.md)
+**Status:** ⚠️ **SUPERSEDED** by [ADR 0006 — TypeScript + Bun](0006-typescript-bun.md) on 2026-07-25.
+
+> Superseded after the TypeScript route was **actually built and measured** on this hardware, which no
+> prior language decision had been. Bun cross-compiles all five release targets from one Linux host —
+> the release-engineering problem recorded below as a secondary reversal trigger. The trade accepted in
+> exchange is ~10× binary size and the loss of compile-time enforcement described in "Why Rust suits
+> *these* requirements", which is why the correctness tests are now release-blocking.
+
+**Original status:** ACCEPTED — supersedes [ADR 0001](0001-implementation-language.md)
 **Date:** 2026-07-25
 **Owner decision:** Rust, with "might upstream to Signum" noted as a possibility.
 

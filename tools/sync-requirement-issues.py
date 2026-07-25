@@ -10,7 +10,7 @@ DOC = pathlib.Path("docs/requirements.md")
 REPO = "pajoma/signum-cli"
 APPLY = "--apply" in sys.argv
 
-row = re.compile(r"^\|\s*(REQ-\d+)\s*\|\s*(v1|v2|spike)\s*\|\s*(.+?)\s*\|\s*$")
+row = re.compile(r"^\|\s*(REQ-\d+)\s*\|\s*(m1|m2|m3|always)\s*\|\s*(.+?)\s*\|\s*$")
 section = re.compile(r"^##\s+([A-H])\.\s+(.+?)\s*$")
 
 reqs, cur = {}, "?"
@@ -34,7 +34,7 @@ if missing:
     sys.exit(f"FATAL: issues exist for ids no longer in the doc: {missing}")
 
 def body_for(r):
-    return f"""**Requirement {r['id']}** · priority `{r['prio']}` · area _{r['section']}_
+    return f"""**Requirement {r['id']}** · milestone `{r['prio']}` · area _{r['section']}_
 
 {r['body']}
 
