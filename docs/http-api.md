@@ -235,15 +235,30 @@ this.Key = declaringType.Name + "." + fieldName;
 
 So `UserOperation.Save`, not `Signum.Authorization.UserOperation.Save`.
 
+### Only UI-visible operations are invokable
+
+`OperationController.cs:142` hardcodes `inUserInterface: true` when calling
+`OperationLogic.AssertOperationAllowed` (`OperationLogic.cs:341-347`). Every HTTP invocation is judged
+as though it came from the web UI, so an operation hidden from the UI **cannot be invoked over the API
+at all**. No client-side workaround exists.
+
 ### `args` encoding
 
-`args` is a raw JSON array, discriminated **by shape** (`OperationController.cs:164-200`):
+`args` is a raw JSON array, discriminated **by value kind** in
+`BaseOperationRequest.ConvertObject` (`OperationController.cs:~165-200`):
 
 | Shape | Interpreted as |
 |---|---|
+| string | `DateTime` if parseable, then `DateTimeOffset`, else `string` |
+| number | **always `decimal`** |
 | object with `"EntityType"` | `Lite<T>` |
-| object with `"Type"` | full entity |
-| bare number | `decimal` |
+| object with `"Type"` | `ModifiableEntity` (embedded/model entities too, not just roots) |
+| object with **neither** | app-registered `CustomOperationArgsConverters`, else **silently `null`** |
+| array | recursive list |
+| true / false / null | as expected |
+
+Two of these are silent hazards: **a date-shaped string is always coerced to a date**, and an
+unrecognised object **arrives as null with no error**. Guard both client-side.
 
 ### Errors
 

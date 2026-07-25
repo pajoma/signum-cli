@@ -28,9 +28,10 @@ document is the source of truth; keep it and the issues in sync. Both former spi
 so the `spike` label is currently empty.
 
 **User stories** live in [`docs/stories/`](docs/stories/) and *do* carry acceptance criteria,
-tracing back to requirement ids. Written so far: [`stories/auth.md`](docs/stories/auth.md)
-(STORY-01…STORY-12) and [`stories/query.md`](docs/stories/query.md) (STORY-20…STORY-27). Writes and
-operations are not yet storied.
+tracing back to requirement ids. Written so far: [`auth.md`](docs/stories/auth.md) (STORY-01…12),
+[`query.md`](docs/stories/query.md) (STORY-20…27), [`entities.md`](docs/stories/entities.md)
+(STORY-30…34), [`operations.md`](docs/stories/operations.md) (STORY-40…46). All of REQ-001…REQ-046 is
+now storied; output/UX (REQ-050…055), MCP (REQ-060…062) and non-functional (REQ-070…077) are not.
 
 **Design specs** live in [`docs/design/`](docs/design/) — currently
 [`filter-expression-syntax.md`](docs/design/filter-expression-syntax.md), the CLI's primary
