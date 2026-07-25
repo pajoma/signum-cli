@@ -1,0 +1,45 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git status*)",
+      "Bash(git log *)",
+      "Bash(git diff*)",
+      "Bash(git fetch *)",
+      "Bash(git rev-parse *)",
+      "Bash(git rev-list *)",
+      "Bash(git branch*)",
+      "Bash(git show *)",
+      "Bash(gh pr *)",
+      "Bash(gh issue *)",
+      "Bash(gh run *)",
+      "Bash(gh api *)",
+      "Bash(gh auth status*)",
+      "Bash(find *)",
+      "Bash(grep *)",
+      "Bash(rg *)",
+      "Bash(wc *)",
+      "Bash(ls *)",
+      "Bash(dotnet build*)",
+      "Bash(dotnet test*)",
+      "Bash(dotnet format*)",
+      "Bash(dotnet restore*)",
+      "Bash(dotnet --version)",
+      "Bash(dotnet --list-sdks)",
+      "Bash(node --version)",
+      "Bash(npm test*)",
+      "Bash(npm run *)",
+      "Bash(yarn *)"
+    ],
+    "deny": [
+      "Bash(gh release *)",
+      "Bash(npm publish*)",
+      "Bash(dotnet nuget push*)",
+      "Bash(git push * main*)",
+      "Bash(git push origin main*)",
+      "Read(../signum-framework/.git/**)"
+    ],
+    "additionalDirectories": [
+      "/home/patrick.maue/git/sfcl/signum-framework"
+    ]
+  }
+}
