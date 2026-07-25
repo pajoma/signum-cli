@@ -40,7 +40,7 @@ rule, one redaction rule**, regardless of how the user authenticated.
 
 ## STORY-01 — Browser login (`gh`-style)
 
-Traces to: REQ-001, REQ-004 · Priority: **v1** · Feasibility: **confirmed possible today**
+Traces to: REQ-001, REQ-004 · Priority: `m3` · Feasibility: **confirmed possible today**
 
 > **Scope note.** This is the path for deployments using `Signum.Authorization.OpenID`. For the
 > **target application** it is *not* currently reachable: even though Signum does not validate the
@@ -78,7 +78,7 @@ URI is accepted unconditionally; only the IdP gates it.
 
 ## STORY-02 — API key login (headless, CI)
 
-Traces to: REQ-002, REQ-006 · Priority: **v2 — not applicable to the target application**
+Traces to: REQ-002, REQ-006 · Priority: `m3`
 
 > **Scope note.** The target app does **not** have `Signum.Rest`, so API keys do not exist there:
 > no `X-ApiKey` authenticator in the chain, and `api/restApiKey/*` absent. This story covers other
@@ -106,7 +106,7 @@ variable, so that scheduled jobs and CI pipelines run with no interactive step.
 
 ## STORY-03 — Username and password login
 
-Traces to: REQ-003 · Priority: **v2 — cannot work for the target application**
+Traces to: REQ-003 · Priority: `m3`
 
 > **Scope note.** For Entra-provisioned users this path is impossible *and dangerous*.
 > `AzureADAuthorizer.Login()` delegates to the ordinary local password check
@@ -137,7 +137,10 @@ password, so that the CLI works against Signum applications that use local authe
 
 ## STORY-04 — Stay logged in between invocations
 
-Traces to: REQ-001, REQ-003, REQ-006 · Priority: **v1**
+Traces to: REQ-006 (`always`), REQ-001 (`m2`), REQ-003 (`m3`) · Priority: `m1`, **partially**
+
+> **Milestone split:** single-credential storage plus `New_Token` rotation is m1 — STORY-12 cannot
+> work without it. Multi-profile management is m2 with REQ-001 (see STORY-05).
 
 **As a developer**, I want each invocation to reuse my existing session, so that a CLI that runs
 as a fresh process every time does not make me re-authenticate constantly.
@@ -159,7 +162,7 @@ IV prepended, no MAC**. It is opaque and unauthenticated. Treat it strictly as a
 
 ## STORY-05 — Multiple environments
 
-Traces to: REQ-001 · Priority: **v1**
+Traces to: REQ-001 · Priority: `m2`
 
 **As an operator** responsible for dev, test and production instances, I want named profiles, so
 that I can target the right app deliberately and never fire a write at production by accident.
@@ -176,7 +179,7 @@ that I can target the right app deliberately and never fire a write at productio
 
 ## STORY-06 — Know who I am
 
-Traces to: REQ-007 · Priority: **v1**
+Traces to: REQ-007 · Priority: `m1`
 
 **As a developer** whose command just failed, I want one command that tells me whether I am
 authenticated, as whom, against what, so that I can tell a credential problem from a permission
@@ -193,7 +196,7 @@ problem or a wrong target.
 
 ## STORY-07 — Log out
 
-Traces to: REQ-001, REQ-006 · Priority: **v1**
+Traces to: REQ-001, REQ-006 · Priority: `m2`
 
 **As a developer** on a shared machine, I want `signum auth logout` to remove my stored
 credentials, so that I do not leave a usable session behind.
@@ -208,7 +211,7 @@ credentials, so that I do not leave a usable session behind.
 
 ## STORY-08 — Understand a denial
 
-Traces to: REQ-052, REQ-007 · Priority: **v1**
+Traces to: REQ-052, REQ-007 · Priority: `m1`
 
 **As an agent or operator**, I want authentication and authorization failures clearly
 distinguished, so that I retry when retrying can help and stop when it cannot.
@@ -225,7 +228,7 @@ distinguished, so that I retry when retrying can help and stop when it cannot.
 
 ## STORY-09 — Non-interactive by construction
 
-Traces to: REQ-050, REQ-054, REQ-074 · Priority: **v1**
+Traces to: REQ-050, REQ-054, REQ-074 · Priority: `m1`
 
 **As a CI pipeline or agent**, I want authentication to work with no TTY, no browser and no
 prompt, so that I never hang waiting for input that cannot arrive.
@@ -241,7 +244,7 @@ prompt, so that I never hang waiting for input that cannot arrive.
 
 ## STORY-10 — Entra device code login
 
-Traces to: REQ-005 · Priority: **v2 — blocked on an Entra app-registration change we cannot currently make** (ADR 0004)
+Traces to: REQ-005 · Priority: `m3` (ADR 0004)
 
 **As a developer or operator** at an organisation on Entra, I want to authenticate with a device
 code, so that I log in with corporate SSO and MFA from any machine — including headless and remote
@@ -282,7 +285,7 @@ size or dependency risk.
 
 ## STORY-12 — Browser token handoff (the bootstrap that always works)
 
-Traces to: REQ-008 · Priority: **v1 — the *only* viable mechanism for the target application**
+Traces to: REQ-008 · Priority: `m1` **v1 — the *only* viable mechanism for the target application**
 
 **As a developer or operator** at an organisation whose Signum app sits behind Entra SSO, and where
 **neither the Signum configuration nor the Entra app registration can be changed**, I want to log
@@ -340,7 +343,7 @@ possible.
 
 ## STORY-11 — Credentials never leak
 
-Traces to: REQ-006, REQ-053, REQ-074 · Priority: **v1**
+Traces to: REQ-006, REQ-053, REQ-074 · Priority: `always`
 
 **As an administrator**, I want confidence that the CLI cannot leak a credential, so that I can
 approve its use against production.
@@ -358,20 +361,20 @@ approve its use against production.
 
 ## Traceability
 
-| Story | Requirements | Priority |
+| Story | Requirements | Milestone |
 |---|---|---|
-| STORY-01 Browser login | REQ-001, REQ-004 | v1 |
-| STORY-02 API key login | REQ-002, REQ-006 | v2 — n/a to target (no `Signum.Rest`) |
-| STORY-03 Password login | REQ-003 | v2 — impossible for target (null `PasswordHash`) |
-| STORY-04 Session persistence | REQ-001, REQ-003, REQ-006 | v1 |
-| STORY-05 Multiple environments | REQ-001 | v1 |
-| STORY-06 Identity check | REQ-007 | v1 |
-| STORY-07 Log out | REQ-001, REQ-006 | v1 |
-| STORY-08 Understand a denial | REQ-007, REQ-052 | v1 |
-| STORY-09 Non-interactive | REQ-050, REQ-054, REQ-074 | v1 |
-| STORY-10 Entra device code | REQ-005 | v2 — blocked on tenant access |
-| STORY-11 No credential leakage | REQ-006, REQ-053, REQ-074 | v1 |
-| STORY-12 Browser token handoff | REQ-008 | **v1** — sole mechanism for the target app |
+| STORY-01 Browser login | REQ-001, REQ-004 | `m3` |
+| STORY-02 API key login | REQ-002, REQ-006 | `m3` — n/a to target (no `Signum.Rest`) |
+| STORY-03 Password login | REQ-003 | `m3` — impossible for target (null `PasswordHash`) |
+| STORY-04 Session persistence | REQ-001, REQ-003, REQ-006 | `m1` |
+| STORY-05 Multiple environments | REQ-001 | `m2` |
+| STORY-06 Identity check | REQ-007 | `m1` |
+| STORY-07 Log out | REQ-001, REQ-006 | `m2` |
+| STORY-08 Understand a denial | REQ-007, REQ-052 | `m1` |
+| STORY-09 Non-interactive | REQ-050, REQ-054, REQ-074 | `m1` |
+| STORY-10 Entra device code | REQ-005 | `m3` — blocked on tenant access |
+| STORY-11 No credential leakage | REQ-006, REQ-053, REQ-074 | `always` |
+| STORY-12 Browser token handoff | REQ-008 | `m1` — sole mechanism for the target app |
 
 ## Deliberately not covered
 

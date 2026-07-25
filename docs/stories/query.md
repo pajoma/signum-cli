@@ -11,7 +11,7 @@ Wire contract: [`../http-api.md`](../http-api.md). Claims about framework behavi
 
 ## STORY-20 — Run a query
 
-Traces to: REQ-020, REQ-021 · Priority: **v1**
+Traces to: REQ-020, REQ-021 · Priority: `m1`
 
 **As an operator**, I want to run a query against the target app with filters, chosen columns and a
 sort, so that I can answer a question about production data without opening the web UI.
@@ -30,7 +30,7 @@ sort, so that I can answer a question about production data without opening the 
 
 ## STORY-21 — Trust the numbers
 
-Traces to: REQ-022 · Priority: **v1**
+Traces to: REQ-022 · Priority: `m1`
 
 **As an operator** acting on query output, I want the values to be the real values, so that I never
 make a decision on a mis-decoded result.
@@ -52,7 +52,7 @@ script against.
 
 ## STORY-22 — Read it, or pipe it
 
-Traces to: REQ-024, REQ-050 · Priority: **v1**
+Traces to: REQ-024, REQ-050 · Priority: `m1`
 
 **As a developer at a terminal and as a script**, I want output that is readable when I am watching
 and structured when I am piping, so that the same command serves both without a flag dance.
@@ -69,7 +69,7 @@ and structured when I am piping, so that the same command serves both without a 
 
 ## STORY-23 — Page through, or take everything
 
-Traces to: REQ-024 · Priority: **v1**
+Traces to: REQ-024 · Priority: `m1`
 
 **As an operator** extracting a large result, I want pagination handled for me, so that I get every
 row without writing a loop or melting the server.
@@ -88,7 +88,10 @@ row without writing a loop or melting the server.
 
 ## STORY-24 — Discover what I can ask
 
-Traces to: REQ-011, REQ-012, REQ-010 · Priority: **v1**
+Traces to: REQ-010, REQ-011 (`m1`), REQ-012 (`m2`) · Priority: `m1`, **partially**
+
+> **Milestone split:** AC-24.1/3/4/5/6 are m1 — they render the cached `api/reflection/types`
+> document. AC-24.2 (live `subTokens`/`parseTokens`) is m2 with REQ-012.
 
 **As a developer or agent** meeting an unfamiliar Signum app, I want to discover its queries, types
 and valid tokens, so that I can write a correct filter without reading the app's source.
@@ -106,7 +109,7 @@ and valid tokens, so that I can write a correct filter without reading the app's
 
 ## STORY-25 — Group and aggregate
 
-Traces to: REQ-023 · Priority: **v2**
+Traces to: REQ-023 · Priority: `m3`
 
 **As an operator**, I want counts and sums grouped by a column, so that I can get a summary without
 exporting every row.
@@ -122,7 +125,7 @@ exporting every row.
 
 ## STORY-26 — Resolve an entity by name
 
-Traces to: REQ-026 · Priority: **v2**
+Traces to: REQ-026 · Priority: `m3`
 
 **As an operator**, I want to name an entity the way a human would rather than by id, so that I can
 write a filter without first looking up a primary key.
@@ -137,7 +140,7 @@ write a filter without first looking up a primary key.
 
 ## STORY-27 — Temporal queries
 
-Traces to: REQ-025 · Priority: **v2**
+Traces to: REQ-025 · Priority: `m3`
 
 **As an auditor** on a `Signum.TimeMachine`-enabled app, I want to query data as it was at a past
 moment, so that I can reconstruct history.
@@ -152,16 +155,16 @@ moment, so that I can reconstruct history.
 
 ## Traceability
 
-| Story | Requirements | Priority |
+| Story | Requirements | Milestone |
 |---|---|---|
-| STORY-20 Run a query | REQ-020, REQ-021 | v1 |
-| STORY-21 Trust the numbers | REQ-022 | v1 |
-| STORY-22 Read it, or pipe it | REQ-024, REQ-050 | v1 |
-| STORY-23 Page through | REQ-024 | v1 |
-| STORY-24 Discover what I can ask | REQ-010, REQ-011, REQ-012 | v1 |
-| STORY-25 Group and aggregate | REQ-023 | v2 |
-| STORY-26 Resolve by name | REQ-026 | v2 |
-| STORY-27 Temporal queries | REQ-025 | v2 |
+| STORY-20 Run a query | REQ-020, REQ-021 | `m1` |
+| STORY-21 Trust the numbers | REQ-022 | `m1` |
+| STORY-22 Read it, or pipe it | REQ-024, REQ-050 | `m1` |
+| STORY-23 Page through | REQ-024 | `m1` |
+| STORY-24 Discover what I can ask | REQ-010, REQ-011, REQ-012 | `m1` |
+| STORY-25 Group and aggregate | REQ-023 | `m3` |
+| STORY-26 Resolve by name | REQ-026 | `m3` |
+| STORY-27 Temporal queries | REQ-025 | `m3` |
 
 ## Not covered here
 

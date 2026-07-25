@@ -10,7 +10,7 @@ Wire contract: [`../http-api.md`](../http-api.md). Operations that *mutate* enti
 
 ## STORY-30 — Retrieve an entity
 
-Traces to: REQ-030 · Priority: **v1**
+Traces to: REQ-030 · Priority: `m1`
 
 **As an operator**, I want to fetch one entity by type and id, or by its `Lite` key, so that I can
 inspect the real stored state of a record.
@@ -28,7 +28,7 @@ inspect the real stored state of a record.
 
 ## STORY-31 — Round-trip without corruption
 
-Traces to: REQ-031 · Priority: **v1**
+Traces to: REQ-031 · Priority: `m2`
 
 **As an operator** doing a targeted data fix, I want to fetch an entity, edit one field, and write it
 back with everything else untouched, so that I can trust the CLI with real records.
@@ -49,7 +49,7 @@ non-obvious invariants, and violating any of them either throws or — worse —
 
 ## STORY-32 — Edits actually save
 
-Traces to: REQ-032 · Priority: **v1**
+Traces to: REQ-032 · Priority: `m2`
 
 **As an operator**, I want my change to be persisted, so that a command reporting success has
 actually written something.
@@ -69,7 +69,7 @@ that looks exactly like success.
 
 ## STORY-33 — Lose a race safely
 
-Traces to: REQ-033 · Priority: **v1**
+Traces to: REQ-033 · Priority: `m2`
 
 **As an operator** writing to a live system, I want a concurrent modification to fail loudly, so that
 I never silently overwrite somebody else's change.
@@ -85,7 +85,7 @@ I never silently overwrite somebody else's change.
 
 ## STORY-34 — Check before writing
 
-Traces to: REQ-034 · Priority: **v2**
+Traces to: REQ-034 · Priority: `m3`
 
 **As an operator**, I want to validate an entity before attempting to persist it, so that I see
 problems before any mutation happens.
@@ -100,10 +100,10 @@ problems before any mutation happens.
 
 ## Traceability
 
-| Story | Requirements | Priority |
+| Story | Requirements | Milestone |
 |---|---|---|
-| STORY-30 Retrieve an entity | REQ-030 | v1 |
-| STORY-31 Round-trip without corruption | REQ-031 | v1 |
-| STORY-32 Edits actually save | REQ-032 | v1 |
-| STORY-33 Lose a race safely | REQ-033 | v1 |
-| STORY-34 Check before writing | REQ-034 | v2 |
+| STORY-30 Retrieve an entity | REQ-030 | `m1` |
+| STORY-31 Round-trip without corruption | REQ-031 | `m2` |
+| STORY-32 Edits actually save | REQ-032 | `m2` |
+| STORY-33 Lose a race safely | REQ-033 | `m2` |
+| STORY-34 Check before writing | REQ-034 | `m3` |

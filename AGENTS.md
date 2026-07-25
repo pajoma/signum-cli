@@ -23,9 +23,22 @@ exposes *itself* as an MCP server so agents can drive any Signum app
 
 **Requirements** are collected in [`docs/requirements.md`](docs/requirements.md) — 48 of them,
 mirrored as issues `#1`–`#47` and `#49`, labelled
-[`requirement`](https://github.com/pajoma/signum-cli/labels/requirement) plus `v1`/`v2`. That
-document is the source of truth; keep it and the issues in sync. Both former spikes are resolved,
-so the `spike` label is currently empty.
+[`requirement`](https://github.com/pajoma/signum-cli/labels/requirement) plus a milestone. That
+document is the source of truth; keep it and the issues in sync, via
+`tools/sync-requirement-issues.py`.
+
+**Milestones** (triaged 2026-07-25, replacing an earlier v1/v2 split that had 33 items in "v1"):
+
+| | Count | Scope |
+|---|---|---|
+| [`m1`](https://github.com/pajoma/signum-cli/labels/m1) | 12 | **Read-only core.** No mutations. Safe to point at production. |
+| [`m2`](https://github.com/pajoma/signum-cli/labels/m2) | 12 | Writes, entity fidelity, concurrency, profiles, tracing. |
+| [`m3`](https://github.com/pajoma/signum-cli/labels/m3) | 18 | MCP, scale, and the auth paths unreachable on the target app. |
+| [`always`](https://github.com/pajoma/signum-cli/labels/always) | 6 | Cross-cutting constraints; apply from the first commit, never "done". |
+
+**Build m1 first, and do not smuggle writes into it.** Every write hazard in this API fails *quietly*
+(`modified` propagation, `ticks` concurrency, `args` coercion), so a read-only m1 is what earns the
+right to be pointed at production.
 
 **User stories** live in [`docs/stories/`](docs/stories/) and *do* carry acceptance criteria,
 tracing back to requirement ids. Written so far: [`auth.md`](docs/stories/auth.md) (STORY-01…12),
