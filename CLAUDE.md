@@ -5,9 +5,15 @@ See [`AGENTS.md`](AGENTS.md) for all shared agent context, hard rules, and conve
 Quick orientation:
 
 - **What this is:** a CLI that talks to running Signum Framework apps over HTTP.
-- **Status:** pre-implementation. Two open ADRs block coding —
-  [language](docs/decisions/0001-implementation-language.md) and
-  [MCP relationship](docs/decisions/0002-mcp-vs-http.md).
+- **Status:** pre-implementation — currently collecting requirements
+  ([`docs/requirements.md`](docs/requirements.md), tracked as GitHub issues labelled
+  `requirement`).
+- **Decided:** C# / .NET 10 as a **NativeAOT self-contained single binary**
+  ([ADR 0001](docs/decisions/0001-implementation-language.md),
+  [ADR 0003](docs/decisions/0003-self-contained-distribution.md)). Consequence: **no
+  `ProjectReference` to the framework** — it is reference-only, and AOT forbids reflection,
+  `Expression.Compile()`, and reflection-based JSON.
+- **Still open:** [ADR 0002](docs/decisions/0002-mcp-vs-http.md) — MCP relationship.
 - **Before writing request code:** read [`docs/http-api.md`](docs/http-api.md).
 - **The framework** is a sibling checkout at `../signum-framework` — read it, never modify it.
 
