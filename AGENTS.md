@@ -17,9 +17,16 @@ Do not rebuild those here.
 no runtime to install ([ADR 0001](docs/decisions/0001-implementation-language.md),
 [ADR 0003](docs/decisions/0003-self-contained-distribution.md)).
 
-**Still open:** [ADR 0002](docs/decisions/0002-mcp-vs-http.md) — how to relate to the
-framework's built-in MCP server. It shapes the *command set*, not the foundation, so HTTP
-client work can start without it. If asked to design commands while it is `OPEN`, say so.
+**Decided:** deterministic HTTP core, depending on nothing server-side; the CLI additionally
+exposes *itself* as an MCP server so agents can drive any Signum app
+([ADR 0002](docs/decisions/0002-mcp-vs-http.md)).
+
+**Requirements** are collected in [`docs/requirements.md`](docs/requirements.md) — 47 of them,
+mirrored as issues `#1`–`#47` labelled
+[`requirement`](https://github.com/pajoma/signum-cli/labels/requirement) plus `v1`/`v2`/`spike`.
+That document is the source of truth; keep it and the issues in sync. Two requirements are
+research spikes whose outcome may be "not feasible" — REQ-004 (browser login) and REQ-005
+(external IdPs).
 
 ## Read before working
 
