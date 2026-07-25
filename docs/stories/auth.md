@@ -11,11 +11,14 @@ behaviour are cited to `file:line`.
 **Roles used below:** *developer* (interactive terminal), *operator* (scripted/CI), *agent*
 (MCP or direct invocation by Claude Code), *administrator* (provisions access in the target app).
 
-> **Target application uses Entra, and neither the Signum config nor the Entra tenant is under our
-> control.** That makes [STORY-12](#story-12--browser-token-handoff-the-bootstrap-that-always-works)
-> the primary path — it is the only mechanism needing no cooperation from either. STORY-10 (Entra
-> device code) and STORY-01 (`--web`) are the better experiences and stay specified, but are blocked
-> on access we do not have. See [ADR 0004](../decisions/0004-entra-primary-identity-provider.md).
+> **Target application: Entra SSO, no `Signum.Rest`, no control over the Signum config or the Entra
+> tenant.** Under those constraints
+> [STORY-12](#story-12--browser-token-handoff-the-bootstrap-that-always-works) is the **only viable
+> mechanism** — API keys do not exist without `Signum.Rest`, and Entra-provisioned users have
+> `PasswordHash = null` so password login cannot succeed and *must not be attempted* (lockout risk,
+> AC-03.7). STORY-01/02/03/10 stay fully specified because the CLI must work against any Signum app
+> (REQ-075), and they become reachable here if access changes. See
+> [ADR 0004](../decisions/0004-entra-primary-identity-provider.md) Decision 4.
 
 ---
 
@@ -75,7 +78,11 @@ URI is accepted unconditionally; only the IdP gates it.
 
 ## STORY-02 — API key login (headless, CI)
 
-Traces to: REQ-002, REQ-006 · Priority: **v1**
+Traces to: REQ-002, REQ-006 · Priority: **v2 — not applicable to the target application**
+
+> **Scope note.** The target app does **not** have `Signum.Rest`, so API keys do not exist there:
+> no `X-ApiKey` authenticator in the chain, and `api/restApiKey/*` absent. This story covers other
+> deployments and remains required by REQ-075.
 
 **As an operator**, I want to authenticate with a long-lived API key supplied via an environment
 variable, so that scheduled jobs and CI pipelines run with no interactive step.
@@ -99,10 +106,17 @@ variable, so that scheduled jobs and CI pipelines run with no interactive step.
 
 ## STORY-03 — Username and password login
 
-Traces to: REQ-003 · Priority: **v1**
+Traces to: REQ-003 · Priority: **v2 — cannot work for the target application**
 
-**As a developer** working against an app with no `Signum.Rest` and no OpenID, I want to log in
-with my username and password, so that the CLI works against every Signum application.
+> **Scope note.** For Entra-provisioned users this path is impossible *and dangerous*.
+> `AzureADAuthorizer.Login()` delegates to the ordinary local password check
+> (`AzureADAuthorizer.cs:15-18`) — Signum never validates a password against Entra — and
+> auto-created users get `PasswordHash = null` (`:43`), which `AuthLogic.cs:434,453` turns into
+> `IncorrectPasswordException`. Attempts count toward `MaxFailedLoginAttempts` and can deactivate
+> the account. See AC-03.7.
+
+**As a developer** working against an app with local accounts, I want to log in with my username and
+password, so that the CLI works against Signum applications that use local authentication.
 
 **Acceptance Criteria:**
 - AC-03.1: `signum auth login` prompts for the password without echo when stdin is a TTY, and never accepts it as a command-line argument (shell history, process list).
@@ -111,6 +125,7 @@ with my username and password, so that the CLI works against every Signum applic
 - AC-03.4: **A failed login is never automatically retried.** The server deactivates accounts after `MaxFailedLoginAttempts`, so a retry loop can lock the user out. Retry requires a new explicit invocation.
 - AC-03.5: The password is never written to disk, logs, or trace output — only the resulting token is persisted.
 - AC-03.6: On a WindowsAD-backed app this same endpoint performs a domain LDAP bind (`WindowsADAuthorizer.cs:33-91`); no separate command is needed, and no client change is required.
+- AC-03.7: Password login is **never attempted automatically** as a fallback from another mechanism. It runs only when the user explicitly selects it. Rationale: for AD/Entra-provisioned users `PasswordHash` is null so it can never succeed, and each failure counts toward `MaxFailedLoginAttempts` — an automatic retry chain could deactivate a real user's account.
 
 > **Upstream hazard, documented for the user:** the framework's global exception filter persists
 > the **entire request body** on any throw. A login that raises server-side can therefore persist
@@ -267,7 +282,7 @@ NativeAOT risk.
 
 ## STORY-12 — Browser token handoff (the bootstrap that always works)
 
-Traces to: REQ-008 · Priority: **v1 — primary path for the target application**
+Traces to: REQ-008 · Priority: **v1 — the *only* viable mechanism for the target application**
 
 **As a developer or operator** at an organisation whose Signum app sits behind Entra SSO, and where
 **neither the Signum configuration nor the Entra app registration can be changed**, I want to log
@@ -287,16 +302,39 @@ Decision 3.
 - AC-12.2: `signum auth login` prints copy-paste-ready instructions when no other mechanism is available: open the app, sign in, then run `sessionStorage.getItem("authToken")` in the browser console.
 - AC-12.3: The token is validated immediately via `GET api/auth/currentUser` and the resolved user is echoed, so a bad paste fails at login rather than mysteriously later (a bad token degrades silently to anonymous — AC-04.6).
 - AC-12.4: The token is stored per STORY-04 and rotated via `New_Token` from then on. No re-handoff is needed for as long as it keeps rotating.
-- AC-12.5: **Auto-upgrade:** immediately after a successful handoff, the CLI calls `GET api/restApiKey/current`. If a key is returned it is stored in preference to the token, since it is durable and needs no browser round-trip. If `null` or 404, the token remains the credential and this is *not* an error.
-- AC-12.6: `signum auth key create` attempts to mint a key via `RestApiKeyOperation.Save`, and reports clearly that this needs write permission on `RestApiKeyEntity` when the role does not allow it. `api/restApiKey/generate` returns a string but **does not persist it** (`RestApiKeyController.cs:8-12`), so generating and saving are separate steps.
-- AC-12.7: If `Signum.Rest` is absent both key endpoints 404; the CLI degrades to token-only silently, mentioning it once at `-v`.
-- AC-12.8: The token is treated as a bearer secret throughout — redacted per STORY-11, never echoed back after entry, and the terminal echo is suppressed while pasting when stdin is a TTY.
-- AC-12.9: When the stored token stops working, the error explains that a fresh handoff is needed and repeats the AC-12.2 instructions, rather than reporting a bare 403.
+- AC-12.5: **Auto-upgrade, where available:** after a successful handoff the CLI calls `GET api/restApiKey/current` and, if a key is returned, stores it in preference to the token as a durable credential. On `null` or 404 the token remains the credential and this is **not** an error. *Inert for the target app — it has no `Signum.Rest` — so this must be a silent no-op there, never a warning.*
+- AC-12.6: `signum auth key create` attempts to mint a key via `RestApiKeyOperation.Save`, reporting clearly when the role lacks write permission on `RestApiKeyEntity`. `api/restApiKey/generate` returns a string but **does not persist it** (`RestApiKeyController.cs:8-12`), so generating and saving are separate steps. Absent `Signum.Rest`, the command reports that the server does not support API keys at all.
+- AC-12.7: With `Signum.Rest` absent the CLI operates token-only and says so once at `-v`. It must **never** offer the API-key or password paths as remedies on this app — neither can work (AC-03.7).
+- AC-12.8: The token is treated as a bearer secret throughout — redacted per STORY-11, never echoed back after entry, terminal echo suppressed while pasting on a TTY.
 
-> **Acknowledged as inelegant.** Copying a bearer token out of devtools is not a good experience,
-> and it is a credential on the clipboard. It is here because it is the **only** mechanism that
-> needs no cooperation from the Signum config or the Entra tenant. STORY-10 and STORY-01 are the
-> better experiences and stay specified for when that access exists.
+### Because this is the only mechanism
+
+For the target application there is no fallback, so the flow must be robust rather than merely
+possible.
+
+- AC-12.9: **Assisted capture.** `signum auth login` binds a loopback listener and prints a one-line
+  browser-console snippet that POSTs `sessionStorage.getItem("authToken")` to it, so the user does
+  not hand-copy a long secret. The listener accepts exactly one request, from loopback only, then
+  closes. **[TEST]** — a cross-origin POST from an HTTPS page to `http://127.0.0.1` may be blocked by
+  Private Network Access preflight rules depending on browser version. **AC-12.1's manual stdin paste
+  is mandatory and always available as the fallback**; assisted capture is an optimisation that must
+  never become a dependency.
+- AC-12.10: The token is validated and the resolved user echoed before the old credential is
+  discarded, so a failed re-handoff never leaves the profile in a worse state than before.
+- AC-12.11: When the stored token stops working, the message states plainly that a fresh handoff is
+  required, repeats the AC-12.2 instructions, and does **not** suggest password or API-key
+  alternatives on an app where neither exists.
+- AC-12.12: Rotation is treated as critical, not incidental: a lost `New_Token` means the user must
+  repeat a manual browser step, so the store is written atomically and a rotation write failure is
+  surfaced rather than swallowed.
+- AC-12.13: `signum auth status` warns when a profile's only credential is a handed-over token, so
+  the user understands that losing it costs a browser round-trip.
+
+> **Acknowledged as inelegant.** Copying a bearer token out of devtools is a poor experience and puts
+> a credential on the clipboard. It is here because, for this application, it is the **only**
+> mechanism that works at all: no `Signum.Rest` means no API keys, and Entra-provisioned users have
+> `PasswordHash = null` so password login cannot succeed. STORY-01 and STORY-10 are better
+> experiences and stay specified for when the necessary access exists.
 
 ---
 
@@ -323,8 +361,8 @@ approve its use against production.
 | Story | Requirements | Priority |
 |---|---|---|
 | STORY-01 Browser login | REQ-001, REQ-004 | v1 |
-| STORY-02 API key login | REQ-002, REQ-006 | v1 |
-| STORY-03 Password login | REQ-003 | v1 |
+| STORY-02 API key login | REQ-002, REQ-006 | v2 — n/a to target (no `Signum.Rest`) |
+| STORY-03 Password login | REQ-003 | v2 — impossible for target (null `PasswordHash`) |
 | STORY-04 Session persistence | REQ-001, REQ-003, REQ-006 | v1 |
 | STORY-05 Multiple environments | REQ-001 | v1 |
 | STORY-06 Identity check | REQ-007 | v1 |
@@ -333,7 +371,7 @@ approve its use against production.
 | STORY-09 Non-interactive | REQ-050, REQ-054, REQ-074 | v1 |
 | STORY-10 Entra device code | REQ-005 | v2 — blocked on tenant access |
 | STORY-11 No credential leakage | REQ-006, REQ-053, REQ-074 | v1 |
-| STORY-12 Browser token handoff | REQ-008 | **v1** — primary path for the target app |
+| STORY-12 Browser token handoff | REQ-008 | **v1** — sole mechanism for the target app |
 
 ## Deliberately not covered
 

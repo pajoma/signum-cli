@@ -167,20 +167,46 @@ Limits, honestly stated:
   The CLI must read it from stdin rather than an argument (shell history), and STORY-11's redaction
   rules apply.
 
-## Ranking under the constraint
+## Decision 4 — token handoff is the *only* viable mechanism
 
-| Rank | Mechanism | Needs |
+**Owner constraint (2026-07-25):** *"no Signum Rest."*
+
+That removes API keys entirely — no `X-ApiKey`, and `api/restApiKey/current` / `generate` are absent,
+so the auto-upgrade in Decision 3 becomes a no-op against this app. It also makes
+`api/auth/loginFromApiKey` useless: without `Signum.Rest` the API-key authenticator is never
+inserted into the chain, so that endpoint has nothing to authenticate with.
+
+Investigating whether username/password survives as a fallback closed that door too:
+
+- `AzureADAuthorizer.Login()` delegates straight to `AuthLogic.Login(userName, password, …)` — it is
+  the **ordinary local password check**, not a resource-owner grant against Entra
+  (`AzureADAuthorizer.cs:15-18`). Signum never validates a password against Entra.
+- Users auto-created from Entra get **`PasswordHash = null`** (`AzureADAuthorizer.cs:43`).
+- `AuthLogic.RetrieveUser` throws `IncorrectPasswordException` when `user.PasswordHash == null`
+  (`AuthLogic.cs:434,453`).
+
+So an Entra-provisioned user **cannot** authenticate with a password, ever. Worse, attempting it is
+actively harmful: failures count toward `MaxFailedLoginAttempts` and can **deactivate the account**.
+The CLI must therefore never try password login as an automatic fallback.
+
+### Final ranking for the target application
+
+| Rank | Mechanism | Status for this app |
 |---|---|---|
-| 1 | **Browser token handoff** (`--with-token`) | nothing |
-| 2 | **API key**, auto-retrieved via `api/restApiKey/current` | `Signum.Rest` installed + a key already issued |
-| 3 | API key, newly minted | write permission on `RestApiKeyEntity` |
-| 4 | Username/password (`api/auth/login`) | local accounts to exist — often not the case under Entra SSO |
-| 5 | Entra device code (STORY-10) | Entra registration change (Option A or C) |
-| 6 | OpenID loopback (STORY-01) | app on the OpenID module **and** a loopback redirect URI registered in Entra |
+| 1 | **Browser token handoff** (`--with-token`) | ✅ **the only reachable mechanism** |
+| — | API key (any variant) | ❌ `Signum.Rest` not installed |
+| — | Username/password | ❌ `PasswordHash` is null for Entra users; attempting it risks lockout |
+| — | Entra device code (STORY-10) | ⛔ blocked on an Entra app-registration change |
+| — | OpenID loopback (STORY-01) | ⛔ blocked on tenant **and** module |
 
-Ranks 5 and 6 stay specified and remain the better long-term experience — they are simply **blocked
-on access we do not have**. Nothing about Decision 1 (hand-rolled device code, no MSAL) changes; it
-applies whenever rank 5 becomes reachable.
+**Consequence:** STORY-12 is not merely the primary path, it is the *sole* path. The CLI's
+authentication design therefore has a single point of failure, and the work must go into making that
+one flow genuinely good — low-friction capture, durable storage, honest diagnostics, and a graceful
+re-handoff when a token stops working. That is a change of emphasis, not just of priority.
+
+The other mechanisms stay fully specified. They cover other Signum deployments — the CLI is meant to
+work against any app (REQ-075) — and they become reachable here if the access situation changes.
+Nothing about Decision 1 (hand-rolled grant, no MSAL) is affected.
 
 ## Consequences
 
