@@ -21,11 +21,15 @@ no runtime to install ([ADR 0001](docs/decisions/0001-implementation-language.md
 exposes *itself* as an MCP server so agents can drive any Signum app
 ([ADR 0002](docs/decisions/0002-mcp-vs-http.md)).
 
-**Requirements** are collected in [`docs/requirements.md`](docs/requirements.md) — 47 of them,
-mirrored as issues `#1`–`#47` labelled
-[`requirement`](https://github.com/pajoma/signum-cli/labels/requirement) plus `v1`/`v2`/`spike`.
-That document is the source of truth; keep it and the issues in sync. Two are research spikes
-whose outcome may be "not feasible" — REQ-004 (browser login) and REQ-005 (external IdPs).
+**Requirements** are collected in [`docs/requirements.md`](docs/requirements.md) — 48 of them,
+mirrored as issues `#1`–`#47` and `#49`, labelled
+[`requirement`](https://github.com/pajoma/signum-cli/labels/requirement) plus `v1`/`v2`. That
+document is the source of truth; keep it and the issues in sync. Both former spikes are resolved,
+so the `spike` label is currently empty.
+
+**User stories** live in [`docs/stories/`](docs/stories/) and *do* carry acceptance criteria,
+tracing back to requirement ids. [`stories/auth.md`](docs/stories/auth.md) is complete
+(STORY-01…STORY-12).
 
 **Requirements are not user stories.** They state what the CLI must do and carry **no
 acceptance criteria** — do not add any, to the document or the issues. Implementation work is
@@ -38,6 +42,7 @@ issue bodies from the document rather than hand-editing both, so wording cannot 
 |---|---|
 | [`docs/architecture-overview.md`](docs/architecture-overview.md) | Always. Orientation on the framework. |
 | [`docs/http-api.md`](docs/http-api.md) | **Before writing any request code.** The contract. |
+| [`docs/target-application.md`](docs/target-application.md) | The deployment we must work against, and what it rules out. Read before designing auth or CI flows. |
 | [`docs/reference/`](docs/reference/) | Deep dives, ~9,800 lines, every claim cited to `file:line`. Consult, don't read whole. |
 
 The framework itself is at `/home/patrick.maue/git/sfcl/signum-framework` (sibling
@@ -78,6 +83,18 @@ effect after a rotation.
 Also: a malformed, tampered, or wrong-key token is **swallowed server-side and degrades silently
 to anonymous** — no distinct error. So after loading a stored token, verify it with
 `GET api/auth/currentUser` before trusting it.
+
+### Never auto-attempt password login
+
+Password login must run **only** when the user explicitly selects it — never as an automatic
+fallback from another mechanism. Two reasons, and the second is the serious one:
+
+1. For AD/Entra-provisioned users it can never succeed. `AzureADAuthorizer.Login()` delegates to the
+   ordinary local password check (`AzureADAuthorizer.cs:15-18`) — Signum never validates a password
+   against Entra — and auto-created users get `PasswordHash = null` (`:43`), which
+   `AuthLogic.cs:434,453` turns into `IncorrectPasswordException`.
+2. Every failure counts toward `MaxFailedLoginAttempts`, which **deactivates the account**. An
+   automatic retry chain can lock a real user out of the application.
 
 ### De-intern `ResultTable` before rendering
 

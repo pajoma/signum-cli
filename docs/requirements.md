@@ -27,6 +27,14 @@ Decided: [C# / .NET 10 + NativeAOT](decisions/0001-implementation-language.md) �
 [self-contained distribution](decisions/0003-self-contained-distribution.md) ·
 [MCP relationship](decisions/0002-mcp-vs-http.md).
 
+### Target application
+
+The deployment driving priorities — Entra SSO, no `Signum.Rest`, no `Signum.Agent`, no control over
+the Signum config — is profiled in [`target-application.md`](target-application.md). It leaves
+exactly one reachable auth mechanism (REQ-008) and makes the CLI the only agent-facing entry point
+to that app. Requirements unusable there are kept, not dropped: REQ-075 requires the CLI to work
+against any Signum application.
+
 ### Consumers
 
 Four, in no strict priority order — the CLI must serve all of them, which is why

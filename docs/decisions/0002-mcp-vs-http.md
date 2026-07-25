@@ -12,6 +12,14 @@ Requirements: [REQ-060](https://github.com/pajoma/signum-cli/issues/37) (MCP ser
 v1), [REQ-061](https://github.com/pajoma/signum-cli/issues/38) (metadata-derived tool schemas,
 v2), [REQ-062](https://github.com/pajoma/signum-cli/issues/39) (write guardrails, v1).
 
+**Reinforced 2026-07-25:** the target application does **not** have `Signum.Agent` installed
+([target profile](../target-application.md)). Two consequences, both favourable:
+
+- The CLI's own MCP mode (REQ-060) is **the only way** any agent can drive this application. Had we
+  chosen option B — speaking MCP *to* the app — we would have had nothing to talk to.
+- We are not downstream of `Signum.Agent`'s prompt-injection-to-write-path issue, since it is not
+  deployed. REQ-062's write guardrails stay required on their own merits.
+
 ## Context
 
 While analysing `Extensions/`, we found that the framework already ships an agentic access

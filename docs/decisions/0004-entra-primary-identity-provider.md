@@ -4,6 +4,7 @@
 **Date:** 2026-07-25
 **Owner input:** the target application uses **Entra**. Testing happens later.
 **Owner constraint (2026-07-25):** *"I don't have control over the Signum config."*
+**Target app profile:** [`docs/target-application.md`](../target-application.md)
 
 > ### The constraint changes the answer
 >
@@ -198,6 +199,7 @@ The CLI must therefore never try password login as an automatic fallback.
 | — | Username/password | ❌ `PasswordHash` is null for Entra users; attempting it risks lockout |
 | — | Entra device code (STORY-10) | ⛔ blocked on an Entra app-registration change |
 | — | OpenID loopback (STORY-01) | ⛔ blocked on tenant **and** module |
+| — | `Signum.Agent` MCP surface | ❌ not installed either — no alternative authenticated surface |
 
 **Consequence:** STORY-12 is not merely the primary path, it is the *sole* path. The CLI's
 authentication design therefore has a single point of failure, and the work must go into making that
