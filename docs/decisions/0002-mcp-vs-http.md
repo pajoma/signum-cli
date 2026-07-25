@@ -1,7 +1,16 @@
 # ADR 0002 — Relationship to the built-in `Signum.Agent` MCP server
 
-**Status:** OPEN — decide before designing the command set
+**Status:** ACCEPTED — option C, with C2 in scope for v1
 **Date raised:** 2026-07-25
+**Date decided:** 2026-07-25
+
+Settled by the owner naming **AI agents via MCP** and **direct invocation from Claude Code**
+as primary consumers alongside ops scripting and human terminal use. That promotes C2 from a
+speculative follow-on to a v1 requirement.
+
+Requirements: [REQ-060](https://github.com/pajoma/signum-cli/issues/37) (MCP server mode,
+v1), [REQ-061](https://github.com/pajoma/signum-cli/issues/38) (metadata-derived tool schemas,
+v2), [REQ-062](https://github.com/pajoma/signum-cli/issues/39) (write guardrails, v1).
 
 ## Context
 
@@ -71,9 +80,9 @@ Two distinct sub-ideas worth keeping apart:
   `Signum.Agent` at all. This inverts the dependency and is arguably the more valuable
   direction.
 
-## Recommendation
+## Decision
 
-**Option C, with C2 as the interesting follow-on.**
+**Option C, with C2 in scope for v1.**
 
 Build the HTTP client first — it is the only option that works universally and
 deterministically, and it is a prerequisite for everything else. Do not take a dependency on
