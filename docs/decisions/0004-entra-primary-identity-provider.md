@@ -1,9 +1,19 @@
 # ADR 0004 — Entra as the primary identity provider
 
-**Status:** PARTIALLY ACCEPTED — the flow is decided; the **audience strategy is OPEN** and needs
-an answer from whoever administers the target app's Entra tenant.
+**Status:** ACCEPTED — see *Decision 3*, added after the constraint below.
 **Date:** 2026-07-25
 **Owner input:** the target application uses **Entra**. Testing happens later.
+**Owner constraint (2026-07-25):** *"I don't have control over the Signum config."*
+
+> ### The constraint changes the answer
+>
+> No server-side change is available — which **eliminates Option B**, the otherwise-recommended
+> `ExtraValidAudiences` approach, since it needs a line in the app's startup. Options A and C
+> both need changes to the **Entra app registration**, which may or may not be reachable
+> depending on who administers the tenant.
+>
+> So the CLI must have a path that requires **nothing** on the server and **nothing** in Entra.
+> There is one, and it becomes the primary bootstrap: **Decision 3**.
 
 Supersedes the priority ordering in [ADR 0002](0002-mcp-vs-http.md)'s neighbourhood and promotes
 [STORY-10](../stories/auth.md) from v2 to v1.
@@ -111,11 +121,73 @@ token — the audience would not match. Three ways out:
   Whether passing it there validates cleanly is **untested** and depends on Entra's token format
   for that resource. Do not adopt without testing.
 
-**Recommendation: Option B**, falling back to A if a second registration is not obtainable.
+**Option B is unavailable** — it needs a line in the app's startup, and we have no control over the
+Signum configuration. **Option A or C** require Entra app-registration changes; both remain
+possible *only* if the tenant administrator will make them. Neither can be assumed.
+
+## Decision 3 — bootstrap by browser token handoff; upgrade to an API key
+
+**Accepted.** This is the path that requires nothing from anyone.
+
+The browser client keeps the Signum bearer token in `sessionStorage` under the literal key
+`authToken` (`Extensions/Signum.Authorization/AuthClient.tsx:189,198`). A user who can log into the
+web app — by any means, including full Entra SSO with MFA and Conditional Access — already holds a
+valid token. They can hand it to the CLI.
+
+```
+signum auth login --with-token        # reads the token from stdin
+```
+
+Why this works where everything else stalls:
+
+- **Zero server change.** No `ExtraValidAudiences`, no module requirement, no new endpoint.
+- **Zero Entra change.** No app registration, no public-client flag, no redirect URI, no consent.
+  Entra never sees the CLI at all — the *browser* did the authentication.
+- **Conditional Access and MFA are satisfied**, because a real interactive browser sign-in
+  performed them.
+- **It is the same opaque token** every other path yields, so STORY-04's storage and `New_Token`
+  rotation apply unchanged. Tokens never expire, so a handed-over token keeps working and keeps
+  rotating.
+
+Then **upgrade automatically**: once authenticated, the CLI calls `GET api/restApiKey/current`,
+which runs in `ExecutionMode.Global()` with no permission check beyond authentication and returns
+the caller's own key (`RestApiKeyController.cs:15-20`). If the user already has an API key, the CLI
+stores that instead — a durable credential that needs no browser round-trip ever again.
+
+Limits, honestly stated:
+
+- `api/restApiKey/current` returns an **existing** key or `null`; it does not create one.
+  `api/restApiKey/generate` only returns a random string and **does not persist it**
+  (`RestApiKeyController.cs:8-12`), so minting a key still requires write permission on
+  `RestApiKeyEntity` via `RestApiKeyOperation.Save` — role configuration, not code. The CLI can
+  offer to try, and report clearly when the user's role does not allow it.
+- Both endpoints require `Signum.Rest` to be installed. If it is absent, the handed-over token
+  remains the credential, and re-handoff is needed if it is ever lost.
+- Copying a token out of devtools is inelegant, and it is a **bearer credential in the clipboard**.
+  The CLI must read it from stdin rather than an argument (shell history), and STORY-11's redaction
+  rules apply.
+
+## Ranking under the constraint
+
+| Rank | Mechanism | Needs |
+|---|---|---|
+| 1 | **Browser token handoff** (`--with-token`) | nothing |
+| 2 | **API key**, auto-retrieved via `api/restApiKey/current` | `Signum.Rest` installed + a key already issued |
+| 3 | API key, newly minted | write permission on `RestApiKeyEntity` |
+| 4 | Username/password (`api/auth/login`) | local accounts to exist — often not the case under Entra SSO |
+| 5 | Entra device code (STORY-10) | Entra registration change (Option A or C) |
+| 6 | OpenID loopback (STORY-01) | app on the OpenID module **and** a loopback redirect URI registered in Entra |
+
+Ranks 5 and 6 stay specified and remain the better long-term experience — they are simply **blocked
+on access we do not have**. Nothing about Decision 1 (hand-rolled device code, no MSAL) changes; it
+applies whenever rank 5 becomes reachable.
 
 ## Consequences
 
-- STORY-10 becomes **v1** and the primary documented path; REQ-005 moves v2 → v1.
+- **STORY-12 (token handoff) is the primary v1 path**; REQ-008 is added for it.
+- STORY-10 (Entra device code) stays specified but drops to **v2**, gated on a tenant change we
+  cannot currently make. It is not abandoned — Decision 1 stands and it is ready to build the moment
+  rank 5 unblocks.
 - STORY-01 (`--web` loopback via the OpenID module) stays v1 but is the path for **non-Entra or
   OpenID-module** deployments. It is not the Entra path.
 - The CLI must be configurable per profile with: tenant id, client id, scopes, and `AzureADType`,

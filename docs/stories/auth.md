@@ -11,9 +11,11 @@ behaviour are cited to `file:line`.
 **Roles used below:** *developer* (interactive terminal), *operator* (scripted/CI), *agent*
 (MCP or direct invocation by Claude Code), *administrator* (provisions access in the target app).
 
-> **Target application uses Entra.** [STORY-10](#story-10--entra-device-code-login) is therefore the
-> primary path, not an add-on — see [ADR 0004](../decisions/0004-entra-primary-identity-provider.md).
-> The other stories remain required: they cover other deployments, CI, and fallbacks.
+> **Target application uses Entra, and neither the Signum config nor the Entra tenant is under our
+> control.** That makes [STORY-12](#story-12--browser-token-handoff-the-bootstrap-that-always-works)
+> the primary path — it is the only mechanism needing no cooperation from either. STORY-10 (Entra
+> device code) and STORY-01 (`--web`) are the better experiences and stay specified, but are blocked
+> on access we do not have. See [ADR 0004](../decisions/0004-entra-primary-identity-provider.md).
 
 ---
 
@@ -37,11 +39,12 @@ rule, one redaction rule**, regardless of how the user authenticated.
 
 Traces to: REQ-001, REQ-004 · Priority: **v1** · Feasibility: **confirmed possible today**
 
-> **Scope note.** This is the path for deployments using `Signum.Authorization.OpenID`. The
-> **target application uses Entra**, whose primary path is [STORY-10](#story-10--entra-device-code-login).
-> If the target app fronts Entra via the *OpenID* module rather than the *AzureAD* module, this
-> story becomes its path instead — that is [ADR 0004](../decisions/0004-entra-primary-identity-provider.md)
-> open question 1.
+> **Scope note.** This is the path for deployments using `Signum.Authorization.OpenID`. For the
+> **target application** it is *not* currently reachable: even though Signum does not validate the
+> redirect URI, **Entra does**, so a loopback callback must be registered in the app's Entra
+> registration — access we do not have. Primary path is
+> [STORY-12](#story-12--browser-token-handoff-the-bootstrap-that-always-works). Rank 6 in
+> [ADR 0004](../decisions/0004-entra-primary-identity-provider.md).
 
 **As a developer**, I want to run `signum auth login --web`, complete authentication in my normal
 browser, and have the CLI end up logged in, so that I never type credentials into a terminal and
@@ -223,7 +226,7 @@ prompt, so that I never hang waiting for input that cannot arrive.
 
 ## STORY-10 — Entra device code login
 
-Traces to: REQ-005 · Priority: **v1 — this is the primary path for the target application**
+Traces to: REQ-005 · Priority: **v2 — blocked on an Entra app-registration change we cannot currently make** (ADR 0004)
 
 **As a developer or operator** at an organisation on Entra, I want to authenticate with a device
 code, so that I log in with corporate SSO and MFA from any machine — including headless and remote
@@ -262,6 +265,41 @@ NativeAOT risk.
 
 ---
 
+## STORY-12 — Browser token handoff (the bootstrap that always works)
+
+Traces to: REQ-008 · Priority: **v1 — primary path for the target application**
+
+**As a developer or operator** at an organisation whose Signum app sits behind Entra SSO, and where
+**neither the Signum configuration nor the Entra app registration can be changed**, I want to log
+into the web app in my browser and hand the resulting session to the CLI, so that I can use the CLI
+at all — without waiting on anyone's configuration change.
+
+The browser client stores the Signum bearer token in `sessionStorage` under the literal key
+`authToken` (`AuthClient.tsx:189,198`). A user who can sign into the web app already holds a valid
+credential; the CLI just needs to receive it. Entra never sees the CLI — the browser did the
+authentication, so SSO, MFA, and Conditional Access are all satisfied by construction.
+
+Rationale and the full ranking: [ADR 0004](../decisions/0004-entra-primary-identity-provider.md)
+Decision 3.
+
+**Acceptance Criteria:**
+- AC-12.1: `signum auth login --with-token` reads the token from **stdin**, never from a command-line argument (shell history, process list).
+- AC-12.2: `signum auth login` prints copy-paste-ready instructions when no other mechanism is available: open the app, sign in, then run `sessionStorage.getItem("authToken")` in the browser console.
+- AC-12.3: The token is validated immediately via `GET api/auth/currentUser` and the resolved user is echoed, so a bad paste fails at login rather than mysteriously later (a bad token degrades silently to anonymous — AC-04.6).
+- AC-12.4: The token is stored per STORY-04 and rotated via `New_Token` from then on. No re-handoff is needed for as long as it keeps rotating.
+- AC-12.5: **Auto-upgrade:** immediately after a successful handoff, the CLI calls `GET api/restApiKey/current`. If a key is returned it is stored in preference to the token, since it is durable and needs no browser round-trip. If `null` or 404, the token remains the credential and this is *not* an error.
+- AC-12.6: `signum auth key create` attempts to mint a key via `RestApiKeyOperation.Save`, and reports clearly that this needs write permission on `RestApiKeyEntity` when the role does not allow it. `api/restApiKey/generate` returns a string but **does not persist it** (`RestApiKeyController.cs:8-12`), so generating and saving are separate steps.
+- AC-12.7: If `Signum.Rest` is absent both key endpoints 404; the CLI degrades to token-only silently, mentioning it once at `-v`.
+- AC-12.8: The token is treated as a bearer secret throughout — redacted per STORY-11, never echoed back after entry, and the terminal echo is suppressed while pasting when stdin is a TTY.
+- AC-12.9: When the stored token stops working, the error explains that a fresh handoff is needed and repeats the AC-12.2 instructions, rather than reporting a bare 403.
+
+> **Acknowledged as inelegant.** Copying a bearer token out of devtools is not a good experience,
+> and it is a credential on the clipboard. It is here because it is the **only** mechanism that
+> needs no cooperation from the Signum config or the Entra tenant. STORY-10 and STORY-01 are the
+> better experiences and stay specified for when that access exists.
+
+---
+
 ## STORY-11 — Credentials never leak
 
 Traces to: REQ-006, REQ-053, REQ-074 · Priority: **v1**
@@ -293,8 +331,9 @@ approve its use against production.
 | STORY-07 Log out | REQ-001, REQ-006 | v1 |
 | STORY-08 Understand a denial | REQ-007, REQ-052 | v1 |
 | STORY-09 Non-interactive | REQ-050, REQ-054, REQ-074 | v1 |
-| STORY-10 Entra device code | REQ-005 | **v1** — primary path for the target app |
+| STORY-10 Entra device code | REQ-005 | v2 — blocked on tenant access |
 | STORY-11 No credential leakage | REQ-006, REQ-053, REQ-074 | v1 |
+| STORY-12 Browser token handoff | REQ-008 | **v1** — primary path for the target app |
 
 ## Deliberately not covered
 
