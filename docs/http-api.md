@@ -64,20 +64,63 @@ Content-Type: application/json
 `ModelState` body. Then send `Authorization: Bearer <token>` on every request
 (`AuthTokensServer.cs:57,144`).
 
-**Two behaviours a client MUST implement:**
+**Three behaviours a client MUST implement:**
 
-1. **Token rotation.** The token never hard-expires. After ~30 minutes the server returns a
-   replacement in the **`New_Token` response header**; the client must adopt it and use it
-   from then on (`AuthTokensServer.cs:66-102`). Ignoring this eventually 403s.
-2. **Opacity.** The token is *not* a JWT — Deflate + AES-CBC, Base64. Never try to parse it
-   for an expiry claim; there isn't one to read.
+1. **Token rotation.** Tokens **never expire**. `RefreshTokenEvery` (default 30 min) is a
+   *rotation* interval: past it the server revalidates against the database and returns a
+   replacement in the **`New_Token` response header** (`AuthTokensServer.cs:85-94`). Adopt it
+   atomically. Ignoring it does **not** 403 — it costs a DB hit per request and **freezes the
+   user's role permanently**, since `RoleEntity.Current` reads the role from the token claim
+   (`RoleEntity.cs:33`). Force a rotation on demand with `?refreshToken`.
+2. **Opacity.** The token is *not* a JWT — JSON → Deflate → AES-128-CBC/PKCS7 with the key
+   derived as MD5 of the app secret, IV prepended, **no MAC**. Never parse it; there is no
+   expiry claim to read and no integrity check to rely on.
+3. **Verify after load.** A malformed, tampered, or wrong-key token is **swallowed and degrades
+   silently to anonymous**, not rejected. After loading a stored token, confirm it with
+   `GET api/auth/currentUser` before relying on it.
+
+Token invalidation happens only on the rotation path: user deleted, `State != Active`, username
+changed, or password hash changed (`AuthTokensServer.cs:106-118`). There is no IP, user-agent, or
+session binding. `POST api/auth/logout` clears a cookie and performs **no token revocation**.
 
 A password change invalidates all tokens. An API key survives password changes.
 
 ### 1c. Key → Bearer
 
-`GET /api/auth/relogin` with `X-ApiKey` returns a `LoginResponse`. Useful only to obtain a
-short-lived token from a long-lived key.
+`GET api/auth/loginFromApiKey` (or `GET api/auth/relogin`) with `X-ApiKey` returns a
+`LoginResponse`. Recommended: trade the long-lived key for a rotating token at startup, so the
+key appears on exactly one request per invocation.
+
+### 1e. Complete `api/auth/*` surface
+
+14 routes across the core and the authorization modules:
+
+| Verb | Route | Anonymous? |
+|---|---|---|
+| POST | `api/auth/login` | **yes** |
+| GET | `api/auth/loginFromApiKey` | no (filter authenticates first) |
+| GET | `api/auth/relogin` | no |
+| POST | `api/auth/loginFromCookie` | **yes** |
+| GET | `api/auth/currentUser` | no |
+| POST | `api/auth/logout` | no |
+| POST | `api/auth/ChangePassword` | no |
+| POST | `api/auth/forgotPasswordEmail` · `resetPassword` · `requestNewLink` | **yes** ×3 |
+| POST | `api/auth/loginWithOpenID` · `loginWithAzureAD` · `loginWindowsAuthentication` | **yes** ×3 |
+| GET | `api/auth/openIDEndpoints` | **yes** |
+
+### 1f. Browser login is possible today
+
+`POST api/auth/loginWithOpenID` is `[SignumAllowAnonymous]` and takes `{Code, RedirectUri}`.
+Signum does **not validate the redirect URI** — `OpenIDConfigurationEmbedded` has no such field —
+and forwards it verbatim to the IdP token endpoint (`OpenIDAuthenticationServer.cs:96`). A
+loopback URI is therefore accepted unconditionally; only the IdP gates it. The server holds the
+`client_secret`, so a CLI needs no secret.
+
+Caveats: **PKCE is not implemented** (zero repo-wide hits), and `client_id`/scopes are not exposed
+by any API. Full flow and acceptance criteria: [`stories/auth.md`](stories/auth.md) STORY-01.
+
+`POST api/auth/loginWithAzureAD` accepts a raw `idToken`, validating `aud`/`iss` — a genuine token
+exchange, so a CLI can run its own MSAL device-code flow (STORY-10).
 
 ### 1d. Not viable headlessly
 

@@ -334,6 +334,12 @@ exposes them casually and so they can be raised upstream.
 | Medium | REST API keys are 32 random bytes but **stored in plaintext** and cached keyed by the plaintext (`Extensions/Signum.Rest/RestApiKeyLogic.cs:31-34`). |
 | Medium | The auth token is not a JWT: Deflate + AES-CBC with the key derived as **MD5 of the app secret, no HMAC** — unauthenticated encryption. |
 | Medium | In `Signum.Agent`, prompt injection reaches the destructive `OperationSkill` write path; `ConfirmUISkill` is advisory only. |
+| **High** | The **global exception filter persists the entire request body** on any throw. A login that raises server-side therefore persists the submitted **password in cleartext** in the app's log tables. Found during the auth spike. |
+| **Medium** | An **unknown API key returns HTTP 500 whose `KeyNotFoundException` message echoes the submitted key**. Combined with the row above, a mistyped key is written to the database and may reach client logs. |
+| **Medium** | **Deactivating a user does not revoke their API key** — `ApiKeyAuthenticator` never checks `State`. Keys have no expiry, rotation, revocation, or scoping, and are stored in plaintext. Deleting the `RestApiKeyEntity` is the only revocation path. |
+| **Medium** | Provisioning an API key is governed only by ordinary type/operation auth on `RestApiKeyEntity` — there is **no dedicated permission** — so whether users can self-provision full-identity credentials depends entirely on role configuration. |
+| Medium | **PKCE is not implemented** in `Signum.Authorization.OpenID` (zero repo-wide hits for `code_verifier`/`code_challenge`), and the redirect URI is forwarded to the IdP with no server-side validation. Public clients therefore rely solely on the IdP for redirect containment. |
+| Low | The bearer token has **no MAC** — AES-CBC only — so tampering is detected only incidentally by failed decryption, and a bad token **degrades silently to anonymous** rather than erroring. |
 | Low | Auth failures return **403, never 401**, which breaks conventional client retry logic. |
 
 **Operational consequence for the CLI:** never place the API key in a query string.

@@ -67,8 +67,17 @@ Retry logic keyed on 401 is dead code.
 ### Adopt `New_Token`
 
 When using Bearer auth, the server rotates the token by returning a replacement in the
-**`New_Token` response header** (`AuthTokensServer.cs:66-102`). The client must adopt it.
-Not doing this produces a working client that mysteriously 403s after ~30 minutes.
+**`New_Token` response header** (`AuthTokensServer.cs:85-94`). Adopt it, atomically.
+
+Tokens **never expire** — `RefreshTokenEvery` (default 30 min) is a *rotation* interval, not a
+lifetime. Ignoring the header therefore does **not** break authentication; it costs a database
+hit on every request and **freezes the user's role permanently**, because `RoleEntity.Current`
+reads the role from the token claim (`RoleEntity.cs:33`). A role change server-side only takes
+effect after a rotation.
+
+Also: a malformed, tampered, or wrong-key token is **swallowed server-side and degrades silently
+to anonymous** — no distinct error. So after loading a stored token, verify it with
+`GET api/auth/currentUser` before trusting it.
 
 ### De-intern `ResultTable` before rendering
 
