@@ -11,14 +11,15 @@ It is **not** a scaffolding or code-generation tool. That job already belongs to
 `Signum.Upgrade` (source-code migration engine, 223 scripts) and `Signum/CodeGeneration/`.
 Do not rebuild those here.
 
-**Status: pre-implementation.** No code exists yet. Two decisions are open and block
-coding — read them first:
+**Status: pre-implementation.** No code exists yet.
 
-- [`docs/decisions/0001-implementation-language.md`](docs/decisions/0001-implementation-language.md) — C# vs TypeScript
-- [`docs/decisions/0002-mcp-vs-http.md`](docs/decisions/0002-mcp-vs-http.md) — relationship to the built-in MCP server
+**Decided:** C# / .NET 10, shipped as a **NativeAOT self-contained single binary** — one file,
+no runtime to install ([ADR 0001](docs/decisions/0001-implementation-language.md),
+[ADR 0003](docs/decisions/0003-self-contained-distribution.md)).
 
-If you are asked to write CLI code and these are still `OPEN`, say so and ask — do not pick
-silently.
+**Still open:** [ADR 0002](docs/decisions/0002-mcp-vs-http.md) — how to relate to the
+framework's built-in MCP server. It shapes the *command set*, not the foundation, so HTTP
+client work can start without it. If asked to design commands while it is `OPEN`, say so.
 
 ## Read before working
 
@@ -95,6 +96,28 @@ server, mark it `✅ verified against <version>`. When you find a doc claim to b
 it in the same change. Nothing in `docs/` has been exercised against a running server yet —
 it is all read from source at `74bd24693d`.
 
+### Stay NativeAOT-clean
+
+The binary must be self-contained with no dependencies, which forbids a specific list of
+things. Full table and rationale in [ADR 0003](docs/decisions/0003-self-contained-distribution.md);
+the ones you will actually reach for by reflex:
+
+- **No `ProjectReference` to `Signum.Utilities` or `Signum`.** The framework is a reference to
+  *read*, not a dependency — its `ExpressionTrees/` calls `.Compile()` and its `Csv`/
+  `DescriptionManager`/`GenericInvoker` are reflection-driven, none of which survives AOT. This
+  repo needs no framework submodule. Write the console layer.
+- **No `Expression.Compile()`, `Reflection.Emit`, `Assembly.Load`, or
+  `Activator.CreateInstance` on open-ended types.**
+- **No reflection-based `JsonSerializer.Serialize<T>(obj)`.** Use `JsonNode`/`JsonDocument`
+  for the dynamic entity and `ResultTable` payloads, and a source-generated
+  `JsonSerializerContext` for our own fixed DTOs.
+- **No shelling out** to `dotnet`, `curl`, `jq`, or `git`. In-process only.
+- **Must run with zero setup** — flags and env vars, never a required external config file.
+
+`IL2xxx`/`IL3xxx` trim and AOT warnings are **errors**. Do not suppress them to make a build
+pass; fix the cause or raise it. Retrofitting AOT-cleanliness is far more expensive than
+maintaining it.
+
 ## Conventions
 
 - LF line endings, matching the framework (`.gitattributes`: `* text=auto eol=lf`).
@@ -125,6 +148,11 @@ wrapper around remote code execution is a materially worse problem than the web 
 
 ## Environment
 
-Node v22.23.1 present. **No .NET SDK and no yarn installed** — if ADR 0001 lands on C#,
-nothing builds until .NET 10 is installed. A full framework dev loop additionally needs
-PostgreSQL with `ltree` + `pgvector`.
+**No .NET SDK installed** — nothing builds until .NET 10.x is present. Node v22.23.1 exists but
+is irrelevant now that ADR 0001 chose C#.
+
+Before building anything substantial, do a hello-world `PublishAot=true` publish and record the
+real binary size, startup time, and warning cleanliness in ADR 0003 — every AOT number in these
+docs is a documented-behaviour expectation, **not a measurement**.
+
+Reading the framework needs no toolchain at all.

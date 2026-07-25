@@ -5,8 +5,12 @@ applications — run dynamic queries, retrieve and save entities, and execute op
 against a running Signum app.
 
 > **Status: pre-implementation.** This repository currently contains the architecture
-> analysis and design groundwork. No CLI code exists yet, and two design decisions are still
-> open.
+> analysis and design groundwork. No CLI code exists yet — we are collecting requirements
+> (see [`docs/requirements.md`](docs/requirements.md) and the issues labelled
+> [`requirement`](https://github.com/pajoma/signum-cli/labels/requirement)).
+
+Planned shape: a **self-contained native executable** — one file, no runtime to install —
+built with C# / .NET 10 and NativeAOT.
 
 ## Why
 
@@ -25,7 +29,8 @@ engine with 223 scripts) and `Signum/CodeGeneration/` already own that.
 |---|---|
 | [`docs/architecture-overview.md`](docs/architecture-overview.md) | How the framework works — entity model, ORM, LINQ provider, operations, DynamicQuery, the 57 extension modules. Start here. |
 | [`docs/http-api.md`](docs/http-api.md) | The API contract this CLI is built against: auth, endpoints, serialization rules, QueryToken grammar. |
-| [`docs/decisions/`](docs/decisions/) | Open ADRs: implementation language, and how to relate to the framework's built-in MCP server. |
+| [`docs/requirements.md`](docs/requirements.md) | What the CLI must do. Mirrored as GitHub issues labelled `requirement`. |
+| [`docs/decisions/`](docs/decisions/) | ADRs: implementation language, self-contained distribution, and how to relate to the framework's built-in MCP server. |
 | [`docs/reference/`](docs/reference/) | ~9,800 lines of deep analysis across seven areas, every claim cited to `file:line`. |
 | [`AGENTS.md`](AGENTS.md) | Context and hard rules for coding agents. |
 
@@ -33,16 +38,19 @@ Everything in `docs/` was derived by reading Signum Framework at commit `74bd246
 (master, 2026-07). **None of it has been exercised against a live server yet** — treat it as
 carefully-sourced hypothesis, and see the verification note at the end of `docs/http-api.md`.
 
-## Open decisions
+## Decisions
 
-1. **[Implementation language](docs/decisions/0001-implementation-language.md)** — C#/.NET 10
-   or TypeScript/Node. Less obvious than it looks: because the API is generic, the CLI must
-   be metadata-driven in either language, which removes the usual "you get the real DTOs for
-   free" argument for C#. Current recommendation is C# on ecosystem-fit grounds.
-2. **[MCP relationship](docs/decisions/0002-mcp-vs-http.md)** — `Extensions/Signum.Agent`
-   already ships a real MCP server whose skills overlap this CLI's scope. Recommendation:
-   build the deterministic HTTP client first and depend on nothing server-side, then consider
-   exposing *this* CLI as an MCP server so agents can drive any Signum app.
+**Settled.** [C# / .NET 10, NativeAOT single binary](docs/decisions/0001-implementation-language.md).
+Less obvious than it looks: because the API is generic the client must be metadata-driven in
+any language, and because the binary must be dependency-free, AOT rules out reusing
+`Signum.Utilities`. Both technical arguments for C# therefore evaporate — it wins on audience
+and ecosystem fit. [Distribution mechanics](docs/decisions/0003-self-contained-distribution.md)
+cover the AOT constraints and per-platform release story.
+
+**Open.** [MCP relationship](docs/decisions/0002-mcp-vs-http.md) — `Extensions/Signum.Agent`
+already ships a real MCP server whose skills overlap this CLI's scope. Recommendation: build
+the deterministic HTTP client first and depend on nothing server-side, then consider exposing
+*this* CLI as an MCP server so agents can drive any Signum app.
 
 ## Two things to know before writing any request code
 
