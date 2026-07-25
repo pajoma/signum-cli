@@ -28,8 +28,13 @@ document is the source of truth; keep it and the issues in sync. Both former spi
 so the `spike` label is currently empty.
 
 **User stories** live in [`docs/stories/`](docs/stories/) and *do* carry acceptance criteria,
-tracing back to requirement ids. [`stories/auth.md`](docs/stories/auth.md) is complete
-(STORY-01…STORY-12).
+tracing back to requirement ids. Written so far: [`stories/auth.md`](docs/stories/auth.md)
+(STORY-01…STORY-12) and [`stories/query.md`](docs/stories/query.md) (STORY-20…STORY-27). Writes and
+operations are not yet storied.
+
+**Design specs** live in [`docs/design/`](docs/design/) — currently
+[`filter-expression-syntax.md`](docs/design/filter-expression-syntax.md), the CLI's primary
+interface. Read it before touching anything query-related.
 
 **Requirements are not user stories.** They state what the CLI must do and carry **no
 acceptance criteria** — do not add any, to the document or the issues. Implementation work is
