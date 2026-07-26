@@ -1,0 +1,25 @@
+# Claude Code personal (per-user) settings
+.claude/settings.local.json
+
+# Local credentials / config — never commit
+.env
+*.local.json
+secrets.json
+appsettings.Development.json
+
+# .NET
+bin/
+obj/
+*.user
+*.suo
+artifacts/
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
