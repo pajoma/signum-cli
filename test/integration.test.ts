@@ -201,6 +201,81 @@ describe("discovery without credentials (STORY-24, STORY-61)", () => {
     expect(r.code).toBe(ExitCode.NotFound);
     expect(r.err).toContain("Order");
   });
+
+  // Every test above passes --json explicitly. The human-table rendering that a developer at
+  // a terminal actually sees had NO coverage at all until the tests below (QA finding).
+
+  it("`types` renders a human table on a TTY", async () => {
+    const r = await cli(["types", "--url", baseUrl], { tty: true });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.out).toContain("Order");
+    expect(r.out).toContain("members");
+  });
+
+  it("`types <pattern>` with no match reports it, not a silent empty result", async () => {
+    const r = await cli(["types", "zzz-nomatch", "--url", baseUrl], { tty: true });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.err).toContain("no types matching");
+  });
+
+  it("`queries` renders a human list and filters by pattern", async () => {
+    const all = await cli(["queries", "--url", baseUrl], { tty: true });
+    expect(all.out).toContain("Order");
+    const filtered = await cli(["queries", "zzz-nomatch", "--url", baseUrl], { tty: true });
+    expect(filtered.err).toContain("no queries");
+  });
+
+  it("`operations` with no type argument lists every operation across every type", async () => {
+    const r = await cli(["operations", "--url", baseUrl, "--json"]);
+    const ops = JSON.parse(r.out) as Array<{ type: string }>;
+    expect(ops.some((o) => o.type === "Order")).toBe(true);
+    expect(ops.some((o) => o.type === "UserEntity")).toBe(true);
+  });
+
+  it("`operations` renders a human list, marking the shadowed verb", async () => {
+    const r = await cli(["operations", "Order", "--url", baseUrl], { tty: true });
+    expect(r.out).toContain("SHADOWED");
+    expect(r.out).toContain("OrderOperation.Ship");
+  });
+
+  it("`operations <UnknownType>` is a not-found error, same as explain's", async () => {
+    const r = await cli(["operations", "Bogus", "--url", baseUrl]);
+    expect(r.code).toBe(ExitCode.NotFound);
+  });
+
+  it("`operations <Type>` with zero operations says so rather than printing nothing", async () => {
+    const r = await cli(["operations", "BadInput", "--url", baseUrl], { tty: true });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.err).toContain("no operations found"); // diagnostic, correctly on stderr
+  });
+
+  it("`explain` with no argument at all is a usage error with examples", async () => {
+    const r = await cli(["explain", "--url", baseUrl]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("signum explain Order");
+  });
+
+  it("`explain <OperationKey>` describes the operation, not a type — happy path was untested", async () => {
+    const r = await cli(["explain", "OrderOperation.Ship", "--url", baseUrl, "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const doc = JSON.parse(r.out) as { kind: string; key: string; command: string };
+    expect(doc.kind).toBe("operation");
+    expect(doc.key).toBe("OrderOperation.Ship");
+    expect(doc.command).toBe("signum ship order");
+  });
+
+  it("`explain <OperationKey>` in human format names the invoke-as command and shadowing", async () => {
+    const shipR = await cli(["explain", "OrderOperation.Ship", "--url", baseUrl], { tty: true });
+    expect(shipR.out).toContain("signum ship order");
+    const getR = await cli(["explain", "OrderOperation.Get", "--url", baseUrl], { tty: true });
+    expect(getR.out).toContain("shadowed by a built-in");
+  });
+
+  it("`explain Type.deeperToken` degrades gracefully to the root type rather than crashing", async () => {
+    const r = await cli(["explain", "Order.Entity.Customer", "--url", baseUrl]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.err).toContain("subTokens");
+  });
 });
 
 describe("login and status (STORY-12, STORY-06)", () => {
