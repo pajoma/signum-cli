@@ -150,6 +150,66 @@ signum ship order --help          # same, reached the way you would expect
 - **No `edit`.** kubectl's `$EDITOR` round-trip is attractive but collides with `modified` propagation
   and `ticks` concurrency (STORY-32, STORY-33). Revisit once writes are proven.
 
+## 2.2 Help at every level
+
+Help is not an afterthought here, because **half the command tree does not exist until you point the
+CLI at an application**. `signum query --help` can be written by us; `signum ship order --help` cannot —
+it has to be generated from the target app's metadata.
+
+So help has two layers, and the split determines what works when:
+
+| Layer | Source | Works offline? | Needs auth? |
+|---|---|---|---|
+| **Static** — built-in commands, flags, topics | compiled in | yes | no |
+| **Dynamic** — app types, queries, operations, tokens | metadata cache | with a warm cache | **no** — see below |
+
+**Dynamic help needs no credentials.** `GET api/reflection/types` is `[SignumAllowAnonymous]`
+(verified), so `signum --url https://app query Order --help` works *before* logging in. Someone
+evaluating the tool can explore an app's entire surface without an account. That is worth protecting as
+a property.
+
+### The levels
+
+| # | Invocation | Shows |
+|---|---|---|
+| 0 | `signum`, `signum --help` | what the tool is, command groups, global flags, next steps |
+| 1 | `signum query --help` | that command's flags, with executable examples |
+| 2 | `signum auth --help`, `signum auth login --help` | group contents, then subcommand detail |
+| 3 | `signum query <queryKey> --help` | **that query's** columns, default order, filterable tokens |
+| 3 | `signum ship order --help` | **that operation's** arguments, target kind, `canExecute` reasons |
+| 4 | `signum explain <Type>[.<token>]` | schema walk — members, kinds, valid next tokens |
+| 5 | `signum help <topic>` | long-form: `filter`, `tokens`, `output`, `exit-codes`, `auth`, `contexts`, `pseudonymization` |
+| 6 | *(on error)* | the help that would have prevented it — see below |
+
+Level 3 is the one that makes this CLI usable against an app nobody has documented. `--help` on a
+concrete noun is not a generic blurb; it is that application's actual schema.
+
+### Rules
+
+- **Help never requires authentication, and never requires a context.** Static help works with no
+  configuration at all; dynamic help needs only a URL or a warm cache.
+- **Degrade, never fail.** With no metadata available, level 3 prints the static portion plus one line
+  saying what it could not resolve and how (`--url`, or refresh the cache). It does not error.
+- **`--help` goes to stdout and exits 0.** An *unknown* command goes to stderr and exits 2 (usage). Help
+  that was asked for is output; help that follows a mistake is a diagnostic.
+- **Every help has examples**, `gh`-style, and they are executable exactly as written. Examples that
+  drift from reality are worse than none, so they are covered by the docs test (REQ-077).
+- **`-o json` works on any help**, emitting a structured description of commands, flags, and arguments.
+  This is the **same source the MCP tool schemas are generated from** (REQ-061) — help and tool
+  discovery must never be two hand-maintained descriptions of one command set.
+- **Errors route to help.** An unknown token names the nearest valid ones and points at
+  `signum explain <Type>`; an unparseable filter cites the rule it broke and points at
+  `signum help filter`; an ambiguous operation verb lists candidates. This is level 6, and it is where
+  help is actually read.
+- **Shadowed operation verbs are disclosed** in `signum operations <Type>` and in level-3 help for the
+  shadowing built-in, so the collision described in §2.1 is discoverable rather than mysterious.
+
+### Why `-o json` help matters more than usual
+
+Three of the four consumer types read help programmatically — an agent deciding which command to call,
+the MCP layer building tool schemas, and shell completion. A CLI whose help is only prose forces each of
+them to reimplement knowledge that already exists. One structured source, many renderings.
+
 ## 3. Global flags
 
 | Flag | Milestone | Notes |
@@ -290,6 +350,8 @@ signum mcp                                                    # m3: serve over s
 Everything m1 needs, and nothing more:
 
 ```
+signum help [<topic>]               # topics: filter, tokens, output, exit-codes, auth, …
+signum <any command> --help         # static; dynamic where a Type/queryKey is named
 signum version
 signum auth login --with-token | --url <url>
 signum auth status
@@ -304,9 +366,9 @@ globals: --url  -o/--output  --json  --explain  -v  --no-color  --timeout
          --caller-context
 ```
 
-That is 9 commands. It authenticates, discovers (including *which* operations exist and what they take),
-queries, and retrieves — with trustworthy output and meaningful exit codes — and it cannot mutate
-anything.
+That is 10 commands. It authenticates, discovers (including *which* operations exist and what they take),
+queries, retrieves, and **explains itself at every level — without credentials** — with trustworthy output
+and meaningful exit codes. It cannot mutate anything.
 
 ## 10. Open questions
 

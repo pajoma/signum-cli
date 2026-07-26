@@ -23,8 +23,8 @@ targets cross-compiled from one Linux host.
 exposes *itself* as an MCP server so agents can drive any Signum app
 ([ADR 0002](docs/decisions/0002-mcp-vs-http.md)).
 
-**Requirements** are collected in [`docs/requirements.md`](docs/requirements.md) — 51 of them,
-mirrored as issues `#1`–`#47` and `#49`–`#52`, labelled
+**Requirements** are collected in [`docs/requirements.md`](docs/requirements.md) — 52 of them,
+mirrored as issues `#1`–`#47` and `#49`–`#53`, labelled
 [`requirement`](https://github.com/pajoma/signum-cli/labels/requirement) plus a milestone. That
 document is the source of truth; keep it and the issues in sync, via
 `tools/sync-requirement-issues.py`.
@@ -33,7 +33,7 @@ document is the source of truth; keep it and the issues in sync, via
 
 | | Count | Scope |
 |---|---|---|
-| [`m1`](https://github.com/pajoma/signum-cli/labels/m1) | 13 | **Read-only core.** No mutations. Safe to point at production. |
+| [`m1`](https://github.com/pajoma/signum-cli/labels/m1) | 14 | **Read-only core.** No mutations. Safe to point at production. |
 | [`m2`](https://github.com/pajoma/signum-cli/labels/m2) | 14 | Writes, entity fidelity, concurrency, profiles, tracing. |
 | [`m3`](https://github.com/pajoma/signum-cli/labels/m3) | 18 | MCP, scale, and the auth paths unreachable on the target app. |
 | [`always`](https://github.com/pajoma/signum-cli/labels/always) | 6 | Cross-cutting constraints; apply from the first commit, never "done". |
@@ -43,7 +43,7 @@ document is the source of truth; keep it and the issues in sync, via
 right to be pointed at production.
 
 **User stories** live in [`docs/stories/`](docs/stories/) and *do* carry acceptance criteria,
-tracing back to requirement ids. Written so far: [`auth.md`](docs/stories/auth.md) (STORY-01…12), [`privacy.md`](docs/stories/privacy.md) (STORY-50…53),
+tracing back to requirement ids. Written so far: [`auth.md`](docs/stories/auth.md) (STORY-01…12), [`help.md`](docs/stories/help.md) (STORY-60…63), [`privacy.md`](docs/stories/privacy.md) (STORY-50…53),
 [`query.md`](docs/stories/query.md) (STORY-20…27), [`entities.md`](docs/stories/entities.md)
 (STORY-30…34), [`operations.md`](docs/stories/operations.md) (STORY-40…46). All of REQ-001…REQ-046 is
 now storied; output/UX (REQ-050…055), MCP (REQ-060…062) and non-functional (REQ-070…077) are not.

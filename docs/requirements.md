@@ -70,7 +70,7 @@ release — it was the whole product. This replaces it.
 
 | | Count | Meaning |
 |---|---|---|
-| **m1** | 13 | **Read-only core.** The smallest CLI that is genuinely useful and safe to point at production. No mutations at all. |
+| **m1** | 14 | **Read-only core.** The smallest CLI that is genuinely useful and safe to point at production. No mutations at all. |
 | **m2** | 14 | **Writes and ergonomics.** Operations, entity round-trip fidelity, concurrency, profiles, tracing. |
 | **m3** | 18 | **MCP, scale, and other deployments.** Includes the four auth mechanisms unreachable on the target app. |
 | **always** | 6 | **Cross-cutting constraints**, not scheduled features. They apply from the first commit and are never "done". |
@@ -121,6 +121,7 @@ The owner's guidance: **behave like `gh`** — authenticate either by pasting an
 | REQ-010 | m1 | **Metadata cache.** Fetch `GET api/reflection/types` (anonymous, `Last-Modified` + 304) and cache on disk keyed by `Last-Modified`; revalidate with `If-Modified-Since`. Enables offline completion and pre-flight validation. Cache is per-profile and explicitly invalidatable. |
 | REQ-011 | m1 | **Discovery commands.** List and describe what the target app offers: types, their members and entity kinds, available queries, **operations** (`signum operations [<Type>]`, `signum explain <OperationKey>` — read-only, so they ship in m1 even though invoking an operation is m2), enums, permissions. Human tables and `--json`. This is how a user (or agent) learns an unfamiliar app. |
 | REQ-012 | m2 | **Token discovery and validation.** `POST api/query/subTokens` to enumerate valid next segments; `POST api/query/parseTokens` to validate. Must handle the bracket-aware split (`QueryUtils.cs:370`), the `#` escape in operation tokens, and reject `.Nested` early — it is discoverable but unusable in `executeQuery` (`FilterJsonConverter.cs:87-153`). |
+| REQ-014 | m1 | **Help at every level.** Static help (commands, flags, `signum help <topic>`) works with **no config, no credentials and no network**; dynamic help (`signum query <queryKey> --help`, `signum <verb> <Type> --help`) is generated from the metadata cache and **needs no authentication**, since `api/reflection/types` is anonymous. Degrades rather than failing when metadata is unavailable. `--help` → stdout, exit 0; unknown command → stderr, exit 2. `-o json` works on any help and is the **single source** for MCP tool schemas (REQ-061) and completion (REQ-013). Errors route to the help that would have prevented them. See [CLI surface](design/cli-surface.md) §2.2, [STORY-60…63](stories/help.md). |
 | REQ-013 | m3 | **Shell completion.** bash/zsh/fish/pwsh, driven by the REQ-010 cache so completion works without a round trip. |
 
 ---
@@ -254,6 +255,7 @@ Requirement IDs are stable; issue numbers are not a substitute for them.
 | REQ-011 | [#9](https://github.com/pajoma/signum-cli/issues/9) | `m1` | Discovery commands |
 | REQ-012 | [#10](https://github.com/pajoma/signum-cli/issues/10) | `m2` | Token discovery and validation |
 | REQ-013 | [#11](https://github.com/pajoma/signum-cli/issues/11) | `m3` | Shell completion |
+| REQ-014 | [#53](https://github.com/pajoma/signum-cli/issues/53) | `m1` | Help at every level |
 
 **C. Queries**
 
