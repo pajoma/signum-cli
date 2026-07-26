@@ -133,6 +133,10 @@ beforeAll(() => {
       if (url.pathname === "/api/entity/Order/400") {
         return new Response(JSON.stringify({ title: "bad request" }), { status: 400, headers });
       }
+      // Same entity, addressable by both the clean name and the class name (AC-30.4).
+      if (url.pathname === "/api/entity/User/7") {
+        return new Response(JSON.stringify({ Type: "User", id: 7, toStr: "bob" }), { headers });
+      }
       return new Response(JSON.stringify({ exceptionMessage: "unhandled" }), { status: 404, headers });
     },
   });
@@ -503,6 +507,56 @@ describe("get (STORY-30)", () => {
     const r = await cli(["get", "Order", "42", "--exsits"]);
     expect(r.code).toBe(ExitCode.Usage);
     expect(r.err).toContain("--exsits");
+  });
+
+  it("--exists reports presence without fetching the entity", async () => {
+    const r = await cli(["get", "Order", "42", "--exists", "--i-understand-data-goes-to-a-model"], { tty: true });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.out.trim()).toBe("exists");
+  });
+
+  it("--exists on a missing entity reports absence with exit 5, not a crash", async () => {
+    const r = await cli(["get", "Order", "999", "--exists"], { tty: true });
+    expect(r.code).toBe(ExitCode.NotFound);
+    expect(r.err).toContain("does not exist");
+  });
+
+  it("resolves the entity CLASS name the same as the clean name (AC-30.4)", async () => {
+    const clean = await cli(["get", "User", "7", "--json"]);
+    const withSuffix = await cli(["get", "UserEntity", "7", "--json"]);
+    expect(clean.code).toBe(ExitCode.Ok);
+    expect(withSuffix.code).toBe(ExitCode.Ok);
+    expect(clean.out).toBe(withSuffix.out);
+  });
+
+  it("a malformed Lite key (empty id after ';') falls back to the whole string as a type name", async () => {
+    // Documents the current, slightly confusing fallback: parseLiteKey's guard rejects an
+    // empty id, so "Order;" is NOT parsed as a Lite reference — it becomes the literal type
+    // name "Order;", which does not exist, so this is an "unknown type" error rather than a
+    // crash or a misleading "Lite" error.
+    const r = await cli(["get", "Order;", "1"]);
+    expect(r.code).toBe(ExitCode.NotFound);
+    expect(r.err).toContain("Order;");
+  });
+
+  it("blocks entity data under a detected agent context, same as query (STORY-51 parity)", async () => {
+    const r = await cli(["get", "Order", "42"], { env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" } });
+    expect(r.code).toBe(ExitCode.Policy);
+  });
+
+  it("blocks --exists under a detected agent context too", async () => {
+    const r = await cli(["get", "Order", "42", "--exists"], { env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" } });
+    expect(r.code).toBe(ExitCode.Policy);
+  });
+
+  it("--explain is exempt from the agent gate, same as query", async () => {
+    const r = await cli(["get", "Order", "42", "--explain"], { env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" } });
+    expect(r.code).toBe(ExitCode.Ok);
+  });
+
+  it("maps a 400 response to a validation error, not a generic failure", async () => {
+    const r = await cli(["get", "Order", "400"]);
+    expect(r.code).toBe(ExitCode.Validation);
   });
 });
 
