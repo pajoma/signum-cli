@@ -11,6 +11,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { normalizeUrl } from "./text.ts";
 
 export interface StoredCredential {
   url: string;
@@ -121,9 +122,11 @@ interface CacheEnvelope {
 }
 
 function cachePath(url: string, env?: NodeJS.ProcessEnv): string {
-  // Filename-safe digest of the URL; distinct targets never share a cache.
+  // Filename-safe digest of the NORMALIZED URL, so the cache key agrees with credential
+  // matching (M2) — otherwise `app/` and `app` would keep separate caches.
+  const key = normalizeUrl(url);
   let hash = 0;
-  for (let i = 0; i < url.length; i++) hash = (hash * 31 + url.charCodeAt(i)) | 0;
+  for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) | 0;
   return join(configDir(env), "cache", `reflection-${(hash >>> 0).toString(16)}.json`);
 }
 
@@ -135,7 +138,9 @@ export function loadMetadataCache(
   if (!existsSync(path)) return undefined;
   try {
     const env_ = JSON.parse(readFileSync(path, "utf8")) as CacheEnvelope;
-    if (env_.url !== url) return undefined;
+    // Compare canonically (M2): the digest already collapses slash/port variants to one file,
+    // so this collision guard must too, or a same-target hit gets rejected.
+    if (normalizeUrl(env_.url) !== normalizeUrl(url)) return undefined;
     return { payload: env_.payload, lastModified: env_.lastModified, fetchedAt: env_.fetchedAt };
   } catch {
     return undefined;

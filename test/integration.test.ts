@@ -380,6 +380,17 @@ describe("auth lifecycle edges (QA coverage — previously 0% tested)", () => {
     });
     expect(r.code).toBe(ExitCode.Transport);
   });
+
+  it("a trailing slash on --url still matches the stored credential (M2 regression)", async () => {
+    // Log in without a trailing slash, then use the credential with one — and vice versa.
+    // Before URL normalization these were distinct targets and the second call said
+    // "no credential", the exact "log in, next command forgets you" trap.
+    const dir = mkdtempSync(join(tmpdir(), "signum-slash-"));
+    await cli(["auth", "login", "--url", baseUrl, "--with-token"], { env: { SIGNUM_CONFIG_DIR: dir }, stdin: GOOD_TOKEN + "\n" });
+    const r = await cli(["auth", "status", "--url", baseUrl + "/"], { env: { SIGNUM_CONFIG_DIR: dir }, tty: true });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.out).toContain("alice");
+  });
 });
 
 describe("query (STORY-20, STORY-21, STORY-22)", () => {
@@ -644,6 +655,28 @@ describe("get (STORY-30)", () => {
     const r = await cli(["get", "Order", "400"]);
     expect(r.code).toBe(ExitCode.Validation);
   });
+
+  it("errors on a tabular output format instead of silently emitting JSON (H3)", async () => {
+    // An entity is a document, not a table; csv/tsv/name have no meaning for it. Silently
+    // coercing to JSON gives a pipeline malformed data with no signal — so it must be an
+    // explicit usage error naming the formats that do work.
+    const r = await cli(["get", "Order", "42", "-o", "csv", "--i-understand-data-goes-to-a-model"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("json");
+  });
+
+  it("still supports json and ndjson for get", async () => {
+    const j = await cli(["get", "Order", "42", "-o", "json", "--i-understand-data-goes-to-a-model"]);
+    expect(j.code).toBe(ExitCode.Ok);
+    const nd = await cli(["get", "Order", "42", "-o", "ndjson", "--i-understand-data-goes-to-a-model"]);
+    expect(nd.code).toBe(ExitCode.Ok);
+  });
+
+  it("on a TTY, get still renders json (the human default) without complaint", async () => {
+    const r = await cli(["get", "Order", "42", "--i-understand-data-goes-to-a-model"], { tty: true });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.out).toContain("Order 42");
+  });
 });
 
 describe("token rotation (STORY-04)", () => {
@@ -724,6 +757,12 @@ describe("version (previously 0% covered)", () => {
     const r = await cli(["version"], { env: { SIGNUM_CONFIG_DIR: mkdtempSync(join(tmpdir(), "signum-ver-")) }, tty: true });
     expect(r.code).toBe(ExitCode.Ok);
     expect(r.out).toContain("signum");
+  });
+
+  it("the reported version is the one in package.json — single source of truth (M4)", async () => {
+    const pkg = JSON.parse(readFileSync(join(import.meta.dir, "..", "package.json"), "utf8")) as { version: string };
+    const r = await cli(["version", "--json"], { env: { SIGNUM_CONFIG_DIR: mkdtempSync(join(tmpdir(), "signum-ver2-")) } });
+    expect((JSON.parse(r.out) as { cli: string }).cli).toBe(pkg.version);
   });
 
   it("reports the target as reachable when it responds", async () => {

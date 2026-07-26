@@ -23,7 +23,7 @@
  */
 
 import { UsageError } from "./errors.ts";
-import { parseLiteKey } from "../commands/get.ts";
+import { parseLiteKey } from "./text.ts";
 
 // ── wire shapes ─────────────────────────────────────────────────────────────
 
@@ -363,7 +363,12 @@ function resolveOperator(t: Tok): FilterOperationName {
  */
 function coerceValue(t: Tok): unknown {
   if (t.kind === "string") {
-    return tryLiteValue(t.text) ?? t.text;
+    // H1 (Brooks review): a QUOTED value is the user saying "literal string" — the Lite
+    // metaphor must not leak onto it. `"Smith;John"` is a name, not an entity reference.
+    // Lites are reachable as BARE values below (type names and ids never contain whitespace,
+    // so a Lite never needs quoting); the escape from an accidental Type;id-shaped literal is
+    // therefore to quote it. Full type-aware coercion needs live subTokens (REQ-012, m2).
+    return t.text;
   }
   const w = t.text;
   const lw = w.toLowerCase();
@@ -371,7 +376,7 @@ function coerceValue(t: Tok): unknown {
   if (lw === "true") return true;
   if (lw === "false") return false;
   if (/^-?\d+(\.\d+)?$/.test(w)) return Number(w);
-  return tryLiteValue(w) ?? w; // enum member, ISO date, or plain string — server re-kinds dates itself
+  return tryLiteValue(w) ?? w; // bare Type;id → Lite; else enum/date/string — server re-kinds dates
 }
 
 /**

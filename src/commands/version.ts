@@ -11,7 +11,11 @@ import { renderDocument } from "../core/output.ts";
 import { loadCredential } from "../core/config.ts";
 import { SignumHttp } from "../core/http.ts";
 
-export const CLI_VERSION = "0.1.0-dev";
+// M4 (Brooks review): single source of truth — read the version from package.json rather
+// than a second hardcoded copy that silently drifts. Bun bundles the JSON import into the
+// compiled binary, so this stays self-contained.
+import pkg from "../../package.json" with { type: "json" };
+export const CLI_VERSION: string = pkg.version;
 
 export async function runVersion(ctx: Ctx): Promise<ExitCode> {
   const stored = loadCredential(ctx.io.env);

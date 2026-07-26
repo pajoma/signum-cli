@@ -67,6 +67,24 @@ describe("flag parsing", () => {
   it("reads the agent-data acknowledgement from the environment", () => {
     expect(parseArgs(["query", "Order"], { SIGNUM_ALLOW_AGENT_DATA: "1" }).flags.allowAgentData).toBe(true);
   });
+
+  // H2 (Brooks review): a boolean flag given `=value` must still register as the boolean,
+  // not silently land in `options` where flag() never looks — otherwise --exists=true is
+  // read as "not passed" and the CLI fetches the full entity instead of checking existence.
+  it("treats --exists=true as the boolean being set (H2 regression)", () => {
+    const a = parseArgs(["get", "Order", "42", "--exists=true"], {});
+    expect(a.booleans.has("exists")).toBe(true);
+    expect(a.options.has("exists")).toBe(false);
+  });
+
+  it("treats --exists=false as the boolean NOT being set", () => {
+    const a = parseArgs(["get", "Order", "42", "--exists=false"], {});
+    expect(a.booleans.has("exists")).toBe(false);
+  });
+
+  it("rejects a non-boolean value on a boolean flag rather than silently accepting it", () => {
+    expect(() => parseArgs(["get", "Order", "42", "--exists=maybe"], {})).toThrow(/--exists/);
+  });
 });
 
 describe("caller detection (STORY-50)", () => {

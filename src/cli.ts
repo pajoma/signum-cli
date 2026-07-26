@@ -33,8 +33,17 @@ export interface Ctx {
   color: boolean;
   caller: CallerDetection;
   /**
-   * Gate for anything that would emit row data (AC-51.1).
-   * m1 has no pseudonymization engine, so the honest behaviour is to stop.
+   * Gate for anything that would emit server DATA (rows, entities, field values) — AC-51.1.
+   * m1 has no pseudonymization engine, so under a detected agent the honest behaviour is to stop.
+   *
+   * ⚠️ CONVENTION, NOT YET STRUCTURAL (Brooks review M3). Every command that emits data must
+   * call this itself, before the network round trip, and BEFORE its own `--explain` short-circuit
+   * (which emits no data and is therefore exempt). It is applied at each call site rather than at
+   * the output boundary because the renderers are shared with `--explain`, help, and `auth status`,
+   * none of which may be gated — so there is no single choke point yet. When the m2 write commands
+   * land they will define that boundary; until then, a new data-emitting command that forgets this
+   * call is a silent leak. The guard-rail test in test/integration.test.ts asserts query and get
+   * are gated; extend it for every future data command.
    */
   assertMayEmitData: (what: string) => void;
 }

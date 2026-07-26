@@ -150,8 +150,19 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
           break;
         }
         default:
-          if (value === undefined) booleans.add(name);
-          else push(name, value);
+          if (value === undefined) {
+            booleans.add(name);
+          } else if (BOOLEAN_FLAGS.has(name)) {
+            // H2 (Brooks review): a boolean flag given `=value` (e.g. --exists=true) must
+            // register as the boolean, not land in `options` where flag() never looks —
+            // otherwise it reads as "not passed" and is silently ignored.
+            const v = value.toLowerCase();
+            if (v === "true" || v === "1" || v === "yes") booleans.add(name);
+            else if (v === "false" || v === "0" || v === "no") { /* explicitly unset */ }
+            else throw new UsageError(`--${name} is a boolean flag; expected true or false, got '${value}'`);
+          } else {
+            push(name, value);
+          }
       }
       continue;
     }

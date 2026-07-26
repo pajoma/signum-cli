@@ -6,6 +6,7 @@
 import type { Ctx } from "../cli.ts";
 import { SignumHttp } from "../core/http.ts";
 import { loadCredential, type StoredCredential } from "../core/config.ts";
+import { normalizeUrl } from "../core/text.ts";
 import { NotAuthenticatedError, UsageError } from "../core/errors.ts";
 
 export interface Target {
@@ -29,7 +30,9 @@ export function resolveTarget(ctx: Ctx, options: { requireAuth?: boolean } = {})
   }
 
   // Use the stored token only for the target it was issued against.
-  const credential = stored !== undefined && stored.credential.url === url ? stored.credential : undefined;
+  // Compare canonically so a trailing slash or default port does not orphan the credential (M2).
+  const credential =
+    stored !== undefined && normalizeUrl(stored.credential.url) === normalizeUrl(url) ? stored.credential : undefined;
 
   if (options.requireAuth === true && credential === undefined) {
     // Exit 3, not 2: this is "not authenticated", and a script may usefully re-auth.

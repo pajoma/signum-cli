@@ -93,16 +93,35 @@ describe("values", () => {
     expect(lowerOne("Name = 'it''s'".replace("''", "\\'"))).toBeTruthy(); // sanity: doesn't throw
   });
 
-  it("lowers a quoted Lite value to the wire object form", () => {
-    expect(lowerOne("Order = 'Order;42'")).toEqual([
+  // H1 (Brooks review): the Lite metaphor must not leak onto arbitrary strings. The rule is
+  // now "bare Type;id infers a Lite; a QUOTED value is always a literal string." Lites never
+  // need quoting (type names and ids contain no whitespace), so this loses no capability.
+
+  it("lowers a BARE Type;id value to the wire Lite object form", () => {
+    expect(lowerOne("Order = Order;42")).toEqual([
       { token: "Order", operation: "EqualTo", value: { EntityType: "Order", id: 42 } },
     ]);
   });
 
-  it("keeps a non-numeric Lite id as a string (e.g. a Guid)", () => {
+  it("keeps a non-numeric bare Lite id as a string (e.g. a Guid)", () => {
     const guid = "abcd1234-0000-0000-0000-000000000000";
-    expect(lowerOne(`Order = "Order;${guid}"`)).toEqual([
+    expect(lowerOne(`Order = Order;${guid}`)).toEqual([
       { token: "Order", operation: "EqualTo", value: { EntityType: "Order", id: guid } },
+    ]);
+  });
+
+  it("a QUOTED Type;id-shaped value stays a literal string, never a Lite (H1 regression)", () => {
+    // "Smith;John" is a person's name, not an entity reference — quoting means literal.
+    expect(lowerOne('Name = "Smith;John"')).toEqual([
+      { token: "Name", operation: "EqualTo", value: "Smith;John" },
+    ]);
+  });
+
+  it("a QUOTED value shaped exactly like a real Lite is ALSO kept literal (residual of H1)", () => {
+    // The dangerous case: a literal string that happens to look like Type;number. Quoting it
+    // forces string, which is the only escape a user has without --filter-json.
+    expect(lowerOne('Code = "Batch;42"')).toEqual([
+      { token: "Code", operation: "EqualTo", value: "Batch;42" },
     ]);
   });
 });

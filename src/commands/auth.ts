@@ -23,7 +23,9 @@ const HANDOFF_INSTRUCTIONS = [
 ].join("\n");
 
 async function login(ctx: Ctx): Promise<ExitCode> {
-  const url = ctx.args.flags.url ?? opt(ctx, "url");
+  // L1 (Brooks review): --url always parses into flags.url; it is never in `options`, so the
+  // old `?? opt(ctx, "url")` fallback was dead code that misled about how flags flow.
+  const url = ctx.args.flags.url;
   if (url === undefined) {
     throw new UsageError("--url is required to log in", {
       hint: "signum auth login --url https://app.example --with-token",

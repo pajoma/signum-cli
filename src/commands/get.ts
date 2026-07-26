@@ -9,16 +9,7 @@ import { ExitCode, NotFoundError, UsageError } from "../core/errors.ts";
 import { renderDocument } from "../core/output.ts";
 import { findType, loadMetadata, suggestTypes } from "../core/metadata.ts";
 import { flag, resolveTarget } from "./context.ts";
-
-/** `Order;42` → `{ type: "Order", id: "42" }` (AC-30.2). */
-export function parseLiteKey(value: string): { type: string; id: string } | undefined {
-  const idx = value.indexOf(";");
-  if (idx <= 0 || idx === value.length - 1) return undefined;
-  const type = value.slice(0, idx);
-  const id = value.slice(idx + 1);
-  if (type === "" || id === "" || type.includes("/")) return undefined;
-  return { type, id };
-}
+import { parseLiteKey } from "../core/text.ts";
 
 export async function runGet(ctx: Ctx): Promise<ExitCode> {
   const first = ctx.args.positionals[0];
@@ -27,6 +18,17 @@ export async function runGet(ctx: Ctx): Promise<ExitCode> {
   if (first === undefined) {
     throw new UsageError("`get` needs a type and id, or a Lite key", {
       hint: 'signum get Order 42\nsignum get "Order;42"     (quote it — an unquoted ; is a shell separator)',
+    });
+  }
+
+  // H3 (Brooks review): an entity is a document, not a table. csv/tsv/name have no meaning
+  // for it, and silently coercing them to JSON hands a pipeline malformed data with no signal.
+  // Reject them explicitly, up front (a format mistake should not cost a network round trip).
+  // `table` is exempt: it is the *default* off a non-TTY resolution, not a user request, and
+  // renderDocument already maps it to JSON for the human-on-a-TTY case.
+  if (ctx.args.flags.output === "csv" || ctx.args.flags.output === "tsv" || ctx.args.flags.output === "name") {
+    throw new UsageError(`get does not support --output ${ctx.args.flags.output}`, {
+      hint: "An entity is a document, not a table. Use --output json (default) or ndjson.",
     });
   }
 
