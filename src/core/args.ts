@@ -74,8 +74,13 @@ const FLAGS_WITH_VALUE = new Set([
 
 /** Boolean flags — listing one above would make it demand a value. */
 export const BOOLEAN_FLAGS = new Set([
-  "with-token", "exists", "count", "all", "yes", "y", "raw",
+  "with-token", "exists", "count", "all", "yes", "y", "raw", "group",
 ]);
+
+/** Invariant: a flag cannot need a value and be boolean-only at once. Checked by test. */
+export function flagSetsAreDisjoint(): boolean {
+  return [...BOOLEAN_FLAGS].every((f) => !FLAGS_WITH_VALUE.has(f));
+}
 
 function emptyFlags(): GlobalFlags {
   return {

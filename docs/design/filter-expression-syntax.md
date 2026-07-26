@@ -4,7 +4,7 @@ Spec for the CLI's query filter surface. Satisfies
 [REQ-021](https://github.com/pajoma/signum-cli/issues/13); acceptance criteria in
 [`../stories/query.md`](../stories/query.md).
 
-**Status:** DRAFT for review. Nothing implemented. Not yet validated against a live server.
+**Status:** IMPLEMENTED (`src/core/filter.ts`, tests in `test/filter.test.ts` and `test/integration.test.ts`). Two corrections below, found while implementing. Still not validated against a real Signum application — only against a mock server built from the framework source (see `test/integration.test.ts`'s own caveat).
 
 ## Why this needs designing rather than deciding
 
@@ -112,6 +112,7 @@ the syntax has no expressive gap.
 | — | `in` | `IsIn` |
 | — | `notIn` | `IsNotIn` |
 | — | `between` | `Between` |
+| — | `betweenNoEnd` | `BetweenNoEnd` |
 | — | `complexCondition` | `ComplexCondition` (SQL Server FTS) |
 | — | `freeText` | `FreeText` (SQL Server FTS) |
 | — | `tsQuery`, `tsQueryPlain`, `tsQueryPhrase`, `tsQueryWebSearch` | `TsQuery*` (Postgres FTS) |
@@ -121,7 +122,10 @@ No symbol is given to `startsWith`/`endsWith`: the obvious candidates are `^` an
 shell-expanded**, so a `$`-based operator would be a trap. Asymmetric sugar (`^` without `$`) is
 worse than none.
 
-`in`, `notIn`, and `between` take a `valueList`. `between` requires **exactly two** values.
+`in`, `notIn`, `between`, and `betweenNoEnd` take a `valueList`. `between` requires **exactly
+two** values. `betweenNoEnd` was found in `Filter.cs`'s declaration order during implementation —
+the original table above omitted it — and its "no end" semantics are unconfirmed against a live
+server, so the CLI accepts one or two values for it rather than assuming a fixed arity. **[INFERENCE]**
 
 ## Values
 
@@ -135,6 +139,14 @@ worse than none.
 | date / datetime | ISO 8601, e.g. `2026-07-25`, `2026-07-25T14:30:00` | invariant on input regardless of `--culture` |
 | `Lite<T>` | `"Order;42"` — `TypeName;id` | quote it: unquoted `;` is a shell command separator |
 | entity by id | `42` against a `Lite` token | CLI resolves to the token's type |
+
+**Found while implementing, not in the original table above:** a `Lite` value cannot be sent as the
+bare string `"Order;42"`. The wire format requires the object form — the reference doc is explicit
+that "a Lite filter value uses the object form; the minimum is `{"EntityType":"Order","id":42}`". So
+the parser lowers any quoted (or bare) value matching the `TypeName;id` pattern to
+`{ EntityType, id }` before it reaches the request body; a numeric id is sent as a number, anything
+else (e.g. a Guid) as a string. This is a heuristic on the value's own lexical shape, same as every
+other value in this table — it is not aware of the target token's declared type.
 
 Escaping inside a quoted value: `\"`, `\\`, `\,`. A literal comma in an `in` list **must** be
 escaped or the value quoted.

@@ -8,7 +8,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { run, type Io } from "../src/cli.ts";
@@ -243,10 +243,66 @@ describe("query (STORY-20, STORY-21, STORY-22)", () => {
     expect(r.out).not.toContain('"All"');
   });
 
-  it("withholds --filter rather than approximating it", async () => {
-    const r = await cli(["query", "Order", "--filter", "State = Shipped"]);
+  it("lowers --filter onto the exact QueryRequestTS wire shape (REQ-021)", async () => {
+    const r = await cli(["query", "Order", "--filter", "State = Shipped", "--explain"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const doc = JSON.parse(r.out) as { body: { filters: unknown[] } };
+    expect(doc.body.filters).toEqual([{ token: "State", operation: "EqualTo", value: "Shipped" }]);
+  });
+
+  it("combines and/or grouping, --filter-json, and repeated --filter (all ANDed)", async () => {
+    // --filter-json takes a FILE PATH (or `-` for stdin, not yet wired for query) — never
+    // inline JSON text, per design/filter-expression-syntax.md's own examples.
+    const filterJsonFile = join(configDir, "filters.json");
+    writeFileSync(filterJsonFile, '[{"token":"Entity.Customer.Name","operation":"Contains","value":"Acme"}]');
+    const r = await cli([
+      "query", "Order",
+      "--filter", "State = Shipped or State = Delivered",
+      "--filter", "Total > 100",
+      "--filter-json", filterJsonFile,
+      "--explain",
+    ]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const doc = JSON.parse(r.out) as { body: { filters: unknown[] } };
+    expect(doc.body.filters).toEqual([
+      { groupOperation: "Or", filters: [
+        { token: "State", operation: "EqualTo", value: "Shipped" },
+        { token: "State", operation: "EqualTo", value: "Delivered" },
+      ] },
+      { token: "Total", operation: "GreaterThan", value: 100 },
+      { token: "Entity.Customer.Name", operation: "Contains", value: "Acme" },
+    ]);
+  });
+
+  it("gives a clean UsageError on a --filter-json path that does not exist", async () => {
+    const r = await cli(["query", "Order", "--filter-json", "/no/such/file.json"]);
     expect(r.code).toBe(ExitCode.Usage);
-    expect(r.err).toContain("--filter-json");
+    expect(r.err).toContain("could not read --filter-json file");
+  });
+
+  it("rejects null inside 'in' with a client-side error, never sent to the server", async () => {
+    const r = await cli(["query", "Order", "--filter", "State in Shipped,null"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("cannot include null");
+  });
+
+  it("requires --group for an aggregate-shaped token, before any request", async () => {
+    const r = await cli(["query", "Order", "--filter", "Total.Sum > 100"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("--group");
+  });
+
+  it("--group sets groupResults on the wire request", async () => {
+    const r = await cli(["query", "Order", "--filter", "Total.Sum > 100", "--group", "--explain"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const doc = JSON.parse(r.out) as { body: { groupResults: boolean } };
+    expect(doc.body.groupResults).toBe(true);
+  });
+
+  it("identifies which --filter failed when more than one was given", async () => {
+    const r = await cli(["query", "Order", "--filter", "A = 1", "--filter", "B ==="]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("--filter #2");
   });
 
   it("rejects an unknown query key from cache, before any request (AC-20.7)", async () => {
@@ -310,6 +366,15 @@ describe("403 disambiguation (STORY-08)", () => {
 });
 
 describe("privacy gate (STORY-50, STORY-51)", () => {
+  it("surfaces a --filter syntax error even under a detected agent (not masked by the gate)", async () => {
+    // A parse error is a diagnostic about the agent's OWN input, not data — it must never be
+    // hidden behind "refusing to emit data", or the agent can never see its own mistake.
+    const r = await cli(["query", "Order", "--filter", "State ==="], { env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" } });
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("could not parse filter");
+    expect(r.err).not.toContain("refusing to emit");
+  });
+
   it("refuses row data under a detected agent, with exit 9", async () => {
     const r = await cli(["query", "Order"], { env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" } });
     expect(r.code).toBe(ExitCode.Policy);

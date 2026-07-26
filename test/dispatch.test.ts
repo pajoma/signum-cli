@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { BUILT_INS, builtInsSatisfyDispatchInvariant, parseArgs } from "../src/core/args.ts";
+import { BUILT_INS, builtInsSatisfyDispatchInvariant, flagSetsAreDisjoint, parseArgs } from "../src/core/args.ts";
 import { detectCallerContext } from "../src/core/caller.ts";
 
 describe("dispatch invariant", () => {
@@ -15,6 +15,10 @@ describe("dispatch invariant", () => {
 
   it("built-in verbs stay lowercase, so app PascalCase verbs cannot collide accidentally", () => {
     for (const b of BUILT_INS) expect(b as string).toBe(b.toLowerCase());
+  });
+
+  it("a flag cannot both require a value and be boolean-only", () => {
+    expect(flagSetsAreDisjoint()).toBe(true);
   });
 
   it("routes a dotted first argument to a canonical operation key", () => {

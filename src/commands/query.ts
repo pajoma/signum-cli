@@ -4,10 +4,9 @@
  * STORY-20 (run a query), STORY-21 (de-intern), STORY-22 (output), STORY-23 (pagination),
  * STORY-51 (agent data gate).
  *
- * `--filter` is deliberately NOT implemented here: the expression language is REQ-021/m1 but
- * needs its own parser, and shipping a half-parser that silently mis-filters production data
- * would be worse than not shipping one. `--filter-json` provides full fidelity in the
- * meantime, since it is the wire shape.
+ * `--filter` lowers through `core/filter.ts` onto the exact `FilterTS[]` wire shape;
+ * `--filter-json` remains available as a bypass for anything the DSL cannot express yet
+ * (design/filter-expression-syntax.md "escape hatch").
  */
 
 import type { Ctx } from "../cli.ts";
@@ -15,6 +14,7 @@ import { ExitCode, UsageError } from "../core/errors.ts";
 import { renderResultTable, renderDocument } from "../core/output.ts";
 import { resolveResultTable, type RawResultTable } from "../core/resulttable.ts";
 import { findType, loadMetadata, suggestTypes } from "../core/metadata.ts";
+import { lowerFilterExpressions, parseFilterExpression, type FilterWire } from "../core/filter.ts";
 import { opt, optAll, flag, resolveTarget } from "./context.ts";
 import { readFileSync } from "node:fs";
 
@@ -53,16 +53,24 @@ function parsePagination(ctx: Ctx): unknown {
 }
 
 function readFilterJson(source: string): unknown[] {
-  const text = source === "-"
-    ? undefined
-    : source.startsWith("@")
-      ? readFileSync(source.slice(1), "utf8")
-      : readFileSync(source, "utf8");
-  if (text === undefined) {
+  if (source === "-") {
+    // stdin needs an async read; readFilterJson is called from synchronous request-building.
     throw new UsageError("--filter-json - (stdin) is not yet wired for query", {
-      hint: "Pass a file path instead: --filter-json filters.json",
+      hint: "Pass a file path instead: --filter-json filters.json  (or --filter-json @filters.json)",
     });
   }
+
+  const path = source.startsWith("@") ? source.slice(1) : source;
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (err) {
+    // A bad path must be a clean usage error, not a raw ENOENT stack (found by testing).
+    throw new UsageError(`could not read --filter-json file '${path}'`, {
+      hint: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -85,20 +93,31 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
     });
   }
 
-  if (optAll(ctx, "filter").length > 0) {
-    throw new UsageError("--filter is not implemented yet", {
-      hint:
-        "The filter expression language is specified (REQ-021, docs/design/filter-expression-syntax.md)\n" +
-        "but its parser is not written. A partial parser could silently mis-filter production data,\n" +
-        "so it is withheld rather than approximated.\n\n" +
-        "Use --filter-json for full wire fidelity meanwhile:\n" +
-        '  --filter-json \'[{"token":"State","operation":"EqualTo","value":"Shipped"}]\'',
-    });
-  }
+  // Parse --filter FIRST, before the privacy gate: a syntax error is not data — it is a
+  // diagnostic about the agent's OWN input, which it needs to see to correct itself. Gating
+  // it behind "refusing to emit data" would hide a parse error from exactly the caller who
+  // needs it most. (Found by exercising the built binary under a detected agent context:
+  // `--filter "(Order.. = 5"` under CLAUDECODE=1 was masked by the data-gate message.)
+  const groupEnabled = flag(ctx, "group");
+  const filterStrings = optAll(ctx, "filter");
+  const dslFilters = lowerFilterExpressions(
+    filterStrings.map((expr, idx) => {
+      try {
+        return parseFilterExpression(expr);
+      } catch (err) {
+        // Identify which --filter failed when more than one was given.
+        if (err instanceof UsageError && filterStrings.length > 1) {
+          throw new UsageError(`in --filter #${idx + 1}: ${err.message}`, err.hint !== undefined ? { hint: err.hint } : {});
+        }
+        throw err;
+      }
+    }),
+    { groupEnabled },
+  );
 
-  // The gate is unconditional, so evaluate it before touching credentials or the network:
-  // being told to fix auth and *then* refused would be two round trips of confusion.
-  // --explain emits no data, so it stays exempt (checked after this point).
+  // The gate is unconditional from here on, evaluated before touching credentials or the
+  // network: being told to fix auth and *then* refused would be two round trips of confusion.
+  // --explain emits no data, so it stays exempt.
   if (!ctx.args.flags.explain) ctx.assertMayEmitData("query results");
 
   const target = resolveTarget(ctx, { requireAuth: true });
@@ -119,13 +138,16 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
   const columns = optAll(ctx, "column").map((token) => ({ token }));
   const orders = parseOrders(optAll(ctx, "order"));
   const filterJsonSource = opt(ctx, "filter-json");
-  const filters = filterJsonSource !== undefined ? readFilterJson(filterJsonSource) : [];
+  // DSL and --filter-json are combined by concatenation — both are ANDed at the top level,
+  // matching the design's "may be combined" rule (design/filter-expression-syntax.md).
+  const jsonFilters = filterJsonSource !== undefined ? (readFilterJson(filterJsonSource) as FilterWire[]) : [];
+  const filters: FilterWire[] = [...dslFilters, ...jsonFilters];
 
   const wantCount = flag(ctx, "count");
 
   const request: Record<string, unknown> = {
     queryKey,
-    groupResults: false,
+    groupResults: groupEnabled,
     filters,
     orders,
     columns,
