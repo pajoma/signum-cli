@@ -106,7 +106,7 @@ describe("caller detection (STORY-50)", () => {
     expect(d.loosened).toBe(false);
   });
 
-  it("rejects an invalid override", () => {
-    expect(() => detectCallerContext({ ...noProc, override: "nonsense" })).toThrow(/invalid caller context/);
+  it("rejects an invalid override with a UsageError, not a plain Error (QA finding)", () => {
+    expect(() => detectCallerContext({ ...noProc, override: "nonsense" })).toThrow(/invalid --caller-context/);
   });
 });

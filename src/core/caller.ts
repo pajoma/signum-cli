@@ -14,6 +14,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { UsageError } from "./errors.ts";
 
 export type CallerContext = "interactive" | "automated" | "agent";
 
@@ -70,7 +71,11 @@ export interface DetectOptions {
 export function parseCallerContext(value: string): CallerContext {
   const v = value.trim().toLowerCase();
   if (v === "interactive" || v === "automated" || v === "agent") return v;
-  throw new Error(`invalid caller context '${value}' (expected interactive, automated, or agent)`);
+  // QA finding: this was a plain Error, which cli.ts's report() classifies as ExitCode.Unexpected
+  // (1) and prints "please report it" for — badly misleading for what is just a user typo.
+  throw new UsageError(`invalid --caller-context '${value}'`, {
+    hint: "Valid values: interactive, automated, agent.",
+  });
 }
 
 export function detectCallerContext(options: DetectOptions = {}): CallerDetection {

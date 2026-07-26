@@ -99,6 +99,18 @@ beforeAll(() => {
         );
       }
 
+      // These two must be checked BEFORE the generic executeQuery catch-all below, or that
+      // catch-all shadows them and every query key silently returns RESULT_TABLE regardless
+      // (a mock-fixture bug caught by the very tests it was added to support).
+      if (url.pathname === "/api/query/executeQuery/BadInput") {
+        return new Response(
+          JSON.stringify({ title: "One or more validation errors occurred.", errors: { Total: ["must be positive"] } }),
+          { status: 400, headers },
+        );
+      }
+      if (url.pathname === "/api/query/executeQuery/Broken") {
+        return new Response(JSON.stringify({ exceptionMessage: "something went wrong server-side" }), { status: 500, headers });
+      }
       if (url.pathname.startsWith("/api/query/executeQuery/")) {
         return new Response(JSON.stringify(RESULT_TABLE), { headers });
       }
@@ -118,17 +130,6 @@ beforeAll(() => {
           JSON.stringify({ exceptionType: "System.UnauthorizedAccessException", exceptionMessage: "not allowed" }),
           { status: 403, headers },
         );
-      }
-      // A query key that always returns 400 ValidationProblemDetails, for testing that path.
-      if (url.pathname === "/api/query/executeQuery/BadInput") {
-        return new Response(
-          JSON.stringify({ title: "One or more validation errors occurred.", errors: { Total: ["must be positive"] } }),
-          { status: 400, headers },
-        );
-      }
-      // A query key that always returns a generic 500 with no exceptionType.
-      if (url.pathname === "/api/query/executeQuery/Broken") {
-        return new Response(JSON.stringify({ exceptionMessage: "something went wrong server-side" }), { status: 500, headers });
       }
       if (url.pathname === "/api/entity/Order/400") {
         return new Response(JSON.stringify({ title: "bad request" }), { status: 400, headers });
@@ -489,6 +490,16 @@ describe("query (STORY-20, STORY-21, STORY-22)", () => {
     expect(r.out.trim()).toBe("7");
   });
 
+  it("maps a 400 response to Validation, not a generic failure (was untested for query)", async () => {
+    const r = await cli(["query", "BadInput", "--i-understand-data-goes-to-a-model"]);
+    expect(r.code).toBe(ExitCode.Validation);
+  });
+
+  it("maps a generic 500 with no exceptionType to Unexpected, not Concurrency", async () => {
+    const r = await cli(["query", "Broken", "--i-understand-data-goes-to-a-model"]);
+    expect(r.code).toBe(ExitCode.Unexpected);
+  });
+
   it("rejects an unrecognized flag rather than silently ignoring it (QA finding)", async () => {
     // A typo'd --filer instead of --filter must not run the query unfiltered and unwarned —
     // that is exactly the silent-wrong-data-on-production risk this project is built against.
@@ -705,5 +716,58 @@ describe("redaction (STORY-11)", () => {
     expect(r.err).toContain("<redacted>");
     expect(r.err + r.out).not.toContain(ROTATED_TOKEN);
     expect(r.err + r.out).not.toContain(GOOD_TOKEN);
+  });
+});
+
+describe("version (previously 0% covered)", () => {
+  it("reports the CLI's own version with no target configured", async () => {
+    const r = await cli(["version"], { env: { SIGNUM_CONFIG_DIR: mkdtempSync(join(tmpdir(), "signum-ver-")) }, tty: true });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.out).toContain("signum");
+  });
+
+  it("reports the target as reachable when it responds", async () => {
+    const r = await cli(["version", "--url", baseUrl, "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const doc = JSON.parse(r.out) as { target: { reachable: boolean } | null };
+    expect(doc.target?.reachable).toBe(true);
+  });
+
+  it("reports the target as unreachable rather than crashing, when it does not respond", async () => {
+    const r = await cli(["version", "--url", "http://127.0.0.1:1", "--json"]);
+    expect(r.code).toBe(ExitCode.Ok); // version itself still succeeds — only the target probe fails
+    const doc = JSON.parse(r.out) as { target: { reachable: boolean } | null };
+    expect(doc.target?.reachable).toBe(false);
+  });
+});
+
+describe("caller-context override end-to-end (AC-50.4) — previously only unit-tested", () => {
+  it("--caller-context interactive lets data through despite an agent marker, and logs the loosening", async () => {
+    const r = await cli(
+      ["query", "Order", "--json", "--caller-context", "interactive"],
+      { env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" } },
+    );
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.err).toContain("loosened");
+  });
+
+  it("--caller-context agent forces the gate even on an interactive TTY with no agent markers", async () => {
+    const r = await cli(["query", "Order", "--caller-context", "agent"], { tty: true, env: { SIGNUM_CONFIG_DIR: configDir } });
+    expect(r.code).toBe(ExitCode.Policy);
+  });
+
+  it("tightening the context is silent — no loosening warning", async () => {
+    const r = await cli(["query", "Order", "--caller-context", "agent"], { tty: true, env: { SIGNUM_CONFIG_DIR: configDir } });
+    expect(r.err).not.toContain("loosened");
+  });
+
+  it("SIGNUM_ALLOW_AGENT_DATA=1 works as an alternative to the flag", async () => {
+    const r = await cli(["query", "Order", "--json"], { env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1", SIGNUM_ALLOW_AGENT_DATA: "1" } });
+    expect(r.code).toBe(ExitCode.Ok);
+  });
+
+  it("an invalid --caller-context value is a usage error, not a silent no-op", async () => {
+    const r = await cli(["query", "Order", "--caller-context", "nonsense"]);
+    expect(r.code).toBe(ExitCode.Usage);
   });
 });
