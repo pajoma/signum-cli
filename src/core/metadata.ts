@@ -17,6 +17,7 @@
 import { SignumHttp } from "./http.ts";
 import { loadMetadataCache, saveMetadataCache } from "./config.ts";
 import { CliError, ExitCode } from "./errors.ts";
+import { editDistance } from "./text.ts";
 
 export interface MemberInfo {
   name: string;
@@ -106,22 +107,6 @@ export function findType(md: Metadata, name: string): TypeInfo | undefined {
     if (norm(t.name) === target + "entity" || norm(t.name) + "entity" === target) return t;
   }
   return undefined;
-}
-
-/** Levenshtein distance, capped for early exit. */
-function editDistance(a: string, b: string): number {
-  if (a === b) return 0;
-  const prev: number[] = Array.from({ length: b.length + 1 }, (_, i) => i);
-  const cur: number[] = new Array<number>(b.length + 1).fill(0);
-  for (let i = 1; i <= a.length; i++) {
-    cur[0] = i;
-    for (let j = 1; j <= b.length; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      cur[j] = Math.min((cur[j - 1] ?? 0) + 1, (prev[j] ?? 0) + 1, (prev[j - 1] ?? 0) + cost);
-    }
-    for (let j = 0; j <= b.length; j++) prev[j] = cur[j] ?? 0;
-  }
-  return prev[b.length] ?? 0;
 }
 
 /**

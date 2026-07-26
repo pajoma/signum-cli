@@ -49,7 +49,10 @@ export async function runGet(ctx: Ctx): Promise<ExitCode> {
     ctx.assertMayEmitData(flag(ctx, "exists") ? "entity existence" : "entity data");
   }
 
-  const target = resolveTarget(ctx, { requireAuth: true });
+  // Conditional on --explain, matching query.ts — it sends nothing so must not need a
+  // credential (QA finding, parity fix). The final GET below enforces auth itself if
+  // --explain is absent and no token is stored.
+  const target = resolveTarget(ctx, { requireAuth: !ctx.args.flags.explain });
 
   const md = await loadMetadata({
     url: target.url, http: target.http, env: ctx.io.env, warn: (l) => ctx.io.err(l),

@@ -315,6 +315,69 @@ describe("query (STORY-20, STORY-21, STORY-22)", () => {
     const r = await cli(["query", "Order", "--count"], { tty: true });
     expect(r.out.trim()).toBe("7");
   });
+
+  it("rejects an unrecognized flag rather than silently ignoring it (QA finding)", async () => {
+    // A typo'd --filer instead of --filter must not run the query unfiltered and unwarned —
+    // that is exactly the silent-wrong-data-on-production risk this project is built against.
+    const r = await cli(["query", "Order", "--filer", "State = Shipped", "--i-understand-data-goes-to-a-model"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("--filer");
+  });
+
+  it("suggests the likely intended flag for a near-miss typo", async () => {
+    const r = await cli(["query", "Order", "--filer", "State = Shipped"]);
+    expect(r.err).toContain("--filter");
+  });
+
+  it("still accepts every flag query actually declares (no false positives from the new check)", async () => {
+    const r = await cli([
+      "query", "Order",
+      "--filter", "State = Shipped", "--column", "State", "--order", "-State",
+      "--page", "1", "--page-size", "10", "--group", "--i-understand-data-goes-to-a-model",
+    ]);
+    expect(r.code).toBe(ExitCode.Ok);
+  });
+
+  it("--explain works with NO stored credential — it sends nothing (AC-20.6)", async () => {
+    const r = await cli(["query", "Order", "--explain"], {
+      env: { SIGNUM_CONFIG_DIR: mkdtempSync(join(tmpdir(), "signum-noauth-")), SIGNUM_URL: baseUrl },
+    });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(JSON.parse(r.out).method).toBe("POST");
+  });
+
+  it("rejects combining --top with --page rather than silently preferring one (QA finding)", async () => {
+    const r = await cli(["query", "Order", "--top", "5", "--page", "2", "--explain"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("pagination");
+  });
+
+  it("rejects combining --all with --top", async () => {
+    const r = await cli(["query", "Order", "--all", "--top", "5", "--explain"]);
+    expect(r.code).toBe(ExitCode.Usage);
+  });
+});
+
+describe("colour (AC-22.1, QA finding)", () => {
+  it("a TTY table render carries ANSI codes end-to-end", async () => {
+    const r = await cli(["query", "Order"], { tty: true });
+    expect(r.out).toContain("\x1b[");
+  });
+
+  it("--no-color suppresses it even on a TTY", async () => {
+    const r = await cli(["query", "Order", "--no-color"], { tty: true });
+    expect(r.out).not.toContain("\x1b[");
+  });
+
+  it("NO_COLOR env var suppresses it even on a TTY", async () => {
+    const r = await cli(["query", "Order"], { tty: true, env: { NO_COLOR: "1" } });
+    expect(r.out).not.toContain("\x1b[");
+  });
+
+  it("non-TTY (json) output never carries ANSI codes regardless", async () => {
+    const r = await cli(["query", "Order", "--json"], { tty: false });
+    expect(r.out).not.toContain("\x1b[");
+  });
 });
 
 describe("get (STORY-30)", () => {
@@ -332,6 +395,20 @@ describe("get (STORY-30)", () => {
   it("returns exit 5 for a missing entity (AC-30.7)", async () => {
     const r = await cli(["get", "Order", "999"]);
     expect(r.code).toBe(ExitCode.NotFound);
+  });
+
+  it("--explain works with NO stored credential (QA finding, parity with query)", async () => {
+    const r = await cli(["get", "Order", "42", "--explain"], {
+      env: { SIGNUM_CONFIG_DIR: mkdtempSync(join(tmpdir(), "signum-noauth-get-")), SIGNUM_URL: baseUrl },
+    });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(JSON.parse(r.out).method).toBe("GET");
+  });
+
+  it("rejects an unrecognized flag rather than silently ignoring it", async () => {
+    const r = await cli(["get", "Order", "42", "--exsits"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("--exsits");
   });
 });
 

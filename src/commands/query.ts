@@ -32,6 +32,19 @@ function parsePagination(ctx: Ctx): unknown {
   const top = opt(ctx, "top");
   const page = opt(ctx, "page");
   const pageSize = opt(ctx, "page-size");
+  const all = flag(ctx, "all");
+
+  // QA finding: these previously had silent, undocumented precedence (--top over --page over
+  // --all), so a user combining them by habit got a page silently discarded. Ambiguous input
+  // is now a clear error, matching the project's own rule for aggregate-without-group: silently
+  // changing pagination semantics is worse than asking the user to pick one.
+  const modesGiven = [top !== undefined, page !== undefined || pageSize !== undefined, all]
+    .filter(Boolean).length;
+  if (modesGiven > 1) {
+    throw new UsageError("choose only one pagination mode: --top, --page/--page-size, or --all", {
+      hint: "These were previously combinable with silent, undocumented precedence — pick one explicitly.",
+    });
+  }
 
   if (top !== undefined) {
     const n = Number(top);
@@ -45,7 +58,7 @@ function parsePagination(ctx: Ctx): unknown {
     if (!Number.isInteger(current) || current <= 0) throw new UsageError("--page must be a positive integer");
     return { mode: "Paginate", elementsPerPage: size, currentPage: current };
   }
-  if (flag(ctx, "all")) {
+  if (all) {
     // Unbounded must be explicit; the default is always bounded (AC-23.2).
     return { mode: "All" };
   }
@@ -120,7 +133,12 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
   // --explain emits no data, so it stays exempt.
   if (!ctx.args.flags.explain) ctx.assertMayEmitData("query results");
 
-  const target = resolveTarget(ctx, { requireAuth: true });
+  // requireAuth is conditional on --explain: it sends nothing, so it must not need a
+  // credential (QA finding — this previously blocked previewing a request before ever
+  // logging in). The metadata fetch below is anonymous either way; only the real
+  // executeQuery/queryValue call actually needs the token, and SignumHttp enforces that
+  // itself if one is missing.
+  const target = resolveTarget(ctx, { requireAuth: !ctx.args.flags.explain });
 
   // Validate the query key against cached metadata so a typo costs no round trip (AC-20.7).
   const md = await loadMetadata({
@@ -190,6 +208,9 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
     format: ctx.format,
     write: ctx.io.out,
     warn: (line) => ctx.io.err(line + "\n"),
+    // QA finding: ctx.color was computed (TTY + NO_COLOR detection) but never consumed —
+    // colour output didn't exist. Threaded through here now.
+    color: ctx.color,
   });
 
   // Total is reported distinctly from rows returned, so a page is never mistaken for all (AC-21.5).

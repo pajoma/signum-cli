@@ -4,7 +4,7 @@
  * STORY-09 (non-interactive by construction) · STORY-51 (agent gate) · STORY-63 (errors route to help)
  */
 
-import { parseArgs, type ParsedArgs } from "./core/args.ts";
+import { assertKnownFlags, parseArgs, type ParsedArgs } from "./core/args.ts";
 import { CliError, ExitCode, PolicyError, UsageError, exitCodeOf } from "./core/errors.ts";
 import { detectCallerContext, type CallerDetection } from "./core/caller.ts";
 import { colorEnabled, effectiveFormat, renderDocument, type OutputFormat } from "./core/output.ts";
@@ -138,14 +138,30 @@ export async function run(argv: readonly string[], io: Io): Promise<ExitCode> {
   switch (args.kind) {
     case "builtin":
       switch (args.command) {
-        case "version":    return await runVersion(ctx);
-        case "auth":       return await runAuth(ctx);
+        case "version":
+          assertKnownFlags(args, ["version"]);
+          return await runVersion(ctx);
+        case "auth": {
+          // Validate against the SUBCOMMAND's flags once it's known to be a real one; an
+          // invalid subcommand should get its own "unknown subcommand" error, not a flag one.
+          const sub = args.positionals[0]?.toLowerCase();
+          if (sub === "login" || sub === "status" || sub === "logout") {
+            assertKnownFlags(args, ["auth", sub]);
+          }
+          return await runAuth(ctx);
+        }
         case "types":
         case "queries":
         case "operations":
-        case "explain":    return await runDiscover(ctx, args.command);
-        case "query":      return await runQuery(ctx);
-        case "get":        return await runGet(ctx);
+        case "explain":
+          assertKnownFlags(args, [args.command]);
+          return await runDiscover(ctx, args.command);
+        case "query":
+          assertKnownFlags(args, ["query"]);
+          return await runQuery(ctx);
+        case "get":
+          assertKnownFlags(args, ["get"]);
+          return await runGet(ctx);
       }
       break;
 

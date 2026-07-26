@@ -142,6 +142,9 @@ export const COMMANDS: CommandSpec[] = [
       { name: "column", arg: "<token>", summary: "Column to select; repeatable, order preserved" },
       { name: "order", arg: "<token>", summary: "Sort token; prefix with - for descending" },
       { name: "top", arg: "<n>", summary: "Return only the first n rows" },
+      { name: "page", arg: "<n>", summary: "Page number (1-based); use with --page-size" },
+      { name: "page-size", arg: "<n>", summary: "Rows per page; default 50" },
+      { name: "all", summary: "Fetch every row, unbounded — only one of --top/--page/--all at a time" },
       { name: "group", summary: "Set groupResults; required for aggregate tokens (Total.Sum, …)" },
       { name: "count", summary: "Return only the row count" },
     ],
@@ -161,6 +164,21 @@ export const COMMANDS: CommandSpec[] = [
     examples: ["signum get Order 42", 'signum get "Order;42" --json'],
   },
 ];
+
+/**
+ * Flag names (without leading dashes) a command/subcommand declares, for unknown-flag
+ * rejection (QA finding). Global flags never reach this check — parseArgs already special-
+ * cases them into the typed `flags` struct, so they never land in `options`/`booleans`.
+ */
+export function knownFlagNames(path: readonly string[]): Set<string> {
+  const spec = findCommand(path);
+  const names = new Set<string>();
+  for (const f of spec?.flags ?? []) {
+    names.add(f.name.toLowerCase());
+    if (f.alias !== undefined) names.add(f.alias.toLowerCase());
+  }
+  return names;
+}
 
 export function findCommand(path: readonly string[]): CommandSpec | undefined {
   let list = COMMANDS;

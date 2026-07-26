@@ -14,6 +14,8 @@
 
 import { UsageError, type ExitCode } from "./errors.ts";
 import { parseOutputFormat, type OutputFormat } from "./output.ts";
+import { knownFlagNames } from "./help.ts";
+import { nearest } from "./text.ts";
 
 /** The complete built-in verb set. Adding to this can shadow an app's operation verb. */
 export const BUILT_INS = [
@@ -182,6 +184,31 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
   }
   // 3. verb-noun operation
   return { kind: "verb-noun", command: first, positionals: positionals.slice(1), flags, options, booleans };
+}
+
+/**
+ * Reject a flag the target command does not declare, rather than silently ignoring it
+ * (QA finding: `--filer` instead of `--filter` previously ran the query unfiltered with
+ * exit 0 — exactly the silent-wrong-data-on-production risk this project is built against).
+ *
+ * Only per-command flags need declaring here: global flags (`--url`, `-o`, `--json`, …) are
+ * already peeled off into the typed `flags` struct by `parseArgs` and never reach
+ * `options`/`booleans`, so they can't collide with this check.
+ */
+export function assertKnownFlags(args: ParsedArgs, path: readonly string[]): void {
+  const known = knownFlagNames(path);
+  const used = new Set<string>([...args.options.keys(), ...args.booleans]);
+  const unknown = [...used].filter((f) => !known.has(f));
+  if (unknown.length === 0) return;
+
+  const withSuggestions = unknown.map((u) => {
+    const near = nearest(u, known);
+    return near !== undefined ? `--${u} (did you mean --${near}?)` : `--${u}`;
+  });
+  throw new UsageError(
+    `unknown flag${unknown.length > 1 ? "s" : ""} for '${path.join(" ")}': ${withSuggestions.join(", ")}`,
+    { hint: `Run \`signum ${path.join(" ")} --help\` for the flags this command accepts.` },
+  );
 }
 
 export interface ExitSignal {

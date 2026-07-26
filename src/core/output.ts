@@ -54,17 +54,28 @@ function liteKey(entity: unknown): string | undefined {
   return undefined;
 }
 
+function csvEscape(s: string, sep: string): string {
+  return s.includes(sep) || s.includes('"') || s.includes("\n") ? `"${s.replaceAll('"', '""')}"` : s;
+}
+
+/** Header-only line, for the delimited empty-result case (QA finding — see below). */
+function delimitedHeader(table: ResolvedTable, sep: string): string {
+  return table.columns.map((c) => csvEscape(c, sep)).join(sep) + "\n";
+}
+
 function delimited(table: ResolvedTable, sep: string): string {
-  const esc = (s: string) =>
-    s.includes(sep) || s.includes('"') || s.includes("\n") ? `"${s.replaceAll('"', '""')}"` : s;
-  const lines = [table.columns.map(esc).join(sep)];
-  for (const row of table.rows) lines.push(row.values.map((v) => esc(scalar(v))).join(sep));
+  const lines = [delimitedHeader(table, sep).slice(0, -1)]; // header, without its own trailing \n yet
+  for (const row of table.rows) lines.push(row.values.map((v) => csvEscape(scalar(v), sep)).join(sep));
   return lines.join("\n") + "\n";
 }
 
 const MAX_CELL = 60;
 
-function renderTable(table: ResolvedTable): string {
+/** Bold, applied only to the header and separator — the minimal, safe reading of "with colour". */
+const BOLD = "\x1b[1m";
+const RESET = "\x1b[0m";
+
+function renderTable(table: ResolvedTable, color: boolean): string {
   if (table.rows.length === 0) return "";
   // Truncation applies ONLY to the human table form; machine formats are never truncated (AC-22.4).
   const cells = table.rows.map((r) =>
@@ -78,9 +89,11 @@ function renderTable(table: ResolvedTable): string {
   );
   const line = (vals: readonly string[]) =>
     vals.map((v, i) => v.padEnd(widths[i] ?? 0)).join("  ").trimEnd();
+  const headerLine = line(table.columns);
+  const sepLine = widths.map((w) => "-".repeat(w)).join("  ");
   return [
-    line(table.columns),
-    widths.map((w) => "-".repeat(w)).join("  "),
+    color ? `${BOLD}${headerLine}${RESET}` : headerLine,
+    sepLine,
     ...cells.map(line),
   ].join("\n") + "\n";
 }
@@ -102,6 +115,12 @@ export interface RenderOptions {
   write: (chunk: string) => void;
   /** Written to stderr — diagnostics only. */
   warn?: (line: string) => void;
+  /**
+   * Applies ONLY to `table` format (AC-22.1). Every other format ignores it outright — colour
+   * in JSON/CSV/NDJSON would corrupt machine-readable output, so this is enforced structurally
+   * rather than left as a caller convention (see the "color:true on json" test).
+   */
+  color?: boolean;
 }
 
 export function renderResultTable(table: ResolvedTable, opts: RenderOptions): void {
@@ -109,14 +128,20 @@ export function renderResultTable(table: ResolvedTable, opts: RenderOptions): vo
 
   if (table.rows.length === 0) {
     // Empty is success; humans get a note on stderr, machines get an empty structure (AC-22.6).
+    // csv/tsv are a partial exception: a CSV file conventionally always has a header row, so
+    // omitting it entirely (QA finding — previously zero bytes written, indistinguishable from
+    // a crashed command) is corrected here. ndjson/name genuinely have nothing to say for zero
+    // rows — an empty stream IS the correct signal for those formats, so they stay silent.
     if (format === "table") opts.warn?.("no rows");
     else if (format === "json") write("[]\n");
+    else if (format === "csv") write(delimitedHeader(table, ","));
+    else if (format === "tsv") write(delimitedHeader(table, "\t"));
     return;
   }
 
   switch (format) {
     case "table":
-      write(renderTable(table));
+      write(renderTable(table, opts.color === true));
       break;
     case "json":
       write(JSON.stringify(toObjects(table), null, 2) + "\n");
