@@ -20,7 +20,7 @@ inspect the real stored state of a record.
 - AC-30.2: A `Lite` key is accepted in place of type+id: `signum get "Order;42"` (`TypeName;id`). Quote it — an unquoted `;` is a shell command separator.
 - AC-30.3: `--pack` uses `entityPack`/`entityPackLight` to return the entity together with `canExecute`, so a user can see what they may do to it in one call.
 - AC-30.4: The type argument accepts the **clean** name (`Order`) and the entity class name (`OrderEntity`), resolving both via cached metadata.
-- AC-30.5: `signum exists <Type> <id>` wraps `api/exists`; `signum list <Type>` wraps `api/fetchAll` and warns on a TTY that it is unbounded.
+- AC-30.5: `signum get <Type> <id> --exists` wraps `api/exists`; `signum get <Type>` with no id wraps `api/fetchAll`, is always bounded, and warns on a TTY that it is unfiltered ([CLI surface](../design/cli-surface.md)).
 - AC-30.6: Output honours STORY-22's TTY rules: readable when watched, JSON when piped.
 - AC-30.7: A missing entity exits with the not-found code (REQ-051), distinct from an auth or transport failure.
 

@@ -48,9 +48,17 @@ tracing back to requirement ids. Written so far: [`auth.md`](docs/stories/auth.m
 (STORY-30…34), [`operations.md`](docs/stories/operations.md) (STORY-40…46). All of REQ-001…REQ-046 is
 now storied; output/UX (REQ-050…055), MCP (REQ-060…062) and non-functional (REQ-070…077) are not.
 
-**Design specs** live in [`docs/design/`](docs/design/) — currently
-[`filter-expression-syntax.md`](docs/design/filter-expression-syntax.md), the CLI's primary
-interface. Read it before touching anything query-related.
+**Design specs** live in [`docs/design/`](docs/design/):
+
+- [`cli-surface.md`](docs/design/cli-surface.md) — the command tree, global flags, output model, and
+  exit codes. Modelled on `gh` and `kubectl`. **Read this before adding any command**, and keep it in
+  step with the stories; the two drifted once already.
+- [`filter-expression-syntax.md`](docs/design/filter-expression-syntax.md) — the filter DSL, the CLI's
+  primary interface. Read before touching anything query-related.
+
+**Command naming is settled** (cli-surface §8): verb-first for app nouns discovered at runtime
+(`query`, `get`, `explain`, `run`), noun-verb for fixed tooling nouns (`auth`, `config`). Mutation is
+`signum run <OperationKey>`, never `operation`.
 
 **Requirements are not user stories.** They state what the CLI must do and carry **no
 acceptance criteria** — do not add any, to the document or the issues. Implementation work is

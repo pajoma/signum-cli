@@ -32,7 +32,7 @@ engine with 223 scripts) and `Signum/CodeGeneration/` already own that.
 | [`docs/http-api.md`](docs/http-api.md) | The API contract this CLI is built against: auth, endpoints, serialization rules, QueryToken grammar. |
 | [`docs/requirements.md`](docs/requirements.md) | What the CLI must do — 48 requirements, mirrored as GitHub issues and triaged into milestones `m1`/`m2`/`m3`/`always`. |
 | [`docs/stories/`](docs/stories/) | 32 user stories with acceptance criteria (auth, query, entities, operations). |
-| [`docs/design/`](docs/design/) | Design specs — currently the filter expression syntax. |
+| [`docs/design/`](docs/design/) | Design specs — the [CLI surface](docs/design/cli-surface.md) (command tree, flags, exit codes) and the [filter expression syntax](docs/design/filter-expression-syntax.md). |
 | [`docs/target-application.md`](docs/target-application.md) | The deployment this must work against, and what it rules out. |
 | [`docs/decisions/`](docs/decisions/) | ADRs: implementation language, self-contained distribution, and how to relate to the framework's built-in MCP server. |
 | [`docs/reference/`](docs/reference/) | ~9,800 lines of deep analysis across seven areas, every claim cited to `file:line`. |

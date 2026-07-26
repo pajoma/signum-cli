@@ -49,7 +49,7 @@ Traces to: REQ-040 · Priority: `m2`
 own business logic rather than editing data behind its back.
 
 **Acceptance Criteria:**
-- AC-40.1: `signum operation <key> --id <id>` / `--lite "<Type;id>"` / `--entity @file.json` invokes the operation.
+- AC-40.1: `signum run <OperationKey> --id <id>` / `--lite "<Type;id>"` / `-f entity.json` invokes the operation ([CLI surface](../design/cli-surface.md)).
 - AC-40.2: The CLI selects `executeEntity` when it holds a modified entity graph and `executeLite` when it holds only an identity — matching how the browser decides via `canBeModified`.
 - AC-40.3: Saving is expressed as an operation (e.g. `UserOperation.Save`); there is no separate `save` command implying an endpoint that does not exist.
 - AC-40.4: The response `EntityPackTS` is rendered, including the refreshed `canExecute`.
