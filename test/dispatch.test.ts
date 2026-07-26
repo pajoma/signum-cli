@@ -1,0 +1,108 @@
+/**
+ * Dispatch invariants and caller detection.
+ *
+ * design/cli-surface.md §2.1 · STORY-50
+ */
+
+import { describe, expect, it } from "bun:test";
+import { BUILT_INS, builtInsSatisfyDispatchInvariant, parseArgs } from "../src/core/args.ts";
+import { detectCallerContext } from "../src/core/caller.ts";
+
+describe("dispatch invariant", () => {
+  it("no built-in contains a dot — rule 1 depends on it", () => {
+    expect(builtInsSatisfyDispatchInvariant()).toBe(true);
+  });
+
+  it("built-in verbs stay lowercase, so app PascalCase verbs cannot collide accidentally", () => {
+    for (const b of BUILT_INS) expect(b as string).toBe(b.toLowerCase());
+  });
+
+  it("routes a dotted first argument to a canonical operation key", () => {
+    const a = parseArgs(["OrderOperation.Ship", "--lite", "Order;42"], {});
+    expect(a.kind).toBe("operation-key");
+    expect(a.command).toBe("OrderOperation.Ship");
+  });
+
+  it("built-ins always win over a verb-noun reading", () => {
+    const a = parseArgs(["get", "order"], {});
+    expect(a.kind).toBe("builtin");
+    expect(a.command).toBe("get");
+  });
+
+  it("falls through to verb-noun for an unknown verb", () => {
+    const a = parseArgs(["ship", "order", "42"], {});
+    expect(a.kind).toBe("verb-noun");
+    expect(a.command).toBe("ship");
+    expect(a.positionals).toEqual(["order", "42"]);
+  });
+
+  it("treats a bare invocation as 'none' so it lands on help", () => {
+    expect(parseArgs([], {}).kind).toBe("none");
+  });
+});
+
+describe("flag parsing", () => {
+  it("supports --json as an alias for -o json", () => {
+    expect(parseArgs(["query", "Order", "--json"], {}).flags.output).toBe("json");
+  });
+
+  it("accepts --output=csv and -o csv", () => {
+    expect(parseArgs(["query", "Order", "--output=csv"], {}).flags.output).toBe("csv");
+    expect(parseArgs(["query", "Order", "-o", "tsv"], {}).flags.output).toBe("tsv");
+  });
+
+  it("collects repeatable options in order", () => {
+    const a = parseArgs(["query", "Order", "--column", "A", "--column", "B"], {});
+    expect(a.options.get("column")).toEqual(["A", "B"]);
+  });
+
+  it("rejects a value-taking flag with no value", () => {
+    expect(() => parseArgs(["query", "Order", "--top"], {})).toThrow(/requires a value/);
+  });
+
+  it("reads the agent-data acknowledgement from the environment", () => {
+    expect(parseArgs(["query", "Order"], { SIGNUM_ALLOW_AGENT_DATA: "1" }).flags.allowAgentData).toBe(true);
+  });
+});
+
+describe("caller detection (STORY-50)", () => {
+  const noProc = { stdoutIsTty: false, env: {} as NodeJS.ProcessEnv };
+
+  it("fails closed: no TTY and no marker is 'automated', never 'interactive'", () => {
+    const d = detectCallerContext(noProc);
+    // The parent process on a dev machine may itself be an agent, so accept either
+    // strict verdict — what must never happen is 'interactive'.
+    expect(d.context === "automated" || d.context === "agent").toBe(true);
+  });
+
+  it("treats a known agent env var as 'agent'", () => {
+    const d = detectCallerContext({ stdoutIsTty: true, env: { CLAUDECODE: "1" } as NodeJS.ProcessEnv });
+    expect(d.context).toBe("agent");
+    expect(d.signals.some((s) => s.includes("CLAUDECODE"))).toBe(true);
+  });
+
+  it("mcp mode is definitive", () => {
+    const d = detectCallerContext({ ...noProc, mcpMode: true });
+    expect(d.context).toBe("agent");
+  });
+
+  it("flags a loosening override so the caller can log it (AC-50.4)", () => {
+    const d = detectCallerContext({
+      stdoutIsTty: true,
+      env: { CLAUDECODE: "1" } as NodeJS.ProcessEnv,
+      override: "interactive",
+    });
+    expect(d.context).toBe("interactive");
+    expect(d.overridden).toBe(true);
+    expect(d.loosened).toBe(true);
+  });
+
+  it("does not flag a tightening override as loosening", () => {
+    const d = detectCallerContext({ stdoutIsTty: true, env: {} as NodeJS.ProcessEnv, override: "agent" });
+    expect(d.loosened).toBe(false);
+  });
+
+  it("rejects an invalid override", () => {
+    expect(() => detectCallerContext({ ...noProc, override: "nonsense" })).toThrow(/invalid caller context/);
+  });
+});
