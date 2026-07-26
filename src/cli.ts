@@ -69,6 +69,24 @@ function showHelp(args: ParsedArgs, io: Io): ExitCode {
     : args.positionals;
 
   if (path.length > 0) {
+    // QA fix: a multi-segment path (e.g. "auth login") can only mean a subcommand — topics
+    // are always a single word — so try exact subcommand resolution FIRST. Previously topic
+    // lookup used only path[0] and ran unconditionally, so "help auth login" silently dropped
+    // "login" and rendered the "auth" topic instead of the login subcommand's own help, while
+    // "auth login --help" (the other route to the same intent) worked correctly. The two
+    // phrasings must agree.
+    if (path.length > 1) {
+      const exact = findCommand(path);
+      if (exact !== undefined) {
+        if (asJson) {
+          renderDocument({ schemaVersion: 1, command: helpAsJson(exact) }, { format, write: io.out });
+        } else {
+          io.out(renderCommand(exact, path));
+        }
+        return ExitCode.Ok;
+      }
+    }
+
     const topicKey = (path[0] as string).toLowerCase();
     const topic = TOPICS[topicKey];
     if (topic !== undefined) {
@@ -79,15 +97,13 @@ function showHelp(args: ParsedArgs, io: Io): ExitCode {
       }
       return ExitCode.Ok;
     }
-    const exact = findCommand(path);
-    const spec = exact ?? findCommand([path[0] as string]);
+    const spec = findCommand([path[0] as string]);
     if (spec !== undefined) {
-      const resolvedPath = exact !== undefined ? path : [path[0] as string];
       if (asJson) {
         // Structured help is SCOPED to what was asked for, not the whole tree.
         renderDocument({ schemaVersion: 1, command: helpAsJson(spec) }, { format, write: io.out });
       } else {
-        io.out(renderCommand(spec, resolvedPath));
+        io.out(renderCommand(spec, [path[0] as string]));
       }
       return ExitCode.Ok;
     }

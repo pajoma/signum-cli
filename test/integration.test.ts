@@ -45,6 +45,10 @@ const REFLECTION = {
     members: { UserName: { type: { name: "string" } } },
     operations: { "UserOperation.Save": { niceName: "Save" } },
   },
+  // Exist purely so their query keys pass the metadata-validation step before hitting the
+  // 400/500 fixture routes above.
+  BadInput: { kind: "Main", queryDefined: true, members: {}, operations: {} },
+  Broken: { kind: "Main", queryDefined: true, members: {}, operations: {} },
 };
 
 /** Interned: `State` cells are indices, `Total` cells are literals. */
@@ -107,11 +111,27 @@ beforeAll(() => {
       if (url.pathname === "/api/entity/Order/999") {
         return new Response(JSON.stringify({ exceptionMessage: "not found" }), { status: 404, headers });
       }
+      if (url.pathname === "/api/exists/Order/42") return new Response("true", { headers });
+      if (url.pathname === "/api/exists/Order/999") return new Response("false", { headers });
       if (url.pathname === "/api/operation/executeLite/OrderOperation.Ship") {
         return new Response(
           JSON.stringify({ exceptionType: "System.UnauthorizedAccessException", exceptionMessage: "not allowed" }),
           { status: 403, headers },
         );
+      }
+      // A query key that always returns 400 ValidationProblemDetails, for testing that path.
+      if (url.pathname === "/api/query/executeQuery/BadInput") {
+        return new Response(
+          JSON.stringify({ title: "One or more validation errors occurred.", errors: { Total: ["must be positive"] } }),
+          { status: 400, headers },
+        );
+      }
+      // A query key that always returns a generic 500 with no exceptionType.
+      if (url.pathname === "/api/query/executeQuery/Broken") {
+        return new Response(JSON.stringify({ exceptionMessage: "something went wrong server-side" }), { status: 500, headers });
+      }
+      if (url.pathname === "/api/entity/Order/400") {
+        return new Response(JSON.stringify({ title: "bad request" }), { status: 400, headers });
       }
       return new Response(JSON.stringify({ exceptionMessage: "unhandled" }), { status: 404, headers });
     },
@@ -154,7 +174,7 @@ describe("discovery without credentials (STORY-24, STORY-61)", () => {
     const r = await cli(["types", "--url", baseUrl, "--json"]);
     expect(r.code).toBe(ExitCode.Ok);
     const types = JSON.parse(r.out) as Array<{ name: string }>;
-    expect(types.map((t) => t.name).sort()).toEqual(["Order", "UserEntity"]);
+    expect(types.map((t) => t.name).sort()).toEqual(["BadInput", "Broken", "Order", "UserEntity"]);
   });
 
   it("explains a type from metadata", async () => {
