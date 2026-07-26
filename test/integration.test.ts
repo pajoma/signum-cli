@@ -228,6 +228,80 @@ describe("login and status (STORY-12, STORY-06)", () => {
   });
 });
 
+describe("auth lifecycle edges (QA coverage — previously 0% tested)", () => {
+  // Each test below uses its OWN isolated config dir, never the shared `configDir`, so
+  // logging out or leaving things unconfigured here cannot affect later describe blocks that
+  // depend on `configDir` already holding a valid credential.
+
+  it("`auth status` on a genuinely fresh install — the first thing anyone runs", async () => {
+    const fresh = mkdtempSync(join(tmpdir(), "signum-fresh-status-"));
+    const r = await cli(["auth", "status"], { env: { SIGNUM_CONFIG_DIR: fresh }, tty: true });
+    expect(r.code).toBe(ExitCode.NotAuthenticated);
+    expect(r.out).toContain("Not configured");
+  });
+
+  it("`auth status --json` on a fresh install reports null target and 'none' credential", async () => {
+    const fresh = mkdtempSync(join(tmpdir(), "signum-fresh-status-json-"));
+    const r = await cli(["auth", "status", "--json"], { env: { SIGNUM_CONFIG_DIR: fresh } });
+    const doc = JSON.parse(r.out) as { target: string | null; credential: string };
+    expect(doc.target).toBeNull();
+    expect(doc.credential).toBe("none");
+  });
+
+  it("`auth logout` with nothing stored says so and still exits 0", async () => {
+    const fresh = mkdtempSync(join(tmpdir(), "signum-logout-empty-"));
+    const r = await cli(["auth", "logout"], { env: { SIGNUM_CONFIG_DIR: fresh } });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.out).toContain("No stored credential");
+  });
+
+  it("`auth logout` removes a stored credential and is honest that it is local-only", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "signum-logout-"));
+    await cli(["auth", "login", "--url", baseUrl, "--with-token"], { env: { SIGNUM_CONFIG_DIR: dir }, stdin: GOOD_TOKEN + "\n" });
+    const before = await cli(["auth", "status"], { env: { SIGNUM_CONFIG_DIR: dir } });
+    expect(before.code).toBe(ExitCode.Ok);
+
+    const r = await cli(["auth", "logout"], { env: { SIGNUM_CONFIG_DIR: dir } });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.out).toContain("removed");
+    // Signum performs no server-side token revocation — the CLI must not imply that it does.
+    expect(r.err).toContain("local only");
+
+    const after = await cli(["auth", "status"], { env: { SIGNUM_CONFIG_DIR: dir } });
+    expect(after.code).toBe(ExitCode.NotAuthenticated);
+  });
+
+  it("`auth` with no subcommand is a usage error, not a crash", async () => {
+    const r = await cli(["auth"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("subcommand");
+  });
+
+  it("`auth bogus` names the valid subcommands", async () => {
+    const r = await cli(["auth", "bogus"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("login, status, logout");
+  });
+
+  it("`auth status --url <other>` when logged into a DIFFERENT url reports no credential for it", async () => {
+    // The realistic mistake: logged into dev, points --url at a different target and forgets.
+    const dir = mkdtempSync(join(tmpdir(), "signum-mismatch-"));
+    await cli(["auth", "login", "--url", baseUrl, "--with-token"], { env: { SIGNUM_CONFIG_DIR: dir }, stdin: GOOD_TOKEN + "\n" });
+    const r = await cli(["auth", "status", "--url", "http://127.0.0.1:1"], { env: { SIGNUM_CONFIG_DIR: dir }, tty: true });
+    expect(r.code).toBe(ExitCode.NotAuthenticated);
+    expect(r.out).toContain("none for this target");
+  });
+
+  it("login against an unreachable host fails with a transport error, not a crash", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "signum-unreachable-"));
+    const r = await cli(["auth", "login", "--url", "http://127.0.0.1:1", "--with-token"], {
+      env: { SIGNUM_CONFIG_DIR: dir },
+      stdin: "some-token\n",
+    });
+    expect(r.code).toBe(ExitCode.Transport);
+  });
+});
+
 describe("query (STORY-20, STORY-21, STORY-22)", () => {
   it("de-interns the result table end to end (AC-21.1)", async () => {
     const r = await cli(["query", "Order", "--json"]);
