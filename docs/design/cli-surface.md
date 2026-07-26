@@ -42,10 +42,58 @@ signum <tool-noun> <verb> [args]     # tooling   — gh-shaped
 | `signum get <Type>` | m2 | No id ⇒ bounded listing (`api/fetchAll`), kubectl-style. Always bounded; warns on a TTY that it is unfiltered. |
 | `signum explain <Type>[.<token>]` | **m1** | Describe a type, its members, and valid next query tokens. |
 | `signum types` · `signum queries` | **m1** | List what the app offers. |
-| `signum operations <Type>` | m2 | List invokable operations for a type. |
-| `signum run <OperationKey>` | m2 | Execute an operation. All mutation lives here. |
+| `signum operations [<Type>]` | **m1** | List invokable operations. Read-only discovery, so it lands with REQ-011. |
+| `signum <OperationKey>` | m2 | **Operations are first-class commands** — see §2.1. All mutation lives here. |
 | `signum lookup <Type> <text>` | m3 | Resolve a human string to a `Lite` (`findLiteLike`). |
 | `signum api <method> <path>` | m2 | Raw request escape hatch. |
+
+### 2.1 Operations are first-class commands
+
+Operations are not a generic "run this thing" — they are the application's **named business actions**,
+and the *only* way anything is mutated ([`operations.md`](../stories/operations.md)). Hiding them behind
+a `run` verb would make the most important concept in the API the least visible one. So the operation
+key **is** the command:
+
+```bash
+signum Order.Ship --lite "Order;42"
+signum UserOperation.Save -f user.json
+signum Order.Create --arg-lite Customer="Customer;7"     # construct: no target
+```
+
+**Why this is unambiguous.** Operation keys always contain a dot — `Key = declaringType.Name + "." +
+fieldName` (`Signum/Basics/Symbol.cs:22`, verified) — and **no built-in command ever contains one**. So
+dispatch is a single rule with no collision possible, now or as we add commands:
+
+> If the first argument contains a `.`, it is an operation key. Otherwise it is a built-in command.
+
+This also means an app can name an operation container `Query` or `Get` without shadowing anything: the
+built-in is `query`, the operation is `Query.Something`.
+
+**Discovery is part of being first-class.** All read-only, so all m1:
+
+```bash
+signum operations                 # every operation the app exposes
+signum operations Order           # just this type's
+signum explain Order.Ship         # arguments, target kind, canExecute reasons
+signum Order.Ship --help          # same, reached the way you'd expect
+```
+
+**Resolution rules** (REQ-041, STORY-41):
+
+- A full key (`OrderOperation.Ship`) is used verbatim.
+- A bare name (`Ship`) resolves against the target type's operations from cached metadata; **ambiguity
+  lists candidates and exits non-zero** rather than guessing.
+- A namespace-qualified key (`MyApp.Operations.OrderOperation.Ship`) is rejected with an explanation —
+  keys are *not* namespace-qualified, and this is a common wrong guess.
+- Unknown keys suggest near-matches from metadata.
+
+**Targets** follow the wire's own distinction (`executeEntity` vs `executeLite`): `--lite` / `--id` for
+an identity, `-f` for a full entity graph, `--lite` repeated or `-f -` for the multi variants. No target
+at all means `construct`.
+
+**Not in m1.** Every operation command is m2 — m1 is read-only and cannot mutate. `signum operations`
+and `signum explain <Key>` *are* m1, because listing and describing operations is discovery, not
+mutation.
 
 ### Tooling commands (noun-verb)
 
@@ -153,10 +201,11 @@ signum query Order --filter "State = Stuck" -o name | head   # Lite keys for pip
 signum query Order --filter "Total > 1000" --explain          # show request, send nothing
 
 # ── m2: writes ───────────────────────────────────────────────────
-signum operations Order
-signum run Order.Ship --lite "Order;42" --dry-run=server      # permitted?
-signum run Order.Ship --lite "Order;42" --yes
-signum run UserOperation.Save -f user.json
+signum operations Order                                       # (m1 — discovery)
+signum explain Order.Ship                                     # (m1 — args + canExecute)
+signum Order.Ship --lite "Order;42" --dry-run=server          # permitted?
+signum Order.Ship --lite "Order;42" --yes
+signum UserOperation.Save -f user.json
 signum api GET /api/entity/Order/42                           # escape hatch
 
 # ── agent / scripted ─────────────────────────────────────────────
@@ -197,7 +246,7 @@ signum mcp                                                    # m3: serve over s
 
 | Chosen | Over | Why |
 |---|---|---|
-| `signum run <OperationKey>` | `operation execute`, `exec`, `op` | Shortest that stays honest. Collides with `kubectl run` (which creates a pod) — accepted, since we have no create-by-run concept. `op` may be an alias. |
+| `signum <OperationKey>` (no verb) | `run`, `operation execute`, `exec`, `op` | Operations are the app's named business actions and the only mutation path; a generic verb would make the most important concept the least visible. The dot in every key (`Symbol.cs:22`) makes dispatch unambiguous against built-ins, so no verb is needed. Also sidesteps the `kubectl run` collision entirely. |
 | `signum query` | `get` for both | Queries and entity retrieval are different endpoints with different shapes; one verb would blur `queryKey` and `Type`. |
 | `signum explain` | `describe` | kubectl's `describe` dumps an *instance*; `explain` walks a *schema*. We mean the schema. `describe` stays free for a future instance-detail view. |
 | `context` | `profile` | It bundles URL + credential + metadata cache, matching kubectl's meaning precisely. |
@@ -213,7 +262,8 @@ signum auth login --with-token | --url <url>
 signum auth status
 signum types
 signum queries
-signum explain <Type>[.<token>]
+signum explain <Type>[.<token>] | <OperationKey>
+signum operations [<Type>]
 signum query <queryKey> [--filter …] [--column …] [--order …] [--top N] [--all] [--count]
 signum get <Type> <id> | <Lite>  [--exists]
 
@@ -221,12 +271,13 @@ globals: --url  -o/--output  --json  --explain  -v  --no-color  --timeout
          --caller-context
 ```
 
-That is 8 commands. It authenticates, discovers, queries, and retrieves — with trustworthy output and
-meaningful exit codes — and it cannot mutate anything.
+That is 9 commands. It authenticates, discovers (including *which* operations exist and what they take),
+queries, and retrieves — with trustworthy output and meaningful exit codes — and it cannot mutate
+anything.
 
 ## 10. Open questions
 
-1. **`run` vs `op`** as the mutation verb — is the `kubectl run` collision acceptable?
+1. ~~`run` vs `op` as the mutation verb~~ — **resolved**: no verb. Operations are first-class commands (§2.1).
 2. **Should `query` accept a bare `Type`** and infer the queryKey? Convenient, and it hides a real
    distinction. Leaning no.
 3. **Do we need `-o wide`?** kubectl's default-plus-extra-columns idea may not map to a query whose

@@ -57,8 +57,10 @@ now storied; output/UX (REQ-050…055), MCP (REQ-060…062) and non-functional (
   primary interface. Read before touching anything query-related.
 
 **Command naming is settled** (cli-surface §8): verb-first for app nouns discovered at runtime
-(`query`, `get`, `explain`, `run`), noun-verb for fixed tooling nouns (`auth`, `config`). Mutation is
-`signum run <OperationKey>`, never `operation`.
+(`query`, `get`, `explain`), noun-verb for fixed tooling nouns (`auth`, `config`), and **operations are
+first-class commands** — the key *is* the command (`signum Order.Ship …`), never `run` or `operation`.
+Dispatch rule: **a first argument containing a `.` is an operation key**; built-ins never contain one
+(`Symbol.cs:22`). Preserve that invariant — do not add a dotted built-in command.
 
 **Requirements are not user stories.** They state what the CLI must do and carry **no
 acceptance criteria** — do not add any, to the document or the issues. Implementation work is

@@ -49,7 +49,7 @@ Traces to: REQ-040 · Priority: `m2`
 own business logic rather than editing data behind its back.
 
 **Acceptance Criteria:**
-- AC-40.1: `signum run <OperationKey> --id <id>` / `--lite "<Type;id>"` / `-f entity.json` invokes the operation ([CLI surface](../design/cli-surface.md)).
+- AC-40.1: The operation key **is** the command: `signum <OperationKey> --id <id>` / `--lite "<Type;id>"` / `-f entity.json`. Dispatch is unambiguous because every key contains a dot (`Symbol.cs:22`) and no built-in command does ([CLI surface](../design/cli-surface.md) §2.1).
 - AC-40.2: The CLI selects `executeEntity` when it holds a modified entity graph and `executeLite` when it holds only an identity — matching how the browser decides via `canBeModified`.
 - AC-40.3: Saving is expressed as an operation (e.g. `UserOperation.Save`); there is no separate `save` command implying an endpoint that does not exist.
 - AC-40.4: The response `EntityPackTS` is rendered, including the refreshed `canExecute`.
@@ -75,7 +75,7 @@ Keys are `ContainerClassName.FieldName` — **not** namespace-qualified (`Signum
 - AC-41.3: An ambiguous short name **lists the candidates and exits non-zero**. It never picks one.
 - AC-41.4: An unknown key suggests near-matches from metadata for that type.
 - AC-41.5: If a namespace-qualified key is supplied, the CLI explains the actual format rather than forwarding a request that will fail.
-- AC-41.6: `signum operations <Type>` lists invokable operations, noting that the list is a **positive capability list only** — operations forbidden to this user vanish from `canExecute` with no reason (`OperationLogic.cs:456`), so absence never means "does not exist".
+- AC-41.6: `signum operations [<Type>]` lists invokable operations (read-only, so it ships in m1 with REQ-011), and `signum explain <OperationKey>` describes one — noting that the list is a **positive capability list only** — operations forbidden to this user vanish from `canExecute` with no reason (`OperationLogic.cs:456`), so absence never means "does not exist".
 
 ---
 
