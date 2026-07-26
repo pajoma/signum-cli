@@ -49,7 +49,7 @@ Traces to: REQ-040 · Priority: `m2`
 own business logic rather than editing data behind its back.
 
 **Acceptance Criteria:**
-- AC-40.1: The operation key **is** the command: `signum <OperationKey> --id <id>` / `--lite "<Type;id>"` / `-f entity.json`. Dispatch is unambiguous because every key contains a dot (`Symbol.cs:22`) and no built-in command does ([CLI surface](../design/cli-surface.md) §2.1).
+- AC-40.1: Operations are invoked as `signum <verb> <Type> [id]` — `signum ship order 42`, `signum create order`, `signum save user -f user.json` — with `--lite`/`--id`/`-f` available when positional is ambiguous. The dotted key (`signum OrderOperation.Ship --lite "Order;42"`) is the canonical equivalent ([CLI surface](../design/cli-surface.md) §2.1).
 - AC-40.2: The CLI selects `executeEntity` when it holds a modified entity graph and `executeLite` when it holds only an identity — matching how the browser decides via `canBeModified`.
 - AC-40.3: Saving is expressed as an operation (e.g. `UserOperation.Save`); there is no separate `save` command implying an endpoint that does not exist.
 - AC-40.4: The response `EntityPackTS` is rendered, including the refreshed `canExecute`.
@@ -72,7 +72,9 @@ Keys are `ContainerClassName.FieldName` — **not** namespace-qualified (`Signum
 **Acceptance Criteria:**
 - AC-41.1: A fully-qualified key is accepted verbatim.
 - AC-41.2: A bare operation name (`Save`) is resolved against the target type's operations from cached metadata.
-- AC-41.3: An ambiguous short name **lists the candidates and exits non-zero**. It never picks one.
+- AC-41.3: An ambiguous short name **lists the candidates and exits non-zero**. It never picks one. Two operations resolving to the same verb on one type is likewise an error naming both canonical keys.
+- AC-41.7: Verb and type matching is **case-insensitive and kebab-tolerant** (`import-public-holidays holiday-calendar` ≡ `ImportPublicHolidays HolidayCalendar`); output renders the app's own PascalCase.
+- AC-41.8: An operation whose verb is shadowed by a built-in (e.g. `XOperation.Get`) is **flagged as shadowed** in `signum operations <Type>` output and remains reachable by canonical key. Built-ins always win dispatch.
 - AC-41.4: An unknown key suggests near-matches from metadata for that type.
 - AC-41.5: If a namespace-qualified key is supplied, the CLI explains the actual format rather than forwarding a request that will fail.
 - AC-41.6: `signum operations [<Type>]` lists invokable operations (read-only, so it ships in m1 with REQ-011), and `signum explain <OperationKey>` describes one — noting that the list is a **positive capability list only** — operations forbidden to this user vanish from `canExecute` with no reason (`OperationLogic.cs:456`), so absence never means "does not exist".

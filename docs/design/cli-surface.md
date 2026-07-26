@@ -43,57 +43,88 @@ signum <tool-noun> <verb> [args]     # tooling   — gh-shaped
 | `signum explain <Type>[.<token>]` | **m1** | Describe a type, its members, and valid next query tokens. |
 | `signum types` · `signum queries` | **m1** | List what the app offers. |
 | `signum operations [<Type>]` | **m1** | List invokable operations. Read-only discovery, so it lands with REQ-011. |
-| `signum <OperationKey>` | m2 | **Operations are first-class commands** — see §2.1. All mutation lives here. |
+| `signum <verb> <Type> [id]` | m2 | **Operations are first-class commands** — `signum ship order 42`. See §2.1. All mutation lives here. Canonical form: `signum <OperationKey>`. |
 | `signum lookup <Type> <text>` | m3 | Resolve a human string to a `Lite` (`findLiteLike`). |
 | `signum api <method> <path>` | m2 | Raw request escape hatch. |
 
 ### 2.1 Operations are first-class commands
 
-Operations are not a generic "run this thing" — they are the application's **named business actions**,
-and the *only* way anything is mutated ([`operations.md`](../stories/operations.md)). Hiding them behind
-a `run` verb would make the most important concept in the API the least visible one. So the operation
-key **is** the command:
+Operations are the application's **named business actions** and the *only* way anything is mutated
+([`operations.md`](../stories/operations.md)). They are not a generic "run this thing", so they get no
+generic verb. Instead they read as what they are:
 
 ```bash
-signum Order.Ship --lite "Order;42"
-signum UserOperation.Save -f user.json
-signum Order.Create --arg-lite Customer="Customer;7"     # construct: no target
+signum create order
+signum ship order 42
+signum save user -f user.json
+signum cancel workflow 17 --yes
+signum import-public-holidays holiday-calendar 3
 ```
 
-**Why this is unambiguous.** Operation keys always contain a dot — `Key = declaringType.Name + "." +
-fieldName` (`Signum/Basics/Symbol.cs:22`, verified) — and **no built-in command ever contains one**. So
-dispatch is a single rule with no collision possible, now or as we add commands:
+This is the same `<verb> <noun> [name]` shape as `kubectl delete pod my-pod`, and it keeps the whole
+data surface verb-first rather than making mutation the one place with a different grammar.
 
-> If the first argument contains a `.`, it is an operation key. Otherwise it is a built-in command.
+**It decomposes from the wire, not from a convention we invented.** An operation key is
+`declaringType.Name + "." + fieldName` (`Signum/Basics/Symbol.cs:22`), and containers are consistently
+named `<Something>Operation` with PascalCase verb fields — verified across the framework:
+`WorkflowOperation.Activate`, `UserOperation.Save`, `HolidayCalendarOperation.ImportPublicHolidays`. So
+the field name *is* the verb.
 
-This also means an app can name an operation container `Query` or `Get` without shadowing anything: the
-built-in is `query`, the operation is `Query.Something`.
+**The noun comes from metadata, not from parsing the container name.** Operations are registered against
+an entity type, and `api/reflection/types` tells us which. Deriving `Order` by stripping `Operation` off
+`OrderOperation` would be guesswork; looking up which type the operation belongs to is a fact. This
+matters for the irregular cases.
 
-**Discovery is part of being first-class.** All read-only, so all m1:
+#### Dispatch, in order
+
+1. **First argument contains a `.`** ⇒ canonical operation key (see below).
+2. **Otherwise it matches a built-in** (`query`, `get`, `explain`, `auth`, …) ⇒ built-in. **Built-ins
+   always win.**
+3. **Otherwise** ⇒ resolve `<verb> <Type>` against cached operation metadata.
+
+Rule 2 is the cost of this shape. If an app declares `OrderOperation.Get`, then `signum get order`
+means the *built-in* retrieve, and the operation is shadowed. That is a real ambiguity the earlier
+dot-only design did not have, and it is accepted because the ergonomics are worth it. It is handled, not
+ignored:
+
+- Shadowed operations are **flagged in `signum operations <Type>`** output, so you find out from
+  discovery rather than from surprise.
+- They remain reachable by canonical key.
+- The built-in set is small, fixed, and lowercase; collisions will be rare.
+
+#### Canonical form
+
+The dotted key stays as the unambiguous form, and is what `--explain` prints, what the MCP tool layer
+uses, and what to write in scripts where a future built-in might shadow a verb:
+
+```bash
+signum OrderOperation.Ship --lite "Order;42"     # canonical
+signum ship order 42                             # ergonomic, same call
+```
+
+#### Matching rules
+
+- **Case-insensitive and kebab-tolerant** in both positions: `signum create order`,
+  `signum create Order`, `signum import-public-holidays holiday-calendar` and
+  `signum ImportPublicHolidays HolidayCalendar` are all the same command. Output always renders the
+  app's own PascalCase.
+- The target is positional — `signum ship order 42` — with `--lite`, `--id` and `-f` available when
+  positional is ambiguous or a full entity graph is needed.
+- **No target ⇒ construct.** `signum create order` maps to `construct`, matching `kubectl create`.
+- An unknown verb for a known type lists that type's operations; an unknown type suggests near matches.
+- **Ambiguity is never guessed** — two operations resolving to the same verb on one type is an error
+  naming both canonical keys (STORY-41).
+
+#### Discovery is part of being first-class — and it is m1
+
+All read-only, so it ships in the read-only milestone even though *invoking* an operation is m2:
 
 ```bash
 signum operations                 # every operation the app exposes
-signum operations Order           # just this type's
+signum operations Order           # just this type's, with shadowed verbs flagged
 signum explain Order.Ship         # arguments, target kind, canExecute reasons
-signum Order.Ship --help          # same, reached the way you'd expect
+signum ship order --help          # same, reached the way you would expect
 ```
-
-**Resolution rules** (REQ-041, STORY-41):
-
-- A full key (`OrderOperation.Ship`) is used verbatim.
-- A bare name (`Ship`) resolves against the target type's operations from cached metadata; **ambiguity
-  lists candidates and exits non-zero** rather than guessing.
-- A namespace-qualified key (`MyApp.Operations.OrderOperation.Ship`) is rejected with an explanation —
-  keys are *not* namespace-qualified, and this is a common wrong guess.
-- Unknown keys suggest near-matches from metadata.
-
-**Targets** follow the wire's own distinction (`executeEntity` vs `executeLite`): `--lite` / `--id` for
-an identity, `-f` for a full entity graph, `--lite` repeated or `-f -` for the multi variants. No target
-at all means `construct`.
-
-**Not in m1.** Every operation command is m2 — m1 is read-only and cannot mutate. `signum operations`
-and `signum explain <Key>` *are* m1, because listing and describing operations is discovery, not
-mutation.
 
 ### Tooling commands (noun-verb)
 
@@ -203,9 +234,11 @@ signum query Order --filter "Total > 1000" --explain          # show request, se
 # ── m2: writes ───────────────────────────────────────────────────
 signum operations Order                                       # (m1 — discovery)
 signum explain Order.Ship                                     # (m1 — args + canExecute)
-signum Order.Ship --lite "Order;42" --dry-run=server          # permitted?
-signum Order.Ship --lite "Order;42" --yes
-signum UserOperation.Save -f user.json
+signum ship order 42 --dry-run=server                         # permitted?
+signum ship order 42 --yes
+signum save user -f user.json
+signum create order --arg-lite Customer="Customer;7"
+signum OrderOperation.Ship --lite "Order;42"                  # canonical form
 signum api GET /api/entity/Order/42                           # escape hatch
 
 # ── agent / scripted ─────────────────────────────────────────────
@@ -246,7 +279,7 @@ signum mcp                                                    # m3: serve over s
 
 | Chosen | Over | Why |
 |---|---|---|
-| `signum <OperationKey>` (no verb) | `run`, `operation execute`, `exec`, `op` | Operations are the app's named business actions and the only mutation path; a generic verb would make the most important concept the least visible. The dot in every key (`Symbol.cs:22`) makes dispatch unambiguous against built-ins, so no verb is needed. Also sidesteps the `kubectl run` collision entirely. |
+| `signum <verb> <Type>` — `signum create order` | `run <Key>`, `operation execute`, `exec`, `op`, bare `<OperationKey>` | Operations are the app's named business actions and the only mutation path; a generic verb makes the most important concept the least visible. Verb-noun keeps the whole data surface one grammar and reads like `kubectl delete pod`. The dotted key remains as the canonical unambiguous form. |
 | `signum query` | `get` for both | Queries and entity retrieval are different endpoints with different shapes; one verb would blur `queryKey` and `Type`. |
 | `signum explain` | `describe` | kubectl's `describe` dumps an *instance*; `explain` walks a *schema*. We mean the schema. `describe` stays free for a future instance-detail view. |
 | `context` | `profile` | It bundles URL + credential + metadata cache, matching kubectl's meaning precisely. |
@@ -263,7 +296,7 @@ signum auth status
 signum types
 signum queries
 signum explain <Type>[.<token>] | <OperationKey>
-signum operations [<Type>]
+signum operations [<Type>]          # invokable actions; shadowed verbs flagged
 signum query <queryKey> [--filter …] [--column …] [--order …] [--top N] [--all] [--count]
 signum get <Type> <id> | <Lite>  [--exists]
 

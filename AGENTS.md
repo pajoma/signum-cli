@@ -56,11 +56,15 @@ now storied; output/UX (REQ-050…055), MCP (REQ-060…062) and non-functional (
 - [`filter-expression-syntax.md`](docs/design/filter-expression-syntax.md) — the filter DSL, the CLI's
   primary interface. Read before touching anything query-related.
 
-**Command naming is settled** (cli-surface §8): verb-first for app nouns discovered at runtime
-(`query`, `get`, `explain`), noun-verb for fixed tooling nouns (`auth`, `config`), and **operations are
-first-class commands** — the key *is* the command (`signum Order.Ship …`), never `run` or `operation`.
-Dispatch rule: **a first argument containing a `.` is an operation key**; built-ins never contain one
-(`Symbol.cs:22`). Preserve that invariant — do not add a dotted built-in command.
+**Command naming is settled** (cli-surface §2.1, §8). Verb-first throughout: `query`, `get`, `explain`
+for reads, and **operations are first-class commands in the same grammar** — `signum create order`,
+`signum ship order 42`, `signum save user -f user.json`. Never `run` or `operation` as a generic verb.
+Fixed tooling nouns keep gh-style groups (`auth`, `config`).
+
+Dispatch, in order: **(1)** first argument contains a `.` ⇒ canonical operation key; **(2)** matches a
+built-in ⇒ built-in, and **built-ins always win**; **(3)** otherwise resolve `<verb> <Type>` against
+cached operation metadata. Two invariants to preserve: **no dotted built-in command**, and the built-in
+verb set stays **small, fixed and lowercase**, because every addition can shadow an app's operation.
 
 **Requirements are not user stories.** They state what the CLI must do and carry **no
 acceptance criteria** — do not add any, to the document or the issues. Implementation work is
