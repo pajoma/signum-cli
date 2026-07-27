@@ -18,10 +18,10 @@ inspect the real stored state of a record.
 **Acceptance Criteria:**
 - AC-30.1: `signum get <Type> <id>` issues `GET api/entity/{type}/{id}`.
 - AC-30.2: A `Lite` key is accepted in place of type+id: `signum get "Order;42"` (`TypeName;id`). Quote it — an unquoted `;` is a shell command separator.
-- AC-30.3: `--pack` uses `entityPack`/`entityPackLight` to return the entity together with `canExecute`, so a user can see what they may do to it in one call.
+- AC-30.3: `m2` — `--pack` uses `entityPack`/`entityPackLight` to return the entity together with `canExecute`, so a user can see what they may do to it in one call. **Deferred out of m1:** `canExecute` describes what operations may be *invoked*, and invoking them is m2, so in a read-only milestone it answers a question the CLI cannot act on.
 - AC-30.4: The type argument accepts the **clean** name (`Order`) and the entity class name (`OrderEntity`), resolving both via cached metadata.
-- AC-30.5: `signum get <Type> <id> --exists` wraps `api/exists`; `signum get <Type>` with no id wraps `api/fetchAll`, is always bounded, and warns on a TTY that it is unfiltered ([CLI surface](../design/cli-surface.md)).
-- AC-30.6: Output honours STORY-22's TTY rules: readable when watched, JSON when piped.
+- AC-30.5: `signum get <Type> <id> --exists` wraps `api/exists`. `signum get <Type>` with no id wrapping `api/fetchAll` is `m2`: it currently raises a usage error that says so and points at `signum query <Type> --top 20`, which does the same job with a bound the user chose.
+- AC-30.6: Output honours STORY-22's rule that data goes to stdout and diagnostics to stderr. An entity renders as **JSON in every format**, including on a TTY, and `csv`/`tsv`/`name` are rejected up front. *(Amended: an entity is a document, not a table — there are no columns to align, and silently coercing a delimited format would hand a pipeline malformed data with no signal. The table/TTY half of STORY-22 applies to query rows.)*
 - AC-30.7: A missing entity exits with the not-found code (REQ-051), distinct from an auth or transport failure.
 
 ---

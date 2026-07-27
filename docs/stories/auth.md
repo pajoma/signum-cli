@@ -154,7 +154,7 @@ IV prepended, no MAC**. It is opaque and unauthenticated. Treat it strictly as a
 - AC-04.3: **Tokens never expire.** `RefreshTokenEvery` (default 30 min) is a *rotation* interval: past it the server revalidates against the database and returns a replacement in the **`New_Token` response header** (`AuthTokensServer.cs:85-94`).
 - AC-04.4: Every response is inspected for `New_Token`; when present the stored token is replaced **atomically**, so concurrent invocations cannot corrupt the store.
 - AC-04.5: Ignoring `New_Token` does **not** break authentication — but it costs a database hit on every request and **freezes the user's role permanently**, because `RoleEntity.Current` reads the role from the token claim (`RoleEntity.cs:33`). A role change only takes effect after a rotation.
-- AC-04.6: After loading a stored token the CLI verifies it with `GET api/auth/currentUser` before relying on it. Malformed, tampered, or wrong-key tokens are **swallowed server-side and degrade silently to anonymous** rather than producing a distinct error.
+- AC-04.6: A stored token is verified with `GET api/auth/currentUser` **at the point it is established or inspected** — `auth login` and `auth status` — not before every command. Malformed, tampered, or wrong-key tokens are **swallowed server-side and degrade silently to anonymous** rather than producing a distinct error, so the check is what makes a bad paste fail at login. *(Amended: verifying on every invocation would double every command's round trips to re-prove something that only changes when the credential does. A token that stops working mid-life surfaces as the 403 it causes, which AC-08.2 already discriminates and AC-12.11 already routes.)*
 - AC-04.7: The header name is configurable and is `Signum_Authorization` on Windows-auth apps (`AuthTokensServer.cs:57-62`); the CLI supports overriding it per profile.
 - AC-04.8: Rotation is triggerable on demand (`?refreshToken`) so a user can pick up a role change without re-authenticating.
 
@@ -186,7 +186,7 @@ authenticated, as whom, against what, so that I can tell a credential problem fr
 problem or a wrong target.
 
 **Acceptance Criteria:**
-- AC-06.1: `signum auth status` reports reachability, resolved URL, auth mechanism, authenticated user, and role.
+- AC-06.1: `signum auth status` reports reachability, resolved URL, credential source, and authenticated user. *(Amended: **role removed.** `api/auth/currentUser` returns a `UserEntity`, and reading a role from it has not been verified against a live application — every wire claim in this project is cited to source or to a live response, and this one could be neither. Reinstate it with a citation when a real app is available.)*
 - AC-06.2: It distinguishes *not configured*, *configured but credential rejected*, *authenticated as anonymous*, and *authenticated as a user*. The third case is real and silent — see AC-04.6.
 - AC-06.3: It never prints a token or key, not even truncated.
 - AC-06.4: Exit code is non-zero when not usefully authenticated, so scripts can gate on it.
@@ -217,7 +217,7 @@ Traces to: REQ-052, REQ-007 · Priority: `m1`
 distinguished, so that I retry when retrying can help and stop when it cannot.
 
 **Acceptance Criteria:**
-- AC-08.1: The CLI **never** branches on 401 — it is never returned. Both auth and authz failures are 403 (`SignumExceptionFilterAttribute.cs:131-146`).
+- AC-08.1: The CLI never **relies** on 401 to detect an auth failure — it is never returned; both auth and authz failures are 403 (`SignumExceptionFilterAttribute.cs:131-146`). A 401 that does arrive is reported as an anomaly naming a likely intercepting proxy. *(Amended: the original wording forbade any mention of 401, which would delete the one diagnostic that makes a proxy-mangled response comprehensible. The rule that matters is that no retry or auth logic keys on it.)*
 - AC-08.2: 403s are discriminated on `exceptionType`: `…AuthenticationException` → credential problem, re-authentication may help; `…UnauthorizedAccessException` → permission problem, do not retry.
 - AC-08.3: The two map to **different exit codes** (REQ-051).
 - AC-08.4: A permission denial names the missing capability where the server provides it.
@@ -235,10 +235,10 @@ prompt, so that I never hang waiting for input that cannot arrive.
 
 **Acceptance Criteria:**
 - AC-09.1: With no TTY, the CLI **never** prompts — it fails with a message naming the environment variable that would have satisfied it.
-- AC-09.2: Every credential can be supplied by environment variable.
+- AC-09.2: Every credential can be supplied by environment variable — `SIGNUM_TOKEN` in m1, since the browser handoff is the only mechanism. It takes precedence over a stored credential, is never written to disk, and cannot receive a `New_Token` rotation, which is reported rather than attempted.
 - AC-09.3: No auth path requires a browser unless `--web` is passed explicitly.
 - AC-09.4: Auth failures are reported on stderr in a stable form; stdout stays reserved for data.
-- AC-09.5: A missing or malformed credential is a usage-class failure, distinct from a rejected one.
+- AC-09.5: A missing credential exits **3 (not authenticated)**, and a *rejected* one also exits 3 with a different message; a malformed **flag** is exit 2 (usage). *(Amended: the original made a missing credential usage-class, i.e. exit 2. Exit 3 is more useful — it tells a script that re-authenticating may help, which is exactly the distinction REQ-051 exists to draw, whereas exit 2 says "you typed something wrong". Implemented deliberately; see the comment in `commands/context.ts`.)*
 
 ---
 
@@ -305,17 +305,17 @@ Decision 3.
 - AC-12.2: `signum auth login` prints copy-paste-ready instructions when no other mechanism is available: open the app, sign in, then run `sessionStorage.getItem("authToken")` in the browser console.
 - AC-12.3: The token is validated immediately via `GET api/auth/currentUser` and the resolved user is echoed, so a bad paste fails at login rather than mysteriously later (a bad token degrades silently to anonymous — AC-04.6).
 - AC-12.4: The token is stored per STORY-04 and rotated via `New_Token` from then on. No re-handoff is needed for as long as it keeps rotating.
-- AC-12.5: **Auto-upgrade, where available:** after a successful handoff the CLI calls `GET api/restApiKey/current` and, if a key is returned, stores it in preference to the token as a durable credential. On `null` or 404 the token remains the credential and this is **not** an error. *Inert for the target app — it has no `Signum.Rest` — so this must be a silent no-op there, never a warning.*
-- AC-12.6: `signum auth key create` attempts to mint a key via `RestApiKeyOperation.Save`, reporting clearly when the role lacks write permission on `RestApiKeyEntity`. `api/restApiKey/generate` returns a string but **does not persist it** (`RestApiKeyController.cs:8-12`), so generating and saving are separate steps. Absent `Signum.Rest`, the command reports that the server does not support API keys at all.
-- AC-12.7: With `Signum.Rest` absent the CLI operates token-only and says so once at `-v`. It must **never** offer the API-key or password paths as remedies on this app — neither can work (AC-03.7).
-- AC-12.8: The token is treated as a bearer secret throughout — redacted per STORY-11, never echoed back after entry, terminal echo suppressed while pasting on a TTY.
+- AC-12.5: `m3` — **Auto-upgrade, where available:** after a successful handoff the CLI calls `GET api/restApiKey/current` and, if a key is returned, stores it in preference to the token as a durable credential. On `null` or 404 the token remains the credential and this is **not** an error. *Inert for the target app — it has no `Signum.Rest` — so this must be a silent no-op there, never a warning.* **Deferred out of m1:** unreachable on the target application, and only exercisable against a deployment that has `Signum.Rest` (REQ-075).
+- AC-12.6: `m3` — `signum auth key create` attempts to mint a key via `RestApiKeyOperation.Save`, reporting clearly when the role lacks write permission on `RestApiKeyEntity`. `api/restApiKey/generate` returns a string but **does not persist it** (`RestApiKeyController.cs:8-12`), so generating and saving are separate steps. Absent `Signum.Rest`, the command reports that the server does not support API keys at all. **Deferred out of m1:** minting a key is a write, and m1 is read-only.
+- AC-12.7: The CLI must **never** offer the API-key or password paths as remedies on this app — neither can work (AC-03.7). *(Amended: the `-v` "operating token-only" disclosure is dropped. It would announce the absence of a capability the user never asked for, on every verbose run; the binding half is the prohibition, which is met and testable.)*
+- AC-12.8: The token is treated as a bearer secret throughout — redacted per STORY-11, never echoed back after entry. *(Amended: terminal-echo suppression removed — pasting on a TTY is refused outright under AC-09.1/AC-12.1, since the token is read from stdin only. There is no interactive paste to protect.)*
 
 ### Because this is the only mechanism
 
 For the target application there is no fallback, so the flow must be robust rather than merely
 possible.
 
-- AC-12.9: **Assisted capture.** `signum auth login` binds a loopback listener and prints a one-line
+- AC-12.9: `m3` — **Assisted capture.** **Deferred out of m1** (the AC already marks it `[TEST]` and optional). `signum auth login` binds a loopback listener and prints a one-line
   browser-console snippet that POSTs `sessionStorage.getItem("authToken")` to it, so the user does
   not hand-copy a long secret. The listener accepts exactly one request, from loopback only, then
   closes. **[TEST]** — a cross-origin POST from an HTTPS page to `http://127.0.0.1` may be blocked by

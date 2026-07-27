@@ -21,10 +21,10 @@ sort, so that I can answer a question about production data without opening the 
 - AC-20.2: `--filter` accepts the expression syntax; repeating it `and`s the expressions.
 - AC-20.3: `--column` selects columns by token, repeatable and order-preserving. Omitted, the query's default columns are used.
 - AC-20.4: `--order <token>` sorts ascending, `--order -<token>` descending, mapping to `OrderType.Ascending|Descending` (`Order.cs:41-45`). Repeatable, precedence in the order given.
-- AC-20.5: `--filter-json` accepts a raw `FilterTS[]` from a file or `-`, and composes with `--filter` by `and`.
+- AC-20.5: `--filter-json` accepts a raw `FilterTS[]` from a file (`path` or `@path`) and composes with `--filter` by `and`. `-` (stdin) is `m2`: request building is synchronous and stdin needs an async read, so it currently raises a clean usage error pointing at the file form rather than pretending to work.
 - AC-20.6: `--explain` prints the composed `QueryRequestTS` and exits **without sending it**.
-- AC-20.7: Every token is validated against cached metadata before the request where possible, so typos cost no round trip.
-- AC-20.8: Enum, date, number, boolean, `null` and `Lite` values are parsed **culture-invariantly**, regardless of `--culture`, which affects output only.
+- AC-20.7: The **query key** is validated against cached metadata before the request, so a typo costs no round trip, and it is validated against the same definition `signum queries` lists from. Validating each **filter/column/order token** needs `api/query/subTokens` (REQ-012) and is available through `signum explain <Query>.<token>`; wiring it into `query`'s own pre-flight is `m2`.
+- AC-20.8: Enum, date, number, boolean, `null` and `Lite` values are parsed **culture-invariantly**. *(Amended: the "regardless of `--culture`" clause is dropped for m1 — no `--culture` flag exists yet (REQ-055, `m2`). Invariance is unconditional today, which is the stronger property; the clause returns with the flag.)*
 
 ---
 
@@ -79,9 +79,9 @@ row without writing a loop or melting the server.
 **Acceptance Criteria:**
 - AC-23.1: `--top N` → `Firsts`; `--page N --page-size M` → `Paginate`; `--all` → transparent paging.
 - AC-23.2: Default is a bounded page, never `All`. An unbounded query must be asked for explicitly — this protects a shared production server from a careless first command.
-- AC-23.3: `--all` pages until exhausted and **streams** rather than accumulating.
-- AC-23.4: With `--all`, if `totalElements` implies a very large result, a TTY user is warned and asked to confirm; non-interactively it proceeds (a script asked for it).
-- AC-23.5: Interrupting `--all` mid-stream leaves already-emitted output valid — no partial trailing record.
+- AC-23.3: `m2` — `--all` pages until exhausted and **streams** rather than accumulating. **Not delivered in m1:** `--all` sends `PaginationMode.All` and lets the server return everything in one response, which is correct but buffers it. The client-side paging loop is m2.
+- AC-23.4: `m2` — With `--all`, if `totalElements` implies a very large result, a TTY user is warned and asked to confirm; non-interactively it proceeds (a script asked for it). **Not delivered in m1** — depends on AC-23.3's paging loop to know the size before transferring.
+- AC-23.5: `m2` — Interrupting `--all` mid-stream leaves already-emitted output valid — no partial trailing record. **Vacuous until AC-23.3 lands:** nothing streams today, so output is written only after the whole response has arrived.
 - AC-23.6: `--count` uses `queryValue` to return only the count, with no row transfer.
 
 ---
@@ -99,7 +99,7 @@ and valid tokens, so that I can write a correct filter without reading the app's
 **Acceptance Criteria:**
 - AC-24.1: Commands list the app's queries, types, and each type's members, entity kind, and operations, from the cached `api/reflection/types`.
 - AC-24.2: A token-explore command lists valid continuations of a token prefix via `POST api/query/subTokens`, and validates a full token via `parseTokens`.
-- AC-24.3: The metadata cache is per-profile, keyed by `Last-Modified`, revalidated with `If-Modified-Since`, and explicitly clearable.
+- AC-24.3: The metadata cache is **per-target and per auth state**, keyed by `Last-Modified`, revalidated with `If-Modified-Since`, and explicitly clearable via `signum cache clear`. *(Amended: "per-profile" → "per-target"; named profiles are REQ-001/`m2`. The auth-state split is not cosmetic — `AuthServer.cs:143-157` rewrites `queryDefined` per caller and `ReflectionServer.LastModified` is process-wide, so one document would be revalidated with a 304 and handed to the wrong caller.)*
 - AC-24.4: With a warm cache, discovery works **fully offline**.
 - AC-24.5: `--json` output is stable enough to drive shell completion and MCP tool schemas.
 - AC-24.6: Metadata is presented as a **positive capability list only**. Operations forbidden to the user *vanish* from `canExecute` with no reason given (`OperationLogic.cs:456`), so absence is never reported as "does not exist".
