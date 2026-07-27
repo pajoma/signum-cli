@@ -246,6 +246,16 @@ export class SignumHttp {
           hint: "Refetch and retry. This CLI never auto-retries, so the resolution stays your decision.",
         });
       }
+      if (type.includes("FormatException")) {
+        // A 500 that is really BAD INPUT. Signum's exception filter has no arm for
+        // FormatException (`SignumExceptionFilterAttribute.cs:131-146`), so everything it throws
+        // — notably an unknown query token from `QueryUtils.Parse` (`QueryUtils.cs:385,390`) —
+        // arrives as 500. Reporting a user's typo as "unexpected, please report it" sends them
+        // to file a bug about their own input; the message names what it could not resolve.
+        return new ValidationError(message, {
+          hint: "The server could not parse something in the request. This is usually a token or value, not a fault.",
+        });
+      }
       return new CliError(`server error (${status}): ${message}`, ExitCode.Unexpected);
     }
 

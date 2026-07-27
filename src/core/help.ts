@@ -144,11 +144,18 @@ export const COMMANDS: CommandSpec[] = [
     usage: "signum explain <Type>[.<token>] | <OperationKey>",
     milestone: "m1",
     description:
-      "Walks the application's own schema. Needs metadata but NOT authentication — " +
-      "api/reflection/types is anonymous — so this works before you log in.",
+      "One segment (`signum explain Order`) reads the cached reflection document: no " +
+      "authentication needed, and it works offline.\n\n" +
+      "A dotted token path (`signum explain Order.Entity.Customer`) is resolved LIVE against the " +
+      "query's own description, so it validates the path and lists what may follow it. That call " +
+      "DOES need a credential and cannot come from cache — api/query/subTokens is not anonymous, " +
+      "unlike the reflection endpoint.\n\n" +
+      "The first segment is the query key and the rest is the token, which is how Signum reads a " +
+      "dotted token: relative to the query, not to a type.",
     examples: [
       "signum explain Order",
       "signum explain Order.Entity.Customer",
+      "signum explain Order.Entity --json",
       "signum explain OrderOperation.Ship",
     ],
   },
@@ -394,7 +401,15 @@ export const TOPICS: Record<string, string> = {
     "",
     "  A token is a dotted path: Entity.Customer.Name, OrderDate.Year, Details.Any.Product",
     "",
-    "  Discover them with:  signum explain <Type>[.<token>]",
+    "  Discover them with:  signum explain <QueryKey>[.<token>]",
+    "",
+    "  That walks the application's own query description one segment at a time, validating",
+    "  the path and listing valid continuations. It needs a credential and a network call —",
+    "  token discovery is not anonymous and is not cached, unlike `signum types`.",
+    "",
+    "  A '.Nested' token is offered by discovery but REJECTED by a query: the server lists",
+    "  tokens with SubTokensOptions.All while filters never allow CanNested. Continuations",
+    "  that cannot be used are marked.",
     "",
     "  Collections offer Element, Any, All, Count, RowId. Dates offer Year, Month,",
     "  MonthStart. Operations escape their own dot as '#': Entity.[Operations].Order#Save",

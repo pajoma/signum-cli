@@ -16,6 +16,7 @@ import {
   findType, loadMetadata, queryableTypes, suggestTypes, type Metadata, type TypeInfo,
 } from "../core/metadata.ts";
 import { resolveTarget } from "./context.ts";
+import { fetchSubTokens, validateTokens } from "../core/tokens.ts";
 
 async function metadata(ctx: Ctx): Promise<Metadata> {
   const target = resolveTarget(ctx);
@@ -144,7 +145,7 @@ function unknownType(md: Metadata, name: string): NotFoundError {
   });
 }
 
-function explain(ctx: Ctx, md: Metadata, subject: string | undefined): ExitCode {
+async function explain(ctx: Ctx, md: Metadata, subject: string | undefined): Promise<ExitCode> {
   if (subject === undefined) {
     throw new UsageError("`explain` needs a type, token path, or operation key", {
       hint: "signum explain Order\nsignum explain Order.Entity.Customer\nsignum explain OrderOperation.Ship",
@@ -205,12 +206,96 @@ function explain(ctx: Ctx, md: Metadata, subject: string | undefined): ExitCode 
     return ExitCode.Ok;
   }
 
-  // Token paths beyond the first segment need live subTokens (REQ-012, m2).
-  ctx.io.err(
-    `note: walking a token path ('${subject}') needs api/query/subTokens, which is m2 (REQ-012).\n` +
-    `Showing the root type instead.\n`,
-  );
-  return explain({ ...ctx, format: ctx.format }, md, root.name);
+  // A token path beyond the first segment is resolved LIVE, against the application's own query
+  // description (REQ-012, AC-24.2). Two consequences worth stating where a reader will see them:
+  // this needs a credential (QueryController is not [SignumAllowAnonymous], unlike the reflection
+  // endpoint every other discovery command uses), and it cannot come from cache, so --offline
+  // cannot serve it.
+  const tokenPath = segments.slice(1).join(".");
+  return await explainToken(ctx, root.name, tokenPath);
+}
+
+/**
+ * `signum explain <QueryKey>.<token path>` — validate the path, then list what may follow it.
+ *
+ * The query key is the FIRST segment and the token is the rest: `explain Order.Entity.Customer`
+ * asks about the token `Entity.Customer` on query `Order`, which is how Signum itself reads a
+ * dotted token (relative to the query, not to a type).
+ */
+async function explainToken(ctx: Ctx, queryKey: string, tokenPath: string): Promise<ExitCode> {
+  if (ctx.args.flags.offline) {
+    // Say why, rather than silently degrading to the root type as this used to.
+    throw new UsageError(`--offline cannot walk the token path '${queryKey}.${tokenPath}'`, {
+      hint:
+        "Token discovery is a live call (api/query/subTokens); only the reflection document is\n" +
+        `cached. Drop --offline, or run \`signum explain ${queryKey}\` for the cached type.`,
+    });
+  }
+
+  const target = resolveTarget(ctx, { requireAuth: true });
+
+  // Validate first, so a typo is reported as a typo — with the valid continuations at the point
+  // it broke — rather than as an empty continuation list that looks like a leaf.
+  const [resolved] = await validateTokens(target.http, queryKey, [tokenPath]);
+  const children = await fetchSubTokens(target.http, queryKey, tokenPath);
+
+  if (ctx.format === "json" || ctx.format === "ndjson") {
+    renderDocument(
+      {
+        kind: "token",
+        queryKey,
+        token: resolved?.fullKey ?? tokenPath,
+        niceName: resolved?.niceName ?? null,
+        type: resolved?.type ?? null,
+        tokenKind: resolved?.kind ?? null,
+        filterType: resolved?.filterType ?? null,
+        isGroupable: resolved?.isGroupable ?? false,
+        usableInQuery: resolved?.usableInQuery ?? true,
+        subTokens: children.map((c) => ({
+          key: c.key,
+          fullKey: c.fullKey,
+          niceName: c.niceName ?? null,
+          type: c.type ?? null,
+          tokenKind: c.kind ?? null,
+          usableInQuery: c.usableInQuery,
+        })),
+      },
+      { format: ctx.format, write: ctx.io.out },
+    );
+    return ExitCode.Ok;
+  }
+
+  const full = resolved?.fullKey ?? tokenPath;
+  ctx.io.out(`${queryKey}.${full}${resolved?.type !== undefined ? `  (${resolved.type})` : ""}\n`);
+  if (resolved?.niceName !== undefined) ctx.io.out(`  ${resolved.niceName}\n`);
+  if (resolved !== undefined && !resolved.usableInQuery) {
+    ctx.io.out(`  NOT USABLE in a query — see the note below.\n`);
+  }
+
+  if (children.length === 0) {
+    ctx.io.out("\nNo further tokens — this is a leaf.\n");
+  } else {
+    ctx.io.out("\nCONTINUATIONS\n");
+    const w = Math.max(...children.map((c) => c.key.length));
+    for (const c of children) {
+      const bits = [c.type ?? "", c.kind ?? ""].filter((b) => b !== "").join(", ");
+      const warn = c.usableInQuery ? "" : "   [not usable in a query]";
+      ctx.io.out(`  ${c.key.padEnd(w)}  ${bits}${warn}\n`);
+    }
+  }
+
+  // AC-24.7. subTokens resolves with SubTokensOptions.All, which includes CanNested, but filter
+  // parsing never passes it (FilterJsonConverter.cs:87,133) — so the server offers a token it
+  // will then reject. Marking it is the whole point; discovering it at query time is too late.
+  if (children.some((c) => !c.usableInQuery) || resolved?.usableInQuery === false) {
+    ctx.io.err(
+      "\nnote: '.Nested' tokens are offered by token discovery but rejected by executeQuery —\n" +
+      "the server resolves them with SubTokensOptions.All while filters never allow CanNested.\n",
+    );
+  }
+
+  ctx.io.out(`\nNext: signum explain ${queryKey}.${full}.<token>   ·   signum query ${queryKey} --column ${full}\n`);
+  return ExitCode.Ok;
 }
 
 export async function runDiscover(
@@ -225,7 +310,7 @@ export async function runDiscover(
     case "types":      return listTypes(ctx, md, arg);
     case "queries":    return listQueries(ctx, md, arg);
     case "operations": return listOperations(ctx, md, arg);
-    case "explain":    return explain(ctx, md, arg);
+    case "explain":    return await explain(ctx, md, arg);
   }
 }
 
