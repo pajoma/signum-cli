@@ -54,8 +54,50 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
         run: |
           set -euo pipefail
-          flags=(--title "${GITHUB_REF_NAME}" --generate-notes)
-          if [ "${{ steps.version.outputs.prerelease }}" = "true" ]; then flags+=(--prerelease); fi
-          gh release create "${GITHUB_REF_NAME}" dist/* "${flags[@]}"
+
+          # Refuse to publish nothing. `dist/*` would otherwise expand to the literal string
+          # under `set -u`, and gh would report something unrelated to the real problem.
+          shopt -s nullglob
+          artifacts=(dist/*)
+          if [ ${#artifacts[@]} -eq 0 ]; then
+            echo "::error::no artifacts in dist/ — the build step produced nothing to publish."
+            exit 1
+          fi
+
+          # This step must be IDEMPOTENT, because there are two ways a tag comes into existence
+          # and only one of them leaves the release un-created:
+          #
+          #   git push origin vX.Y.Z        -> tag exists, no release yet  -> create
+          #   "Draft a new release" in the UI -> creating the release CREATES the tag, which
+          #                                      triggers this workflow   -> release ALREADY exists
+          #
+          # The second path is not exotic — it is the obvious thing to do from the web UI, and it
+          # is how the first real run of this pipeline failed: every build succeeded and then
+          # `gh release create` aborted with "a release with the same tag name already exists",
+          # leaving a release with no binaries attached and nothing to show for the work.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists — attaching artifacts and reconciling the channel."
+            # --clobber so a re-run replaces artifacts rather than failing on a name collision.
+            gh release upload "$TAG" "${artifacts[@]}" --clobber
+            # Reconcile the pre-release flag: a release created by hand may carry the wrong
+            # channel, and release-version.ts has already proved which one the tag means from the
+            # tag's SemVer and its branch reachability. Notes are left alone deliberately — a
+            # human may have written them, and they are not ours to overwrite.
+            #
+            # `--prerelease=false` is pflag's explicit-value form for a bool flag; `gh release
+            # edit --help` documents only the bare `--prerelease`, and there is no
+            # `--no-prerelease`. If a future gh rejects the form, this step fails loudly under
+            # `set -e` rather than silently leaving the release on the wrong channel — which is
+            # the right way round for a publish path.
+            gh release edit "$TAG" --prerelease="$PRERELEASE"
+          else
+            create_flags=(--title "$TAG" --generate-notes)
+            if [ "$PRERELEASE" = "true" ]; then create_flags+=(--prerelease); fi
+            gh release create "$TAG" "${artifacts[@]}" "${create_flags[@]}"
+          fi
+
+          echo "published ${#artifacts[@]} artifact(s) to $TAG (prerelease=$PRERELEASE)"
