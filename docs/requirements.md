@@ -6,6 +6,39 @@ this document and the issues must stay in sync.
 
 **Status:** DRAFT — collected 2026-07-25, not yet reviewed.
 
+## Milestone is not priority
+
+The tables below carry a **Milestone** column (`m1`/`m2`/`m3`/`always`) — *when* a requirement is
+scheduled. That column was previously headed "Priority", which is a different axis and caused
+exactly the confusion you would expect.
+
+**Priority lives on the [project board](https://github.com/users/pajoma/projects/2)** as `P0`/`P1`/`P2`:
+
+| | Meaning |
+|---|---|
+| **P0** | Must be right, or the tool is dangerous or pointless. Correctness, credential safety, silent-wrong-data, and the few requirements that define what the product *is*. |
+| **P1** | Needed for the tool to be good. A user or agent would reasonably expect it. |
+| **P2** | Valuable, but the tool is fine without it. Narrow audience, convenience, or a path that cannot work on the target application anyway. |
+
+The two axes are deliberately independent, and they disagree often:
+
+- `always` + **P0** — REQ-074 (no credential leakage) is not scheduled, it is a standing condition.
+- `m1` + **P0** — REQ-022 (de-intern `ResultTable`) is the correctness requirement; getting it wrong
+  emits plausible-looking wrong data, which is the worst failure available to a tool people script
+  against. A defect of exactly this kind shipped and was caught in review.
+- `m3` + **P0** — REQ-062 (write guardrails under MCP). Late, because MCP is late; P0, because in
+  `Signum.Agent` prompt injection already reaches a destructive write path.
+- `m2` + **P0** — REQ-031/032/033/042/046, the write-integrity set. Every one of them fails
+  *silently*: dropped changes, overwritten concurrent edits, `args` that become `null` with no error.
+- `m3` + **P2** — REQ-002/003/004/005, the auth mechanisms that **cannot work on the target
+  application** and are retained only because REQ-075 says the CLI must work against any Signum app.
+
+A requirement is closed only once **delivered**, not once implemented — and nothing here has been
+verified against a live Signum application yet (REQ-077, itself P0 for that reason). Implemented
+requirements sit at Status *In review* on the board.
+
+---
+
 ## What a requirement is here
 
 A requirement states **what the CLI must do**. It is not a user story and carries **no
@@ -98,7 +131,7 @@ CLI to work against any Signum app.
 The owner's guidance: **behave like `gh`** — authenticate either by pasting an API token
 (terminal-only) or by opening a browser.
 
-| ID | Priority | Requirement |
+| ID | Milestone | Requirement |
 |---|---|---|
 | REQ-001 | m2 | **Connection profiles.** Named profiles for multiple target apps/environments, resolved in the order: `--url`/`--profile` flag → env var → config file → error. `signum auth login`, `auth status`, `auth logout`, `auth switch`. Never require a config file to exist. |
 | REQ-002 | m3 | **API-key authentication.** **Not available on the target application — it has no `Signum.Rest`**, so there is no `X-ApiKey` authenticator and `api/restApiKey/*` is absent; retained because the CLI must work against any Signum app (REQ-075). `X-ApiKey` header. **Never** the `apiKey` query parameter — `RestLogFilter.cs:36-38` persists whole query strings into `RestLogEntity.QueryString`, so a key in a URL is written to the customer's database in plaintext. Detect and report clearly when the target app lacks `Signum.Rest`. |
@@ -116,7 +149,7 @@ The owner's guidance: **behave like `gh`** — authenticate either by pasting an
 
 ## B. Metadata and discovery
 
-| ID | Priority | Requirement |
+| ID | Milestone | Requirement |
 |---|---|---|
 | REQ-010 | m1 | **Metadata cache.** Fetch `GET api/reflection/types` (anonymous, `Last-Modified` + 304) and cache on disk keyed by `Last-Modified`; revalidate with `If-Modified-Since`. Enables offline completion and pre-flight validation. Cache is per-profile and explicitly invalidatable. |
 | REQ-011 | m1 | **Discovery commands.** List and describe what the target app offers: types, their members and entity kinds, available queries, **operations** (`signum operations [<Type>]`, `signum explain <OperationKey>` — read-only, so they ship in m1 even though invoking an operation is m2), enums, permissions. Human tables and `--json`. This is how a user (or agent) learns an unfamiliar app. |
@@ -128,7 +161,7 @@ The owner's guidance: **behave like `gh`** — authenticate either by pasting an
 
 ## C. Queries
 
-| ID | Priority | Requirement |
+| ID | Milestone | Requirement |
 |---|---|---|
 | REQ-020 | m1 | **Execute dynamic queries.** `POST api/query/executeQuery/{queryKey}` with filters, orders, columns, pagination. The core read capability. |
 | REQ-021 | m1 | **Filter/column/order expression syntax.** A human- and agent-writable surface that lowers to `QueryRequestTS`. Must cover all **25** `FilterOperation` values (`Filter.cs:558-615`), `And`/`Or` groups including nesting, and `IsIn`. Note `IsIn` **cannot express null**, and there is **no NOT** — `FilterGroupOperation` is `And|Or` only, so negation exists solely as negated operators. **Designed:** [`design/filter-expression-syntax.md`](design/filter-expression-syntax.md); criteria in [STORY-20](stories/query.md). |
@@ -142,7 +175,7 @@ The owner's guidance: **behave like `gh`** — authenticate either by pasting an
 
 ## D. Entities
 
-| ID | Priority | Requirement |
+| ID | Milestone | Requirement |
 |---|---|---|
 | REQ-030 | m1 | **Retrieve.** By type + id and by `Lite` key (`"Order;42"` — `TypeName;id`). Support `entityPack`/`entityPackLight` to get `canExecute` alongside the entity. Also `exists` and `fetchAll`. |
 | REQ-031 | m2 | **Entity JSON round-trip fidelity.** Read an entity, modify it, write it back without corruption. Must respect: `Type` on entities (clean name — `RoleEntity` → `"Role"`) vs `EntityType` on Lites (mixing throws); `ticks` as a **string**; `MList` as `[{rowId, element}]`; special properties **first** in the object; unknown keys rejected. |
@@ -156,7 +189,7 @@ The owner's guidance: **behave like `gh`** — authenticate either by pasting an
 
 **There is no save endpoint.** All mutation is an operation — this shapes the whole write surface.
 
-| ID | Priority | Requirement |
+| ID | Milestone | Requirement |
 |---|---|---|
 | REQ-040 | m2 | **Execute operations.** `executeEntity` and `executeLite`. Must choose the right variant: `…Entity` when the local graph has unsaved changes, `…Lite` when only an identity is held. Includes save, via e.g. `UserOperation.Save`. **Constraint:** `OperationController.cs:142` hardcodes `inUserInterface: true`, so operations hidden from the web UI **cannot be invoked over the API at all** — by this CLI or any client. See [STORY-40](stories/operations.md). |
 | REQ-041 | m2 | **operationKey resolution.** Keys are `ContainerClassName.FieldName`, **not** namespace-qualified (`Signum/Basics/Symbol.cs:22`). **Operations are first-class commands** in verb-noun form — `signum ship order 42`, `signum create order` — resolved against metadata, with the dotted key as the canonical unambiguous equivalent. Built-ins win dispatch, so a shadowed operation verb must be flagged in discovery output ([CLI surface](design/cli-surface.md) §2.1). Resolve friendly input against cached metadata; disambiguate rather than guess. |
@@ -170,7 +203,7 @@ The owner's guidance: **behave like `gh`** — authenticate either by pasting an
 
 ## F. Output, errors, and UX
 
-| ID | Priority | Requirement |
+| ID | Milestone | Requirement |
 |---|---|---|
 | REQ-050 | m1 | **TTY-aware output.** Output selector is `-o/--output` (kubectl-style), specified in [`design/cli-surface.md`](design/cli-surface.md) §4. Aligned tables with colour when stdout is a TTY; structured output when piped. Explicit `--json` / `--csv` / `--tsv` / `--ndjson` always win. Respect `NO_COLOR`. Diagnostics to stderr, data to stdout — always, so piping is safe. |
 | REQ-051 | m1 | **Exit-code taxonomy.** A documented, stable set. **Specified** in [`design/cli-surface.md`](design/cli-surface.md) §5: `0` ok, `1` unexpected, `2` usage, `3` not authenticated, `4` not authorized, `5` not found, `6` validation, `7` concurrency conflict, `8` transport, `9` blocked by policy. Codes 3 and 4 must be distinguished even though **the server returns 403 for both** — discriminate on `exceptionType` (AC-08.2). |
@@ -189,7 +222,7 @@ The owner's guidance: **behave like `gh`** — authenticate either by pasting an
 Resolves [ADR 0002](decisions/0002-mcp-vs-http.md) option C2. Motivated by "AI agents" and
 "Claude Code" being primary consumers.
 
-| ID | Priority | Requirement |
+| ID | Milestone | Requirement |
 |---|---|---|
 | REQ-060 | m3 | **MCP server mode.** `signum mcp` exposes the CLI's deterministic commands as MCP tools over stdio, so **any** Signum app becomes agent-drivable with **no server-side module**. Must not require `Signum.Agent` in the target app. |
 | REQ-061 | m3 | **Metadata-derived tool schemas.** Generate tool schemas from the REQ-010 cache so tools reflect the actual target app. Consider lazy disclosure — `Signum.Agent` does this via `Describe` + `ToolListChangedNotification`, and a large app's type list will not fit a tool list comfortably. |
@@ -199,7 +232,7 @@ Resolves [ADR 0002](decisions/0002-mcp-vs-http.md) option C2. Motivated by "AI a
 
 ## H. Non-functional
 
-| ID | Priority | Requirement |
+| ID | Milestone | Requirement |
 |---|---|---|
 | REQ-070 | always | **Self-contained, no dependencies.** One executable, dropped anywhere, runs — no runtime install, no external tools, no required config file. Per [ADR 0003](decisions/0003-self-contained-distribution.md). |
 | REQ-071 | always | **Self-contained build hygiene.** `bun build --compile` single executable per target; TypeScript `strict` + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes`; branded types at the parse boundary with a single parse-and-validate layer as their only producer; minimal dependency tree; no npm-install distribution path (that would violate REQ-070). Because TS types erase at runtime, the correctness tests (AC-21.3/21.4, AC-31.6, AC-32.3) are **release-blocking** — see [ADR 0006](decisions/0006-typescript-bun.md) cost 5. |
