@@ -11,9 +11,9 @@
 
 import type { Ctx } from "../cli.ts";
 import { ExitCode, UsageError } from "../core/errors.ts";
-import { renderResultTable, renderDocument } from "../core/output.ts";
+import { renderResultTable, renderDataDocument, renderDocument } from "../core/output.ts";
 import { resolveResultTable, type RawResultTable } from "../core/resulttable.ts";
-import { findType, loadMetadata, suggestTypes } from "../core/metadata.ts";
+import { loadMetadata, resolveQueryKey } from "../core/metadata.ts";
 import { lowerFilterExpressions, parseFilterExpression, type FilterWire } from "../core/filter.ts";
 import { opt, optAll, flag, resolveTarget } from "./context.ts";
 import { readFileSync } from "node:fs";
@@ -98,6 +98,9 @@ function readFilterJson(source: string): unknown[] {
   return parsed;
 }
 
+/** Names the data in a refusal message, and keeps the two `openData` calls in step. */
+const DATA_KIND = "query results";
+
 export async function runQuery(ctx: Ctx): Promise<ExitCode> {
   const queryKey = ctx.args.positionals[0];
   if (queryKey === undefined) {
@@ -130,8 +133,9 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
 
   // The gate is unconditional from here on, evaluated before touching credentials or the
   // network: being told to fix auth and *then* refused would be two round trips of confusion.
-  // --explain emits no data, so it stays exempt.
-  if (!ctx.args.flags.explain) ctx.assertMayEmitData("query results");
+  // --explain emits no data, so it stays exempt. The writer this returns is discarded; the
+  // render paths below open their own. `openData` is side-effect-free, so that is free.
+  if (!ctx.args.flags.explain) ctx.openData(DATA_KIND);
 
   // requireAuth is conditional on --explain: it sends nothing, so it must not need a
   // credential (QA finding — this previously blocked previewing a request before ever
@@ -141,19 +145,15 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
   const target = resolveTarget(ctx, { requireAuth: !ctx.args.flags.explain });
 
   // Validate the query key against cached metadata so a typo costs no round trip (AC-20.7).
+  // `resolveQueryKey` is the SAME resolution `signum queries` lists from, so a key this accepts
+  // is a key that was offered, and vice versa (Brooks review: those were two definitions).
   const md = await loadMetadata({
     url: target.url, http: target.http, env: ctx.io.env, warn: (l) => ctx.io.err(l),
   });
-  if (findType(md, queryKey) === undefined) {
-    const near = suggestTypes(md, queryKey);
-    throw new UsageError(`unknown query key '${queryKey}'`, {
-      hint: near.length > 0
-        ? `Did you mean: ${near.join(", ")}?\nRun \`signum queries\` for the list.`
-        : "Run `signum queries` to see available queries.",
-    });
-  }
+  resolveQueryKey(md, queryKey);
 
-  const columns = optAll(ctx, "column").map((token) => ({ token }));
+  const requestedColumns = optAll(ctx, "column");
+  const columns = requestedColumns.map((token) => ({ token }));
   const orders = parseOrders(optAll(ctx, "order"));
   const filterJsonSource = opt(ctx, "filter-json");
   // DSL and --filter-json are combined by concatenation — both are ANDed at the top level,
@@ -187,10 +187,12 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
       path: `api/query/queryValue/${encodeURIComponent(queryKey)}`,
       body: { ...request, valueToken: "Count" },
     });
+    // A count is derived from rows, so it goes out through the data boundary like rows do.
+    const out = ctx.openData(DATA_KIND);
     if (ctx.format === "json" || ctx.format === "ndjson") {
-      renderDocument({ queryKey, count: res.body }, { format: ctx.format, write: ctx.io.out });
+      renderDataDocument({ queryKey, count: res.body }, { format: ctx.format, write: out });
     } else {
-      ctx.io.out(`${String(res.body)}\n`);
+      out(`${String(res.body)}\n`);
     }
     return ExitCode.Ok;
   }
@@ -201,12 +203,14 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
     body: request,
   });
 
-  // The de-interning boundary: nothing downstream sees a raw row (AC-21.1).
-  const table = resolveResultTable(res.body);
+  // The de-interning boundary: nothing downstream sees a raw row (AC-21.1). The requested
+  // column order goes in so the hoisted `Entity` column comes back at the position the user
+  // asked for, in every format (AC-21.2).
+  const table = resolveResultTable(res.body, { requestedColumns });
 
   renderResultTable(table, {
     format: ctx.format,
-    write: ctx.io.out,
+    write: ctx.openData(DATA_KIND),
     warn: (line) => ctx.io.err(line + "\n"),
     // QA finding: ctx.color was computed (TTY + NO_COLOR detection) but never consumed —
     // colour output didn't exist. Threaded through here now.

@@ -6,7 +6,7 @@
 
 import type { Ctx } from "../cli.ts";
 import { ExitCode, NotFoundError, UsageError } from "../core/errors.ts";
-import { renderDocument } from "../core/output.ts";
+import { renderDataDocument, renderDocument } from "../core/output.ts";
 import { findType, loadMetadata, suggestTypes } from "../core/metadata.ts";
 import { flag, resolveTarget } from "./context.ts";
 import { parseLiteKey } from "../core/text.ts";
@@ -46,10 +46,10 @@ export async function runGet(ctx: Ctx): Promise<ExitCode> {
     });
   }
 
-  // Unconditional gate first — see the note in query.ts.
-  if (!ctx.args.flags.explain) {
-    ctx.assertMayEmitData(flag(ctx, "exists") ? "entity existence" : "entity data");
-  }
+  // Unconditional gate first — see the note in query.ts. The render paths open their own
+  // writer; this call exists so a refusal costs no network round trip.
+  const dataKind = flag(ctx, "exists") ? "entity existence" : "entity data";
+  if (!ctx.args.flags.explain) ctx.openData(dataKind);
 
   // Conditional on --explain, matching query.ts — it sends nothing so must not need a
   // credential (QA finding, parity fix). The final GET below enforces auth itself if
@@ -85,10 +85,11 @@ export async function runGet(ctx: Ctx): Promise<ExitCode> {
   if (existsOnly) {
     const res = await target.http.request<unknown>({ method: "GET", path });
     const present = res.body === true || res.body === "true";
+    const out = ctx.openData(dataKind);
     if (ctx.format === "json" || ctx.format === "ndjson") {
-      renderDocument({ type: cleanName, id, exists: present }, { format: ctx.format, write: ctx.io.out });
+      renderDataDocument({ type: cleanName, id, exists: present }, { format: ctx.format, write: out });
     } else if (present) {
-      ctx.io.out("exists\n");
+      out("exists\n");
     } else {
       ctx.io.err("does not exist\n");
     }
@@ -101,9 +102,9 @@ export async function runGet(ctx: Ctx): Promise<ExitCode> {
   }
 
   // An entity is a document, not a table, so it renders as JSON in every format.
-  renderDocument(res.body, {
+  renderDataDocument(res.body, {
     format: ctx.format === "table" ? "json" : ctx.format,
-    write: ctx.io.out,
+    write: ctx.openData(dataKind),
   });
   return ExitCode.Ok;
 }

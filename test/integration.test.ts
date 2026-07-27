@@ -49,6 +49,12 @@ const REFLECTION = {
   // 400/500 fixture routes above.
   BadInput: { kind: "Main", queryDefined: true, members: {}, operations: {} },
   Broken: { kind: "Main", queryDefined: true, members: {}, operations: {} },
+  // A reflected type with NO query. `queryDefined` is omitted rather than set to false because
+  // that is what the wire looks like: TypeInfoTS.QueryDefined carries
+  // [JsonIgnore(WhenWritingDefault)] (ReflectionServer.cs:474), so false is simply absent.
+  // `signum queries` must not offer it, and `signum query` must not accept it — those two used
+  // to disagree.
+  Ledger: { kind: "Main", niceName: "Ledger", members: { Id: { type: { name: "number" } } }, operations: {} },
 };
 
 /** Interned: `State` cells are indices, `Total` cells are literals. */
@@ -179,7 +185,7 @@ describe("discovery without credentials (STORY-24, STORY-61)", () => {
     const r = await cli(["types", "--url", baseUrl, "--json"]);
     expect(r.code).toBe(ExitCode.Ok);
     const types = JSON.parse(r.out) as Array<{ name: string }>;
-    expect(types.map((t) => t.name).sort()).toEqual(["BadInput", "Broken", "Order", "UserEntity"]);
+    expect(types.map((t) => t.name).sort()).toEqual(["BadInput", "Broken", "Ledger", "Order", "UserEntity"]);
   });
 
   it("explains a type from metadata", async () => {
@@ -224,6 +230,13 @@ describe("discovery without credentials (STORY-24, STORY-61)", () => {
     expect(all.out).toContain("Order");
     const filtered = await cli(["queries", "zzz-nomatch", "--url", baseUrl], { tty: true });
     expect(filtered.err).toContain("no queries");
+  });
+
+  it("`queries` omits a reflected type that defines no query", async () => {
+    const r = await cli(["queries", "--url", baseUrl, "--json"]);
+    const keys = (JSON.parse(r.out) as Array<{ queryKey: string }>).map((q) => q.queryKey);
+    expect(keys).toContain("Order");
+    expect(keys).not.toContain("Ledger");
   });
 
   it("`operations` with no type argument lists every operation across every type", async () => {
@@ -305,6 +318,49 @@ describe("login and status (STORY-12, STORY-06)", () => {
     expect(r.out + r.err).not.toContain(GOOD_TOKEN);
     expect(r.out).toContain("alice");
     expect(r.code).toBe(ExitCode.Ok);
+  });
+
+  it("survives a token rotated during login validation and stores the REPLACEMENT (AC-04.4)", async () => {
+    // A browser token old enough to rotate on its very first use is the common case for a
+    // session that has been open a while. Validation runs before any credential exists, so the
+    // default rotation handler (rotateCredential, which UPDATES a stored credential) failed with
+    // "no stored credential to rotate" and aborted the whole login — losing the replacement and
+    // costing the user another browser handoff.
+    const dir = mkdtempSync(join(tmpdir(), "signum-rotate-login-"));
+    rotateNext = true;
+    const r = await cli(["auth", "login", "--url", baseUrl, "--with-token"], {
+      env: { SIGNUM_CONFIG_DIR: dir }, stdin: GOOD_TOKEN + "\n",
+    });
+    rotateNext = false;
+
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.err).not.toContain("no stored credential to rotate");
+    // Off a TTY login reports as JSON, so the rotation is reported there rather than on stderr.
+    expect(JSON.parse(r.out) as { rotatedOnLogin: boolean }).toMatchObject({ rotatedOnLogin: true });
+
+    const stored = JSON.parse(readFileSync(join(dir, "credential.json"), "utf8")) as
+      { token: string; rotatedAt?: string };
+    expect(stored.token).toBe(ROTATED_TOKEN);
+    expect(stored.rotatedAt).toBeDefined();
+    // And the stored credential actually works — the point of keeping the replacement.
+    const after = await cli(["auth", "status"], { env: { SIGNUM_CONFIG_DIR: dir } });
+    expect(after.code).toBe(ExitCode.Ok);
+    expect(after.out).toContain("alice");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("stores the submitted token unchanged when the server does not rotate", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "signum-norotate-login-"));
+    const r = await cli(["auth", "login", "--url", baseUrl, "--with-token"], {
+      env: { SIGNUM_CONFIG_DIR: dir }, stdin: GOOD_TOKEN + "\n",
+    });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(JSON.parse(r.out) as { rotatedOnLogin: boolean }).toMatchObject({ rotatedOnLogin: false });
+    const stored = JSON.parse(readFileSync(join(dir, "credential.json"), "utf8")) as
+      { token: string; rotatedAt?: string };
+    expect(stored.token).toBe(GOOD_TOKEN);
+    expect(stored.rotatedAt).toBeUndefined();
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 
@@ -494,6 +550,41 @@ describe("query (STORY-20, STORY-21, STORY-22)", () => {
     const r = await cli(["query", "Nope"]);
     expect(r.code).toBe(ExitCode.Usage);
     expect(r.err).toContain("unknown query key");
+  });
+
+  it("rejects a type that `signum queries` never offered, before any request", async () => {
+    // The other half of the DRY fix: discovery filters on queryDefined, so execution must too.
+    // Previously `Ledger` passed findType() and was sent to the server, which answered 404 —
+    // contradicting the promise that an invalid query key is caught locally (AC-20.7).
+    const r = await cli(["query", "Ledger"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("no query you can run");
+    expect(r.err).toContain("signum queries");
+  });
+
+  it("puts the Entity column where it was asked for, end to end (AC-21.2)", async () => {
+    const r = await cli([
+      "query", "Order", "--column", "State", "--column", "Entity", "--column", "Total", "--json",
+    ]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const rows = JSON.parse(r.out) as Array<Record<string, unknown>>;
+    // The mock returns columns ["State","Total"] with Entity hoisted, so a correct client
+    // reconstructs exactly the shape the caller requested.
+    expect(Object.keys(rows[0] ?? {})).toEqual(["State", "Entity", "Total"]);
+    expect(rows[0]?.["Entity"]).toEqual({ EntityType: "Order", id: 42 });
+  });
+
+  it("csv carries the Entity column too — it used to be dropped entirely (AC-21.2)", async () => {
+    const r = await cli(["query", "Order", "--column", "Entity", "--column", "State", "-o", "csv"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    // The mock ignores the requested column list and always returns ["State","Total"], which is
+    // exactly the interesting case: the SERVER's columns are authoritative, and the request order
+    // only decides where the hoisted Entity goes back — first here, since it was asked for first.
+    expect(r.out).toBe(
+      "Entity,State,Total\n" +
+      "Order;42,Shipped,1200.5\n" +
+      "Order;43,Delivered,87.25\n",
+    );
   });
 
   it("--count returns only the count", async () => {

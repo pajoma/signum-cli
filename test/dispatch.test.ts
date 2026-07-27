@@ -128,3 +128,42 @@ describe("caller detection (STORY-50)", () => {
     expect(() => detectCallerContext({ ...noProc, override: "nonsense" })).toThrow(/invalid --caller-context/);
   });
 });
+
+/**
+ * The data-output boundary is structural, not a convention (ADR 0007 · policy.ts).
+ *
+ * The old privacy gate had to be *remembered* by every data-emitting command, and forgetting it
+ * was a silent leak nothing could detect. It is now a type: row and entity renderers accept only
+ * a `DataWriter`, which `ctx.openData` mints after applying the gate. These two tests guard the
+ * remaining ways to get around that — reaching for the escape hatch, or writing to stdout
+ * directly from a data command.
+ */
+describe("the data-output boundary cannot be bypassed inside src/", () => {
+  const SRC = new Bun.Glob("src/**/*.ts");
+
+  async function sources(): Promise<Array<{ path: string; text: string }>> {
+    const out: Array<{ path: string; text: string }> = [];
+    for await (const path of SRC.scan(".")) out.push({ path, text: await Bun.file(path).text() });
+    return out;
+  }
+
+  it("nothing in src/ mints a DataWriter through the test-only escape hatch", async () => {
+    const offenders = (await sources())
+      .filter((f) => f.path !== "src/core/policy.ts") // where it is defined
+      .filter((f) => /\bunsafeDataWriter\s*\(/.test(f.text))
+      .map((f) => f.path);
+    expect(offenders).toEqual([]);
+  });
+
+  it("data commands write server data only through ctx.openData, never ctx.io.out", async () => {
+    // query.ts and get.ts are the m1 data commands. They may still use ctx.io.err for
+    // diagnostics and renderDocument+ctx.io.out for `--explain` (which sends nothing), so this
+    // asserts the positive: each one opens the boundary, and the ungated renderers it calls are
+    // the document ones.
+    for (const path of ["src/commands/query.ts", "src/commands/get.ts"]) {
+      const text = await Bun.file(path).text();
+      expect(text).toContain("ctx.openData(");
+      expect(text).toContain("renderDataDocument");
+    }
+  });
+});

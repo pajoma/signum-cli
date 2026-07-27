@@ -101,6 +101,16 @@ export class SignumHttp {
     return this.opts.baseUrl;
   }
 
+  /**
+   * Whether this client will send a credential. Reflection responses are role-dependent
+   * (`AuthServer.cs:143-157` clears `QueryDefined` for anything the caller may not query, and
+   * an anonymous caller may query nothing), so the metadata cache has to know which kind of
+   * answer it holds. Exposes only presence, never the token itself.
+   */
+  get hasToken(): boolean {
+    return this.opts.token !== undefined && this.opts.token !== "";
+  }
+
   async request<T = unknown>(spec: RequestSpec): Promise<HttpResponse<T>> {
     const url = buildUrl(this.opts.baseUrl, spec.path, spec.query);
     const headers: Record<string, string> = {

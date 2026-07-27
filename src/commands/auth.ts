@@ -56,11 +56,20 @@ async function login(ctx: Ctx): Promise<ExitCode> {
 
   // Validate before storing, so a bad paste fails now rather than mysteriously later.
   // A malformed token degrades silently to anonymous server-side, so this check is required (AC-12.3).
+  //
+  // `onTokenRotated` is REQUIRED here, not optional (Brooks review): validation runs before any
+  // credential exists, so the default handler — `rotateCredential`, which updates the stored
+  // one — would fail with "no stored credential to rotate" and abort the login. A token old
+  // enough to trigger rotation on its very first use is exactly the token a user pastes out of
+  // a browser session that has been open a while, and losing the replacement costs them another
+  // handoff (AC-04.4, AC-12.12). Capture it locally and store it instead of the submitted one.
+  let rotated: string | undefined;
   const http = new SignumHttp({
     baseUrl: url,
     token,
     timeoutMs: ctx.args.flags.timeoutMs,
     trace: ctx.args.flags.verbose ? (l) => ctx.io.err(l) : undefined,
+    onTokenRotated: (fresh) => { rotated = fresh; },
     env: ctx.io.env,
   });
 
@@ -75,16 +84,30 @@ async function login(ctx: Ctx): Promise<ExitCode> {
     });
   }
 
+  const now = new Date().toISOString();
   const path = saveCredential(
-    { url, token, source: "browser-handoff", savedAt: new Date().toISOString() },
+    {
+      url,
+      token: rotated ?? token,
+      source: "browser-handoff",
+      savedAt: now,
+      ...(rotated !== undefined ? { rotatedAt: now } : {}),
+    },
     ctx.io.env,
   );
 
   const name = userName(user) ?? "(unknown)";
   if (ctx.format === "json" || ctx.format === "ndjson") {
-    renderDocument({ url, user: name, storedAt: path }, { format: ctx.format, write: ctx.io.out });
+    renderDocument(
+      { url, user: name, storedAt: path, rotatedOnLogin: rotated !== undefined },
+      { format: ctx.format, write: ctx.io.out },
+    );
   } else {
     ctx.io.out(`Logged in to ${url} as ${name}\n`);
+    if (rotated !== undefined) {
+      // Say so: the token in the user's clipboard is no longer the one that is stored.
+      ctx.io.err("The server rotated the token during validation; the replacement was stored.\n");
+    }
     ctx.io.err(`Credential stored at ${path} (mode 600).\n`);
     ctx.io.err(
       "This token is your only credential for this application; losing it means repeating the\n" +

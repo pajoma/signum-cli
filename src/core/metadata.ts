@@ -12,11 +12,18 @@
  * ⚠️ The precise TypeInfoTS field names are read from ReflectionServer.cs but have NOT been
  * verified against a running server. Parsing is therefore deliberately tolerant: unknown
  * shapes degrade to "present but undescribed" rather than throwing.
+ *
+ * `queryDefined` is the exception — it IS verified: `TypeInfoTS.QueryDefined`
+ * (ReflectionServer.cs:474) is camel-cased on the wire and carries
+ * `[JsonIgnore(WhenWritingDefault)]`, so it is present-and-true or absent, never `false`.
+ * It is also ROLE-DEPENDENT: `AuthServer.cs:143-157` clears it for any query the caller may
+ * not run, and an anonymous caller may run none. That is why the cache is split by auth state
+ * (config.ts `cachePath`) — a stale anonymous document would say "nothing is queryable".
  */
 
 import { SignumHttp } from "./http.ts";
 import { loadMetadataCache, saveMetadataCache } from "./config.ts";
-import { CliError, ExitCode } from "./errors.ts";
+import { CliError, ExitCode, UsageError } from "./errors.ts";
 import { editDistance } from "./text.ts";
 
 export interface MemberInfo {
@@ -110,6 +117,46 @@ export function findType(md: Metadata, name: string): TypeInfo | undefined {
 }
 
 /**
+ * Every type this application will accept as a query key, sorted. THE definition of "queryable"
+ * — `signum queries` lists exactly this, and `resolveQueryKey` accepts exactly this. They used
+ * to disagree: discovery filtered on `hasQuery` while `query` accepted anything `findType`
+ * returned, so a type `signum queries` never offered still passed local validation and reached
+ * the server (Brooks review: DRY).
+ */
+export function queryableTypes(md: Metadata): TypeInfo[] {
+  return [...md.types.values()].filter((t) => t.hasQuery).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Resolve a query key against metadata, or fail with a message that says which of the two
+ * possible problems it is (AC-20.7, AC-63.4).
+ *
+ * @throws UsageError when the type is unknown, or known but exposes no query the caller may run.
+ */
+export function resolveQueryKey(md: Metadata, key: string): TypeInfo {
+  const type = findType(md, key);
+  if (type === undefined) {
+    const near = suggestTypes(md, key);
+    throw new UsageError(`unknown query key '${key}'`, {
+      hint: near.length > 0
+        ? `Did you mean: ${near.join(", ")}?\nRun \`signum queries\` for the list.`
+        : "Run `signum queries` to see available queries.",
+    });
+  }
+  if (!type.hasQuery) {
+    throw new UsageError(`'${type.name}' has no query you can run`, {
+      hint:
+        "The application's metadata reports no default query for this type, either because it\n" +
+        "defines none or because your role is not allowed to run it (both look the same on the\n" +
+        `wire). Run \`signum queries\` for what IS available, or \`signum explain ${type.name}\` for\n` +
+        "the type itself. If this metadata was cached before you logged in, run `signum auth\n" +
+        "status` first — reflection answers depend on who is asking.",
+    });
+  }
+  return type;
+}
+
+/**
  * Near matches for a mistyped name (AC-63.4). Substring containment alone is not enough —
  * it cannot suggest `Order` for `Ordr`, which is exactly the typo people make.
  */
@@ -143,7 +190,10 @@ export interface LoadMetadataOptions {
 }
 
 export async function loadMetadata(opts: LoadMetadataOptions): Promise<Metadata> {
-  const cached = loadMetadataCache(opts.url, opts.env);
+  // Reflection answers are role-dependent, so anonymous and authenticated responses are cached
+  // separately — see the header note and config.ts `cachePath`.
+  const authenticated = opts.http.hasToken;
+  const cached = loadMetadataCache(opts.url, authenticated, opts.env);
 
   if (opts.offline === true) {
     if (cached === undefined) {
@@ -171,7 +221,7 @@ export async function loadMetadata(opts: LoadMetadataOptions): Promise<Metadata>
     }
 
     const lastModified = res.headers.get("last-modified") ?? undefined;
-    saveMetadataCache(opts.url, res.body, lastModified, opts.env);
+    saveMetadataCache(opts.url, authenticated, res.body, lastModified, opts.env);
     return parseMetadata(res.body, {
       url: opts.url, fetchedAt: new Date().toISOString(), fromCache: false, stale: false,
     });

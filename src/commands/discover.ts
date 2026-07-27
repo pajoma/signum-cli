@@ -12,7 +12,9 @@ import type { Ctx } from "../cli.ts";
 import { ExitCode, NotFoundError, UsageError } from "../core/errors.ts";
 import { renderDocument } from "../core/output.ts";
 import { BUILT_INS, isBuiltIn } from "../core/args.ts";
-import { findType, loadMetadata, suggestTypes, type Metadata, type TypeInfo } from "../core/metadata.ts";
+import {
+  findType, loadMetadata, queryableTypes, suggestTypes, type Metadata, type TypeInfo,
+} from "../core/metadata.ts";
 import { resolveTarget } from "./context.ts";
 
 async function metadata(ctx: Ctx): Promise<Metadata> {
@@ -64,10 +66,9 @@ function listTypes(ctx: Ctx, md: Metadata, pattern: string | undefined): ExitCod
 
 function listQueries(ctx: Ctx, md: Metadata, pattern: string | undefined): ExitCode {
   const wanted = pattern?.toLowerCase();
-  const rows = [...md.types.values()]
-    .filter((t) => t.hasQuery)
-    .filter((t) => wanted === undefined || t.name.toLowerCase().includes(wanted))
-    .sort((a, b) => a.name.localeCompare(b.name));
+  // Same definition `signum query` validates against — see metadata.ts `queryableTypes`.
+  const rows = queryableTypes(md)
+    .filter((t) => wanted === undefined || t.name.toLowerCase().includes(wanted));
 
   if (ctx.format === "json" || ctx.format === "ndjson") {
     renderDocument(rows.map((t) => ({ queryKey: t.name, niceName: t.niceName ?? null })),
@@ -77,7 +78,9 @@ function listQueries(ctx: Ctx, md: Metadata, pattern: string | undefined): ExitC
 
   if (rows.length === 0) {
     ctx.io.err("no queries reported by this application's metadata\n");
-    ctx.io.err("note: the metadata field indicating a default query is unverified; try `signum types`\n");
+    // `queryDefined` is role-dependent (AuthServer.cs:143-157) and an anonymous caller may run
+    // no query at all, so "none" most often means "not logged in", not "none exist".
+    ctx.io.err("note: queries you may run depend on who you are — try `signum auth login`, or `signum types`\n");
     return ExitCode.Ok;
   }
   for (const t of rows) ctx.io.out(`${t.name}\n`);

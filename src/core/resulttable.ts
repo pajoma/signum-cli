@@ -8,6 +8,11 @@
  * `Entity` column is hoisted out into `rows[i].entity`. Rendering a raw row emits
  * plausible-looking wrong data — the worst failure mode for a tool people script against.
  *
+ * Both distortions are undone HERE, in one place, so no renderer has to know about either
+ * (AC-21.1). In particular the hoisted `Entity` is put back into `columns`/`values` at the
+ * position the user asked for (AC-21.2) — a renderer that iterates `columns` therefore emits
+ * the requested shape, and no format can quietly drop or relocate it.
+ *
  * Because TypeScript types erase at runtime (ADR 0006 cost 5), the guarantee here is
  * structural rather than compile-only: `ResolvedTable` carries a brand that ONLY
  * `resolveResultTable` can produce, so a renderer cannot accept a raw payload by mistake.
@@ -32,19 +37,43 @@ export interface RawResultTable {
  */
 const RESOLVED: unique symbol = Symbol("signum.resolvedResultTable");
 
-/** A de-interned table. Only `resolveResultTable` can mint one. */
+/**
+ * A de-interned table. Only `resolveResultTable` can mint one.
+ *
+ * `columns` is the CANONICAL shape: the server's own column list with the hoisted `Entity`
+ * column put back at its declared position. `rows[i].values` is index-aligned with it. Every
+ * renderer consumes exactly this and nothing else.
+ */
 export interface ResolvedTable {
   readonly [RESOLVED]: true;
   readonly columns: readonly string[];
   readonly rows: readonly ResolvedRow[];
+  /** Index into `columns`/`values` of the reinserted `Entity` column, when there is one. */
+  readonly entityIndex: number | undefined;
   /** Server-reported total, distinct from `rows.length` (AC-21.5). */
   readonly totalElements: number | undefined;
 }
 
 export interface ResolvedRow {
-  /** The hoisted `Entity` column, when the query selected one. */
+  /**
+   * The hoisted `Entity` column, when the query selected one. Also present in `values` at
+   * `table.entityIndex` — this is a convenience for `-o name`, not a second source of truth.
+   */
   readonly entity: unknown;
   readonly values: readonly unknown[];
+}
+
+/** The entity column's token is exactly this (`QueryDescription.cs:17` — `ColumnDescription.Entity`). */
+export const ENTITY_TOKEN = "Entity";
+
+export interface ResolveOptions {
+  /**
+   * The `columns` tokens sent in the request, in request order. Used solely to place the
+   * hoisted `Entity` column back where the user asked for it (AC-21.2). Omit it — or send no
+   * explicit columns — and `Entity` goes first, which is the framework's own reconstruction
+   * order (`ResultTable.AllColumns()` = `Columns.PreAnd(entityColumn)`).
+   */
+  requestedColumns?: readonly string[] | undefined;
 }
 
 function columnToken(col: NonNullable<RawResultTable["columns"]>[number], index: number): string {
@@ -52,18 +81,60 @@ function columnToken(col: NonNullable<RawResultTable["columns"]>[number], index:
   return col.token ?? col.displayName ?? `column${index}`;
 }
 
+function isEntityToken(token: string): boolean {
+  return token.toLowerCase() === ENTITY_TOKEN.toLowerCase();
+}
+
 /**
- * De-intern a raw `ResultTable`.
+ * Where the hoisted `Entity` column belongs in the server's column list.
+ *
+ * Anchored on `Entity`'s nearest surviving PREDECESSOR — insert just after it — rather than on
+ * `Entity`'s own index in the request. Two things make the request index alone wrong: the server
+ * may drop a requested column it will not disclose (`ResultTable`'s constructor filters on
+ * `Token.IsAllowed()`), and it is the server's `columns` array, not the request, that fixes the
+ * order of everything else. Anchoring keeps `Entity` next to the column the caller put it next
+ * to even when those two disagree. No surviving predecessor means it goes first, which is also
+ * the no-request-order default.
+ */
+function entityPosition(serverColumns: readonly string[], requested: readonly string[] | undefined): number {
+  if (requested === undefined) return 0;
+  const at = requested.findIndex(isEntityToken);
+  if (at === -1) return 0;
+  const lower = serverColumns.map((c) => c.toLowerCase());
+  for (let i = at - 1; i >= 0; i--) {
+    const found = lower.indexOf((requested[i] as string).toLowerCase());
+    if (found !== -1) return found + 1;
+  }
+  return 0;
+}
+
+/**
+ * De-intern a raw `ResultTable` and restore its declared column shape.
  *
  * @throws CliError when an interned index is out of range — never silently null (AC-21.4).
  */
-export function resolveResultTable(raw: RawResultTable): ResolvedTable {
-  const columns = (raw.columns ?? []).map(columnToken);
+export function resolveResultTable(raw: RawResultTable, options: ResolveOptions = {}): ResolvedTable {
+  const serverColumns = (raw.columns ?? []).map(columnToken);
   const uniqueValues = raw.uniqueValues ?? {};
+  const rawRows = raw.rows ?? [];
 
-  const rows: ResolvedRow[] = (raw.rows ?? []).map((row, rowIndex) => {
+  // The converter writes `entity` on every row, and only when `rt.EntityColumn != null`
+  // (`ResultTableConverter.cs:61-65`) — so one row carrying the key settles it for the table.
+  // With `--group` the server keeps entity columns inline and hoists nothing, which this
+  // correctly reads as "no hoisted column".
+  const hoisted =
+    rawRows.some((row) => row !== null && typeof row === "object" && "entity" in row) ||
+    (options.requestedColumns?.some(isEntityToken) ?? false);
+
+  const entityIndex = hoisted ? entityPosition(serverColumns, options.requestedColumns) : undefined;
+
+  const columns = entityIndex === undefined
+    ? serverColumns
+    : [...serverColumns.slice(0, entityIndex), ENTITY_TOKEN, ...serverColumns.slice(entityIndex)];
+
+  const rows: ResolvedRow[] = rawRows.map((row, rowIndex) => {
     const cells = row.columns ?? [];
-    const values = columns.map((token, colIndex) => {
+    const resolved = serverColumns.map((token, colIndex) => {
       const cell = cells[colIndex];
       const pool = uniqueValues[token];
 
@@ -90,13 +161,22 @@ export function resolveResultTable(raw: RawResultTable): ResolvedTable {
       return cell ?? null;
     });
 
-    return { entity: row.entity, values };
+    // Reinsertion happens here, once, so `values` is index-aligned with `columns` for every
+    // renderer. `row.entity` is `null` rather than `undefined` when absent, because a hole in
+    // a values array must be a value — `undefined` would serialize away in JSON.
+    const entity = "entity" in row ? row.entity : null;
+    const values = entityIndex === undefined
+      ? resolved
+      : [...resolved.slice(0, entityIndex), entity, ...resolved.slice(entityIndex)];
+
+    return { entity, values };
   });
 
   return {
     [RESOLVED]: true,
     columns,
     rows,
+    entityIndex,
     totalElements: raw.totalElements,
   };
 }
@@ -111,5 +191,5 @@ export function isResolvedTable(value: unknown): value is ResolvedTable {
 
 /** True when the query selected an `Entity` column, which the server hoists (AC-21.2). */
 export function hasEntityColumn(table: ResolvedTable): boolean {
-  return table.rows.some((r) => r.entity !== undefined);
+  return table.entityIndex !== undefined;
 }

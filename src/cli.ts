@@ -5,8 +5,9 @@
  */
 
 import { assertKnownFlags, parseArgs, type ParsedArgs } from "./core/args.ts";
-import { CliError, ExitCode, PolicyError, UsageError, exitCodeOf } from "./core/errors.ts";
+import { CliError, ExitCode, UsageError, exitCodeOf } from "./core/errors.ts";
 import { detectCallerContext, type CallerDetection } from "./core/caller.ts";
+import { makeDataOpener, type DataWriter } from "./core/policy.ts";
 import { colorEnabled, effectiveFormat, renderDocument, type OutputFormat } from "./core/output.ts";
 import {
   COMMANDS, TOPICS, findCommand, helpAsJson, renderCommand, renderOverview,
@@ -33,37 +34,17 @@ export interface Ctx {
   color: boolean;
   caller: CallerDetection;
   /**
-   * Gate for anything that would emit server DATA (rows, entities, field values) — AC-51.1.
-   * m1 has no pseudonymization engine, so under a detected agent the honest behaviour is to stop.
+   * Open stdout for server DATA (rows, entities, field values) — AC-51.1. Applies the ADR 0007
+   * gate and throws `PolicyError` under a detected agent without an explicit acknowledgement;
+   * m1 has no pseudonymization engine, so stopping is the honest behaviour.
    *
-   * ⚠️ CONVENTION, NOT YET STRUCTURAL (Brooks review M3). Every command that emits data must
-   * call this itself, before the network round trip, and BEFORE its own `--explain` short-circuit
-   * (which emits no data and is therefore exempt). It is applied at each call site rather than at
-   * the output boundary because the renderers are shared with `--explain`, help, and `auth status`,
-   * none of which may be gated — so there is no single choke point yet. When the m2 write commands
-   * land they will define that boundary; until then, a new data-emitting command that forgets this
-   * call is a silent leak. The guard-rail test in test/integration.test.ts asserts query and get
-   * are gated; extend it for every future data command.
+   * This is the data-output boundary, not a convention (Brooks review M3): `renderResultTable`
+   * and `renderDataDocument` accept only the `DataWriter` it returns, so a new command cannot
+   * emit rows by forgetting a call — it would have to reach for `unsafeDataWriter` and say why.
+   * Calling it is side-effect-free, so call it early too, before the network round trip, so a
+   * refusal costs no request. `--explain` emits no data and is exempt.
    */
-  assertMayEmitData: (what: string) => void;
-}
-
-function makeDataGate(caller: CallerDetection, allow: boolean): (what: string) => void {
-  return (what: string) => {
-    if (caller.context !== "agent" || allow) return;
-    throw new PolicyError(
-      `refusing to emit ${what} to a detected AI caller`,
-      {
-        hint:
-          "Signals: " + caller.signals.join("; ") + ".\n" +
-          "This CLI has no pseudonymization yet (REQ-057), so it will not stream personal data\n" +
-          "into a model's context by default. To proceed anyway, pass\n" +
-          "  --i-understand-data-goes-to-a-model\n" +
-          "or set SIGNUM_ALLOW_AGENT_DATA=1. Metadata commands (types, queries, explain,\n" +
-          "operations, help) are unaffected. See `signum help pseudonymization`.",
-      },
-    );
-  };
+  openData: (what: string) => DataWriter;
 }
 
 function showHelp(args: ParsedArgs, io: Io): ExitCode {
@@ -152,7 +133,7 @@ export async function run(argv: readonly string[], io: Io): Promise<ExitCode> {
     format,
     color: colorEnabled(io.stdoutIsTty, args.flags.noColor, io.env),
     caller,
-    assertMayEmitData: makeDataGate(caller, args.flags.allowAgentData),
+    openData: makeDataOpener(caller, args.flags.allowAgentData, io.out),
   };
 
   // `--help` anywhere, and bare invocation, both land on help (AC-60.1).

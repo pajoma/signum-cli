@@ -116,31 +116,46 @@ export function rotateCredential(token: string, env?: NodeJS.ProcessEnv): string
 
 interface CacheEnvelope {
   url: string;
+  /** Whether the response was fetched WITH a credential — see `cachePath`. */
+  authenticated: boolean;
   lastModified: string | undefined;
   fetchedAt: string;
   payload: unknown;
 }
 
-function cachePath(url: string, env?: NodeJS.ProcessEnv): string {
+/**
+ * Anonymous and authenticated reflection responses are DIFFERENT documents and get different
+ * cache files.
+ *
+ * `AuthServer.cs:143-157` rewrites `queryDefined` per caller — an anonymous request sees it
+ * false for every type — while `ReflectionServer.LastModified` is a process-wide static
+ * (`ReflectionController.cs:17`), so the server would answer 304 to a conditional request and
+ * hand back the wrong document. Splitting the file is what stops `signum types` before login
+ * from poisoning `signum query` after it.
+ */
+function cachePath(url: string, authenticated: boolean, env?: NodeJS.ProcessEnv): string {
   // Filename-safe digest of the NORMALIZED URL, so the cache key agrees with credential
   // matching (M2) — otherwise `app/` and `app` would keep separate caches.
   const key = normalizeUrl(url);
   let hash = 0;
   for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) | 0;
-  return join(configDir(env), "cache", `reflection-${(hash >>> 0).toString(16)}.json`);
+  const scope = authenticated ? "auth" : "anon";
+  return join(configDir(env), "cache", `reflection-${(hash >>> 0).toString(16)}-${scope}.json`);
 }
 
 export function loadMetadataCache(
   url: string,
+  authenticated: boolean,
   env?: NodeJS.ProcessEnv,
 ): { payload: unknown; lastModified: string | undefined; fetchedAt: string } | undefined {
-  const path = cachePath(url, env);
+  const path = cachePath(url, authenticated, env);
   if (!existsSync(path)) return undefined;
   try {
     const env_ = JSON.parse(readFileSync(path, "utf8")) as CacheEnvelope;
     // Compare canonically (M2): the digest already collapses slash/port variants to one file,
     // so this collision guard must too, or a same-target hit gets rejected.
     if (normalizeUrl(env_.url) !== normalizeUrl(url)) return undefined;
+    if (env_.authenticated !== authenticated) return undefined; // belt and braces; path already splits them
     return { payload: env_.payload, lastModified: env_.lastModified, fetchedAt: env_.fetchedAt };
   } catch {
     return undefined;
@@ -149,15 +164,17 @@ export function loadMetadataCache(
 
 export function saveMetadataCache(
   url: string,
+  authenticated: boolean,
   payload: unknown,
   lastModified: string | undefined,
   env?: NodeJS.ProcessEnv,
 ): void {
   const envelope: CacheEnvelope = {
     url,
+    authenticated,
     lastModified,
     fetchedAt: new Date().toISOString(),
     payload,
   };
-  writePrivate(cachePath(url, env), JSON.stringify(envelope));
+  writePrivate(cachePath(url, authenticated, env), JSON.stringify(envelope));
 }
