@@ -308,3 +308,45 @@ describe("parse errors are informative", () => {
     }
   });
 });
+
+/**
+ * AC-63.2: "An unparseable filter cites the rule it broke — for example the quoted-cast rule —
+ * and points at `signum help filter`."
+ *
+ * The citation half was already good (column-anchored message with a caret). The routing half
+ * was missing entirely: the error carried no hint, so the single most likely first-run error in
+ * the CLI stopped one step short of the help that resolves it — which is the whole premise of
+ * STORY-63.
+ */
+describe("filter errors route to the help that resolves them (AC-63.2)", () => {
+  function failure(expr: string): UsageError {
+    try {
+      parseFilterExpression(expr);
+    } catch (e) {
+      return e as UsageError;
+    }
+    throw new Error(`expected '${expr}' to fail parsing`);
+  }
+
+  it("a parse error points at `signum help filter`", () => {
+    const e = failure("State ===");
+    expect(e.hint).toContain("signum help filter");
+  });
+
+  it("still cites the position — routing is additional, not a replacement", () => {
+    const e = failure("State ===");
+    expect(e.message).toContain("column");
+    expect(e.hint).toContain("^");
+  });
+
+  it("the quoted-cast rule is cited AND routed", () => {
+    const e = failure("(Order).Customer.Name = 5");
+    expect(e.hint).toContain("must be quoted");
+    expect(e.hint).toContain("signum help filter");
+  });
+
+  it("an empty expression routes too — it previously carried no hint at all", () => {
+    const e = failure("   ");
+    expect(e.hint).toContain("signum help filter");
+  });
+});
