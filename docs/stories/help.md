@@ -37,13 +37,13 @@ Traces to: REQ-014, REQ-010 · Priority: `m1`
 to describe *that app's* schema, so that I do not have to read the application's source to use it.
 
 **Acceptance Criteria:**
-- AC-61.1: `signum query <queryKey> --help` shows that query's columns, default ordering, and filterable tokens.
-- AC-61.2: `signum <verb> <Type> --help` (e.g. `signum ship order --help`) shows the operation's arguments, expected target kind (entity / lite / none), and any `canExecute` reasons available.
-- AC-61.3: Dynamic help is sourced from the REQ-010 metadata cache, so with a warm cache it works **fully offline**.
-- AC-61.4: **Dynamic help requires no authentication.** `api/reflection/types` is anonymous, so `signum --url <url> query Order --help` works before any login. This property is protected by a test — it is the difference between evaluating the tool and having to be onboarded first.
-- AC-61.5: With no metadata available, help **degrades rather than fails**: it prints the static portion plus one line naming what it could not resolve and how to fix it (`--url`, or refresh the cache). Never an error.
+- AC-61.1: `m2` — `signum query <queryKey> --help` shows that query's columns, default ordering, and filterable tokens. **Not delivered in m1:** `--help` is resolved before any target or metadata is loaded (which is what makes AC-60.2 work), and no metadata path exists in it. The information is reachable today through `signum explain <QueryKey>` and `signum explain <QueryKey>.<token>` — a different entry point, not the same promise.
+- AC-61.2: `m2` — `signum <verb> <Type> --help` (e.g. `signum ship order --help`) shows the operation's arguments, expected target kind (entity / lite / none), and any `canExecute` reasons available. **Belongs with m2:** operations are not invokable in m1.
+- AC-61.3: `m2` — Dynamic help is sourced from the REQ-010 metadata cache, so with a warm cache it works **fully offline**. **No subject until AC-61.1 lands.** The cache itself does work offline and is tested — `--offline`, `signum cache` — but nothing in the help path reads it.
+- AC-61.4: **Discovery requires no authentication.** `api/reflection/types` is anonymous, so `signum types`, `signum queries`, `signum operations` and `signum explain <Type>` all work before any login, protected by a test — it is the difference between evaluating the tool and having to be onboarded first. *(Amended: the property is real and tested, but it is delivered by the discovery commands rather than by `--help`; see AC-61.1. Note the boundary is not uniform — `signum explain <Query>.<token>` calls `api/query/subTokens`, which is **not** anonymous, so it does need a credential.)*
+- AC-61.5: `m2` — With no metadata available, help **degrades rather than fails**: it prints the static portion plus one line naming what it could not resolve and how to fix it (`--url`, or refresh the cache). Never an error. **Vacuous until AC-61.1 lands:** help is always static today, so it never fails — but it never attempts resolution either, so there is nothing to degrade from.
 - AC-61.6: A stale cache is used and flagged, not discarded — help that is slightly old beats no help.
-- AC-61.7: An operation verb shadowed by a built-in (§2.1) is disclosed both in `signum operations <Type>` and in the shadowing built-in's help, so the collision is discoverable rather than mysterious.
+- AC-61.7: An operation verb shadowed by a built-in (§2.1) is disclosed in `signum operations <Type>` and in `signum explain <OperationKey>`, naming the canonical key as the way to reach it. *(Amended: "in the shadowing built-in's help" is dropped — a built-in's help is static and application-independent, so it cannot know what it shadows without the metadata dependency AC-61.1 tracks. Disclosure at the point the collision is visible is what makes it discoverable.)*
 
 ---
 
@@ -55,10 +55,10 @@ Traces to: REQ-014, REQ-061 · Priority: `m1`
 not have to scrape prose or reimplement knowledge the CLI already has.
 
 **Acceptance Criteria:**
-- AC-62.1: `-o json` works on **any** help invocation and emits a structured description of commands, flags, arguments, and — where resolvable — the app's types, queries, and operations.
-- AC-62.2: That structure is the **single source** from which MCP tool schemas (REQ-061) are generated. Help and tool discovery must never become two hand-maintained descriptions of one command set.
+- AC-62.1: `-o json` works on **any** help invocation and emits a structured description of commands, flags and arguments. The app's own types, queries and operations are emitted by the discovery commands' `-o json` instead; folding them into help output depends on AC-61.1 (`m2`).
+- AC-62.2: That structure is the **single source** for every rendering of the command set — prose help, `-o json`, and unknown-flag rejection all read the same `CommandSpec`, and a test asserts every documented example validates against it. MCP tool schemas (REQ-061) must be generated from it too when they arrive; help and tool discovery must never become two hand-maintained descriptions of one command set. *(Amended: the original could only be satisfied once MCP existed. The discipline it protects is testable now, and is.)*
 - AC-62.3: The schema is stable and versioned; a breaking change to it is a breaking change to the CLI.
-- AC-62.4: Shell completion (REQ-013) is driven from the same structure, not a parallel list.
+- AC-62.4: `m3` — Shell completion (REQ-013) is driven from the same structure, not a parallel list. **Deferred with REQ-013:** the structure already carries what completion needs (`dispatch.rule`, `dispatch.builtIns`); there is no consumer yet.
 - AC-62.5: Structured help contains **no data values** — only names, kinds, and descriptions — so it is safe to emit under an agent context without engaging the pseudonymization gate (STORY-51).
 
 ---
@@ -74,11 +74,11 @@ This is where help is actually read. A message that merely reports failure waste
 user is definitely paying attention.
 
 **Acceptance Criteria:**
-- AC-63.1: An unknown query token lists the nearest valid tokens and points at `signum explain <Type>`.
+- AC-63.1: An unknown query token lists the nearest valid tokens — fetched from the server's own continuation list at the point the path broke — and points at `signum explain <QueryKey>`. Delivered for `signum explain <QueryKey>.<token>`; extending it to tokens inside `--filter`/`--column` is `m2` with AC-20.7.
 - AC-63.2: An unparseable filter cites the rule it broke — for example the quoted-cast rule — and points at `signum help filter`.
-- AC-63.3: An ambiguous operation verb lists the candidate canonical keys and exits non-zero, never guessing (AC-41.3).
+- AC-63.3: `m2` — An ambiguous operation verb lists the candidate canonical keys and exits non-zero, never guessing (AC-41.3). **Belongs with m2:** operations are not invokable in m1, and a verb-noun invocation currently exits 2 naming the milestone and pointing at `signum operations`.
 - AC-63.4: An unknown type or query suggests near matches from cached metadata.
-- AC-63.5: A namespace-qualified operation key is met with the actual key format, since that is a common wrong guess (AC-41.5).
+- AC-63.5: `m2` — A namespace-qualified operation key is met with the actual key format, since that is a common wrong guess (AC-41.5). **Belongs with m2**, same reason as AC-63.3.
 - AC-63.6: An auth failure names which of the two 403 cases it was and what to do — re-authenticate, or stop because it is a permission problem (AC-08.2).
 - AC-63.7: Suggestions come from the **cached metadata**, so a typo costs no round trip.
 

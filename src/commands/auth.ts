@@ -129,11 +129,14 @@ function userName(user: unknown): string | undefined {
 
 async function status(ctx: Ctx): Promise<ExitCode> {
   const stored = loadCredential(ctx.io.env);
+  const envToken = ctx.io.env["SIGNUM_TOKEN"];
+  const hasEnvToken = envToken !== undefined && envToken !== "";
   const url = ctx.args.flags.url ?? stored?.credential.url;
 
   const report = {
     target: url ?? null,
-    credential: stored !== undefined ? "stored" : "none",
+    // An ambient SIGNUM_TOKEN outranks a stored one (see resolveTarget), so say which is in play.
+    credential: hasEnvToken ? "environment" : stored !== undefined ? "stored" : "none",
     // A token is NEVER printed, not even truncated (AC-06.3).
     authenticated: false as boolean,
     user: null as string | null,
@@ -148,6 +151,7 @@ async function status(ctx: Ctx): Promise<ExitCode> {
       renderDocument(report, { format: ctx.format, write: ctx.io.out });
     } else {
       ctx.io.out("Not configured.\n");
+      if (hasEnvToken) ctx.io.out("SIGNUM_TOKEN is set, but no target URL is — pass --url or set SIGNUM_URL.\n");
       ctx.io.out("\n" + HANDOFF_INSTRUCTIONS + "\n");
     }
     return ExitCode.NotAuthenticated;
@@ -158,7 +162,7 @@ async function status(ctx: Ctx): Promise<ExitCode> {
     ctx.io.err(`warning: ${target.permissionWarning}\n`);
   }
 
-  if (target.credential === undefined) {
+  if (target.tokenSource === "none") {
     report.reachable = null;
     if (ctx.format === "json" || ctx.format === "ndjson") {
       renderDocument(report, { format: ctx.format, write: ctx.io.out });
@@ -187,7 +191,11 @@ async function status(ctx: Ctx): Promise<ExitCode> {
     renderDocument(report, { format: ctx.format, write: ctx.io.out });
   } else {
     ctx.io.out(`Target        ${url}\n`);
-    ctx.io.out(`Credential    stored (browser handoff, ${stored?.credential.savedAt ?? "unknown"})\n`);
+    ctx.io.out(
+      target.tokenSource === "environment"
+        ? "Credential    SIGNUM_TOKEN (environment; not persisted, not rotated)\n"
+        : `Credential    stored (browser handoff, ${stored?.credential.savedAt ?? "unknown"})\n`,
+    );
     if (stored?.credential.rotatedAt !== undefined) {
       ctx.io.out(`Rotated       ${stored.credential.rotatedAt}\n`);
     }
@@ -204,6 +212,12 @@ async function status(ctx: Ctx): Promise<ExitCode> {
     }
     // The one credential is a single point of failure; say so (AC-12.13).
     ctx.io.err("\nThis token is the only credential for this application (no Signum.Rest, no password).\n");
+    if (target.tokenSource === "environment") {
+      ctx.io.err(
+        "SIGNUM_TOKEN is ambient: it is never written to disk, and a server-side rotation cannot\n" +
+        "be saved back into it — refresh the variable when the value stops working.\n",
+      );
+    }
   }
 
   return report.authenticated ? ExitCode.Ok : ExitCode.NotAuthenticated;

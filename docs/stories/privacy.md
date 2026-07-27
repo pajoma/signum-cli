@@ -21,10 +21,10 @@ a human, so that it can default to safer behaviour without me having to remember
 
 **Acceptance Criteria:**
 - AC-50.1: The CLI resolves a caller context of `interactive`, `automated`, or `agent` on every run.
-- AC-50.2: `agent` is concluded when a known agent marker is present (`AI_AGENT`, `CLAUDECODE`, `CLAUDE_CODE_*`, or a recognised parent process) **or** when running as `signum mcp` — the latter being the only *definitive* signal.
+- AC-50.2: `agent` is concluded when a known agent marker is present (`AI_AGENT`, `CLAUDECODE`, `CLAUDE_CODE_*`, or a recognised parent process). A future `signum mcp` mode would be the only *definitive* signal, but it does not exist while [ADR 0002](../decisions/0002-mcp-vs-http.md) is open — so **every detection this CLI performs today is heuristic**, which is consistent with AC-50.6 and is why the default fails closed.
 - AC-50.3: `interactive` requires stdout to be a TTY **and** no agent marker. Anything else is at least `automated`. **Fail closed.**
 - AC-50.4: `--caller-context` / `SIGNUM_CALLER_CONTEXT` can override. Tightening is silent; **loosening is logged**, because it is a deliberate act with consequences.
-- AC-50.5: The resolved context and the signals behind it are reported by `auth status` and `--explain`, so nobody has to guess what the CLI concluded.
+- AC-50.5: The resolved context and the signals behind it are reported by `auth status`, and the signals are named in a refusal message so a blocked caller can see what was concluded. Adding them to `--explain` output is `m2`.
 - AC-50.6: Detection is **never** described in help text or docs as a security boundary. It is spoofable in both directions and its only job is to pick a stricter default.
 - AC-50.7: Parent-process inspection is best-effort and platform-specific; its absence degrades to the other signals rather than erroring.
 
@@ -43,7 +43,7 @@ detect, and stop.
 **Acceptance Criteria:**
 - AC-51.1: Under caller context `agent`, any command that would emit entity or query **data** fails by default with a clear explanation and the exact flag needed to proceed.
 - AC-51.2: `--i-understand-data-goes-to-a-model` (or `SIGNUM_ALLOW_AGENT_DATA=1`) permits it. The name is deliberately unambiguous; no one should be able to pass it by accident or claim they did not know.
-- AC-51.3: Commands emitting **no** data — `auth status`, `--explain`, discovery of type and query *names*, `--count` — are unaffected. Metadata is not row data.
+- AC-51.3: Commands emitting **no** data — `auth status`, `--explain`, help, and discovery of type, query and token *names* — are unaffected. Metadata is not row data. *(Amended: **`--count` removed from the exempt list.** A count over a filtered population is an aggregate over personal data, and this story set's own limits section says so: "Aggregates leak. Row counts and distributions are informative even with every value replaced." The implementation gates it; the AC now agrees.)*
 - AC-51.4: The refusal names pseudonymization (m2) as the intended remedy, so the message ages into something useful rather than becoming a lie.
 - AC-51.5: `interactive` and `automated` contexts are unaffected: a human at a terminal and a cron job keep working with no new flag. Only the `agent` path is gated.
 - AC-51.6: The gate is enforced in one place, at the output boundary, so no future command can bypass it.

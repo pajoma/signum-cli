@@ -8,7 +8,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { run, type Io } from "../src/cli.ts";
@@ -995,6 +995,94 @@ describe("token rotation (STORY-04)", () => {
     const r = await cli(["auth", "status"]);
     expect(r.code).toBe(ExitCode.Ok);
     expect(r.out).toContain("alice");
+  });
+});
+
+/**
+ * AC-09.2 — "every credential can be supplied by environment variable".
+ *
+ * m1's only credential is a browser handoff, and a CI runner has no browser, so without this a
+ * pipeline could not authenticate at all except by writing credential.json itself. That made the
+ * AC unmet in exactly the scenario STORY-09 is written about.
+ */
+describe("SIGNUM_TOKEN, for a non-interactive run (AC-09.2)", () => {
+  /** A config dir with no credential in it, so only the environment can authenticate. */
+  const fresh = () => mkdtempSync(join(tmpdir(), "signum-envtok-"));
+
+  it("authenticates with no stored credential at all", async () => {
+    const dir = fresh();
+    const r = await cli(["query", "Order", "--json"], {
+      env: { SIGNUM_CONFIG_DIR: dir, SIGNUM_URL: baseUrl, SIGNUM_TOKEN: GOOD_TOKEN },
+    });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect((JSON.parse(r.out) as Array<Record<string, unknown>>)[0]?.["State"]).toBe("Shipped");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("is never written to disk — an ambient credential stays ambient", async () => {
+    const dir = fresh();
+    await cli(["query", "Order", "--json"], {
+      env: { SIGNUM_CONFIG_DIR: dir, SIGNUM_URL: baseUrl, SIGNUM_TOKEN: GOOD_TOKEN },
+    });
+    // A CI run must not leave a token behind on a shared runner.
+    expect(existsSync(join(dir, "credential.json"))).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("takes precedence over a stored credential — an explicit variable beats ambient state", async () => {
+    // configDir holds a credential for baseUrl already. A bogus env token must WIN, and therefore
+    // fail, proving precedence rather than a silent fallback to the stored one.
+    const r = await cli(["auth", "status", "--json"], {
+      env: { SIGNUM_CONFIG_DIR: configDir, SIGNUM_TOKEN: "not-a-valid-token" },
+    });
+    const doc = JSON.parse(r.out) as { credential: string; authenticated: boolean };
+    expect(doc.credential).toBe("environment");
+    expect(doc.authenticated).toBe(false);
+  });
+
+  it("auth status reports the environment as the credential source", async () => {
+    const r = await cli(["auth", "status"], {
+      env: { SIGNUM_CONFIG_DIR: configDir, SIGNUM_TOKEN: GOOD_TOKEN },
+      tty: true, // the human rendering is what names the source; JSON is asserted above
+    });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.out).toContain("SIGNUM_TOKEN");
+    expect(r.err).toContain("ambient");
+    expect(r.out + r.err).not.toContain(GOOD_TOKEN); // AC-06.3 still holds
+  });
+
+  it("a rotation WARNS instead of failing — there is nowhere to write it back to", async () => {
+    // The default rotation handler updates the STORED credential and would fail with "no stored
+    // credential to rotate", turning a successful request into a hard error. Same shape as the
+    // login-time rotation defect the Brooks review found.
+    const dir = fresh();
+    rotateNext = true;
+    const r = await cli(["query", "Order", "--json"], {
+      env: { SIGNUM_CONFIG_DIR: dir, SIGNUM_URL: baseUrl, SIGNUM_TOKEN: GOOD_TOKEN },
+    });
+    rotateNext = false;
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.err).toContain("cannot be updated from here");
+    expect(r.err).not.toContain("no stored credential to rotate");
+    expect(existsSync(join(dir, "credential.json"))).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("an empty SIGNUM_TOKEN is ignored, not treated as a credential", async () => {
+    const dir = fresh();
+    const r = await cli(["query", "Order"], {
+      env: { SIGNUM_CONFIG_DIR: dir, SIGNUM_URL: baseUrl, SIGNUM_TOKEN: "" },
+    });
+    expect(r.code).toBe(ExitCode.NotAuthenticated);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("the not-authenticated message names SIGNUM_TOKEN as the non-interactive route", async () => {
+    const dir = fresh();
+    const r = await cli(["query", "Order"], { env: { SIGNUM_CONFIG_DIR: dir, SIGNUM_URL: baseUrl } });
+    expect(r.code).toBe(ExitCode.NotAuthenticated);
+    expect(r.err).toContain("SIGNUM_TOKEN");
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 
