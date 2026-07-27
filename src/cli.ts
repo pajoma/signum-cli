@@ -80,10 +80,25 @@ function showHelp(args: ParsedArgs, io: Io): ExitCode {
     const topicKey = (path[0] as string).toLowerCase();
     const topic = TOPICS[topicKey];
     if (topic !== undefined) {
+      // A name can be BOTH a topic and a command — `auth` is. Render both, topic first: the
+      // prose is the more useful lead, but stopping there meant `signum auth --help` showed no
+      // subcommands, flags or examples, while `signum query --help` showed all three. AC-60.4
+      // asks every command's help to carry runnable examples, so the command half is not
+      // optional just because a topic outranks it.
+      const alsoCommand = findCommand([topicKey]);
       if (asJson) {
-        renderDocument({ schemaVersion: 1, topic: topicKey, text: topic }, { format, write: io.out });
+        renderDocument(
+          {
+            schemaVersion: 1,
+            topic: topicKey,
+            text: topic,
+            ...(alsoCommand !== undefined ? { command: helpAsJson(alsoCommand) } : {}),
+          },
+          { format, write: io.out },
+        );
       } else {
         io.out(topic + "\n");
+        if (alsoCommand !== undefined) io.out("\n" + renderCommand(alsoCommand, [topicKey]));
       }
       return ExitCode.Ok;
     }

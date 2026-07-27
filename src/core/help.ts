@@ -62,8 +62,15 @@ export const COMMANDS: CommandSpec[] = [
   {
     name: "auth",
     summary: "Authenticate against a Signum application",
-    usage: "signum auth <login|status>",
+    usage: "signum auth <login|status|logout>",
     milestone: "m1",
+    // A command group needs its own examples too (AC-60.4) — landing on `signum auth --help`
+    // and being shown only a list of subcommand names is one step short of useful.
+    examples: [
+      "signum auth status",
+      "signum auth login --url https://app.example --with-token < token.txt",
+      "signum auth logout",
+    ],
     subcommands: [
       {
         name: "login",
@@ -89,6 +96,19 @@ export const COMMANDS: CommandSpec[] = [
         milestone: "m1",
         description: "The first thing to run when something is not working. Never prints a token.",
         examples: ["signum auth status", "signum auth status --json"],
+      },
+      {
+        // Implemented in runAuth since m1 but never declared here, so it was absent from
+        // SUBCOMMANDS, had no `--help`, and `signum help auth logout` fell back to the topic.
+        name: "logout",
+        summary: "Remove the stored credential from this machine",
+        usage: "signum auth logout",
+        milestone: "m1",
+        description:
+          "Local only. Signum does not revoke issued tokens: api/auth/logout clears a cookie " +
+          "and performs no revocation, so the token stays valid server-side until the user's " +
+          "password hash or state changes.",
+        examples: ["signum auth logout"],
       },
     ],
   },

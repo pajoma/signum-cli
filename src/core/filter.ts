@@ -405,7 +405,9 @@ function validateToken(token: string, opts: ValidateOptions): void {
   // `.Nested` is discoverable via subTokens but unusable in executeQuery (constraint 6).
   if (segments.includes("Nested")) {
     throw new UsageError(`token '${token}' uses '.Nested', which cannot be used in a query filter`, {
-      hint: "'.Nested' is discoverable via metadata but the server rejects it in executeQuery. Restructure the filter to avoid it.",
+      hint:
+        "'.Nested' is discoverable via metadata but the server rejects it in executeQuery. " +
+        "Restructure the filter to avoid it.\n\n" + HELP_ROUTE,
     });
   }
 
@@ -427,13 +429,20 @@ export function parseFilterExpression(input: string): FilterNode {
   } catch (e) {
     throw asUsageError(input, e);
   }
-  if (toks.length === 0) throw new UsageError("empty --filter expression");
+  if (toks.length === 0) throw new UsageError("empty --filter expression", { hint: HELP_ROUTE });
   try {
     return new Parser(toks).parseExpr();
   } catch (e) {
     throw asUsageError(input, e);
   }
 }
+
+/**
+ * Where to read the whole syntax (AC-63.2). A filter parse failure is the error a new user is
+ * most likely to hit, and STORY-63's premise is that an error routes you to the help that
+ * resolves it — citing the column without naming `signum help filter` stops one step short.
+ */
+const HELP_ROUTE = "Run `signum help filter` for the full syntax.";
 
 function asUsageError(input: string, e: unknown): UsageError {
   if (!(e instanceof ParseFailure)) throw e instanceof Error ? e : new Error(String(e));
@@ -445,6 +454,7 @@ function asUsageError(input: string, e: unknown): UsageError {
       "\n\nA query token beginning with '(' (a cast, e.g. '(Order).Customer.Name') must be quoted, " +
       'or it is parsed as a group: --filter \'"(Order).Customer.Name" = 5\'.';
   }
+  hint += `\n\n${HELP_ROUTE}`;
   return new UsageError(`could not parse filter: ${e.message}`, { hint });
 }
 
