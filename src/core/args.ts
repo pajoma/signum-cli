@@ -1,0 +1,227 @@
+/**
+ * Argument parsing and command dispatch.
+ *
+ * design/cli-surface.md §2.1, §3
+ *
+ * Dispatch order (the invariant to preserve):
+ *   1. first argument contains a '.'  ⇒ canonical operation key
+ *   2. matches a built-in             ⇒ built-in (BUILT-INS ALWAYS WIN)
+ *   3. otherwise                      ⇒ resolve <verb> <Type> against metadata
+ *
+ * Two invariants: no built-in command may contain a '.', and the built-in verb set stays
+ * small, fixed and lowercase — every addition can shadow an application's operation.
+ */
+
+import { UsageError, type ExitCode } from "./errors.ts";
+import { parseOutputFormat, type OutputFormat } from "./output.ts";
+import { knownFlagNames } from "./help.ts";
+import { nearest } from "./text.ts";
+
+/** The complete built-in verb set. Adding to this can shadow an app's operation verb. */
+export const BUILT_INS = [
+  "help",
+  "version",
+  "auth",
+  "types",
+  "queries",
+  "operations",
+  "explain",
+  "query",
+  "get",
+] as const;
+
+export type BuiltIn = (typeof BUILT_INS)[number];
+
+export function isBuiltIn(name: string): name is BuiltIn {
+  return (BUILT_INS as readonly string[]).includes(name.toLowerCase());
+}
+
+/** Enforced by test: no built-in may contain a dot, or dispatch rule 1 breaks. */
+export function builtInsSatisfyDispatchInvariant(): boolean {
+  return BUILT_INS.every((b) => !b.includes("."));
+}
+
+export interface GlobalFlags {
+  url: string | undefined;
+  output: OutputFormat | undefined;
+  explain: boolean;
+  verbose: boolean;
+  noColor: boolean;
+  help: boolean;
+  timeoutMs: number | undefined;
+  callerContext: string | undefined;
+  /** STORY-51 acknowledgement (AC-51.2). Deliberately unmissable. */
+  allowAgentData: boolean;
+}
+
+export interface ParsedArgs {
+  /** `builtin` | `operation-key` | `verb-noun` | `none` */
+  kind: "builtin" | "operation-key" | "verb-noun" | "none";
+  /** Built-in name, canonical operation key, or the verb for verb-noun. */
+  command: string | undefined;
+  /** Remaining positional arguments after the command. */
+  positionals: string[];
+  flags: GlobalFlags;
+  /** Repeatable/unknown flags, kept for command-specific parsing. */
+  options: Map<string, string[]>;
+  booleans: Set<string>;
+}
+
+const FLAGS_WITH_VALUE = new Set([
+  "url", "output", "o", "timeout", "caller-context",
+  "filter", "filter-json", "column", "order", "top", "page", "page-size",
+  "context", "pseudonymize", "arg", "arg-string", "arg-lite", "arg-json",
+  "lite", "id", "filename", "f",
+]);
+
+/** Boolean flags — listing one above would make it demand a value. */
+export const BOOLEAN_FLAGS = new Set([
+  "with-token", "exists", "count", "all", "yes", "y", "raw", "group",
+]);
+
+/** Invariant: a flag cannot need a value and be boolean-only at once. Checked by test. */
+export function flagSetsAreDisjoint(): boolean {
+  return [...BOOLEAN_FLAGS].every((f) => !FLAGS_WITH_VALUE.has(f));
+}
+
+function emptyFlags(): GlobalFlags {
+  return {
+    url: undefined,
+    output: undefined,
+    explain: false,
+    verbose: false,
+    noColor: false,
+    help: false,
+    timeoutMs: undefined,
+    callerContext: undefined,
+    allowAgentData: false,
+  };
+}
+
+export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): ParsedArgs {
+  const flags = emptyFlags();
+  const options = new Map<string, string[]>();
+  const booleans = new Set<string>();
+  const positionals: string[] = [];
+
+  const push = (name: string, value: string) => {
+    const list = options.get(name);
+    if (list === undefined) options.set(name, [value]);
+    else list.push(value);
+  };
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i] as string;
+
+    if (arg === "--") {
+      positionals.push(...argv.slice(i + 1));
+      break;
+    }
+
+    if (arg.startsWith("--") || (arg.startsWith("-") && arg.length === 2 && arg !== "-")) {
+      const bare = arg.replace(/^--?/, "");
+      const eq = bare.indexOf("=");
+      const name = (eq === -1 ? bare : bare.slice(0, eq)).toLowerCase();
+      let value = eq === -1 ? undefined : bare.slice(eq + 1);
+
+      if (value === undefined && FLAGS_WITH_VALUE.has(name)) {
+        const next = argv[i + 1];
+        if (next === undefined || (next.startsWith("--") && next.length > 2)) {
+          throw new UsageError(`flag --${name} requires a value`);
+        }
+        value = next;
+        i++;
+      }
+
+      switch (name) {
+        case "help": case "h": flags.help = true; break;
+        case "explain": flags.explain = true; break;
+        case "verbose": case "v": flags.verbose = true; break;
+        case "no-color": flags.noColor = true; break;
+        case "json": flags.output = "json"; break;
+        case "url": flags.url = value; break;
+        case "output": case "o": flags.output = parseOutputFormat(value as string); break;
+        case "caller-context": flags.callerContext = value; break;
+        case "i-understand-data-goes-to-a-model": flags.allowAgentData = true; break;
+        case "timeout": {
+          const ms = Number(value);
+          if (!Number.isFinite(ms) || ms <= 0) throw new UsageError(`--timeout must be a positive number of seconds`);
+          flags.timeoutMs = ms * 1000;
+          break;
+        }
+        default:
+          if (value === undefined) {
+            booleans.add(name);
+          } else if (BOOLEAN_FLAGS.has(name)) {
+            // H2 (Brooks review): a boolean flag given `=value` (e.g. --exists=true) must
+            // register as the boolean, not land in `options` where flag() never looks —
+            // otherwise it reads as "not passed" and is silently ignored.
+            const v = value.toLowerCase();
+            if (v === "true" || v === "1" || v === "yes") booleans.add(name);
+            else if (v === "false" || v === "0" || v === "no") { /* explicitly unset */ }
+            else throw new UsageError(`--${name} is a boolean flag; expected true or false, got '${value}'`);
+          } else {
+            push(name, value);
+          }
+      }
+      continue;
+    }
+
+    positionals.push(arg);
+  }
+
+  if (env["SIGNUM_ALLOW_AGENT_DATA"] === "1") flags.allowAgentData = true;
+  if (flags.callerContext === undefined) {
+    const fromEnv = env["SIGNUM_CALLER_CONTEXT"];
+    if (fromEnv !== undefined && fromEnv !== "") flags.callerContext = fromEnv;
+  }
+  if (flags.url === undefined) {
+    const fromEnv = env["SIGNUM_URL"];
+    if (fromEnv !== undefined && fromEnv !== "") flags.url = fromEnv;
+  }
+
+  const first = positionals[0];
+  if (first === undefined) {
+    return { kind: "none", command: undefined, positionals: [], flags, options, booleans };
+  }
+
+  // 1. dot ⇒ canonical operation key
+  if (first.includes(".")) {
+    return { kind: "operation-key", command: first, positionals: positionals.slice(1), flags, options, booleans };
+  }
+  // 2. built-ins always win
+  if (isBuiltIn(first)) {
+    return { kind: "builtin", command: first.toLowerCase(), positionals: positionals.slice(1), flags, options, booleans };
+  }
+  // 3. verb-noun operation
+  return { kind: "verb-noun", command: first, positionals: positionals.slice(1), flags, options, booleans };
+}
+
+/**
+ * Reject a flag the target command does not declare, rather than silently ignoring it
+ * (QA finding: `--filer` instead of `--filter` previously ran the query unfiltered with
+ * exit 0 — exactly the silent-wrong-data-on-production risk this project is built against).
+ *
+ * Only per-command flags need declaring here: global flags (`--url`, `-o`, `--json`, …) are
+ * already peeled off into the typed `flags` struct by `parseArgs` and never reach
+ * `options`/`booleans`, so they can't collide with this check.
+ */
+export function assertKnownFlags(args: ParsedArgs, path: readonly string[]): void {
+  const known = knownFlagNames(path);
+  const used = new Set<string>([...args.options.keys(), ...args.booleans]);
+  const unknown = [...used].filter((f) => !known.has(f));
+  if (unknown.length === 0) return;
+
+  const withSuggestions = unknown.map((u) => {
+    const near = nearest(u, known);
+    return near !== undefined ? `--${u} (did you mean --${near}?)` : `--${u}`;
+  });
+  throw new UsageError(
+    `unknown flag${unknown.length > 1 ? "s" : ""} for '${path.join(" ")}': ${withSuggestions.join(", ")}`,
+    { hint: `Run \`signum ${path.join(" ")} --help\` for the flags this command accepts.` },
+  );
+}
+
+export interface ExitSignal {
+  code: ExitCode;
+}

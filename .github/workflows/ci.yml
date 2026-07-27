@@ -1,0 +1,10 @@
+# PR gate (#57): no PR to develop or main merges red. Shares the reusable check with releases.
+name: CI
+
+on:
+  pull_request:
+    branches: [develop, main]
+
+jobs:
+  check:
+    uses: ./.github/workflows/check.yml

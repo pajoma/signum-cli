@@ -154,6 +154,18 @@ entity kinds, operations, queries, enums, permissions, and localized strings. Ca
 disk keyed by `Last-Modified` and revalidate with `If-Modified-Since` — that gives fully
 offline tab-completion and pre-flight validation.
 
+> **The document is anonymous-*accessible* but not identity-*independent*.** Anonymous means no
+> credential is *required*; the response still differs by caller. `AuthServer.cs:143-157`
+> rewrites `TypeInfoTS.QueryDefined` to `false` for any query the caller may not run, and
+> `UserEntity.Current == null` (an anonymous request) means *no* query is allowed — so an
+> anonymous document reports nothing as queryable. Meanwhile `ReflectionServer.LastModified` is a
+> process-wide static (`ReflectionController.cs:17`), so the server will happily answer `304` to
+> a conditional request from a *different* caller. **Cache anonymous and authenticated responses
+> separately**, or a pre-login `types` call poisons every post-login validation.
+
+`TypeInfoTS.QueryDefined` (`ReflectionServer.cs:474`) is `queryDefined` on the wire and carries
+`[JsonIgnore(WhenWritingDefault)]` — it is present-and-`true`, or **absent**, never `false`.
+
 ### Entities
 
 | Verb | Route | → |
@@ -296,10 +308,18 @@ The single most surprising response shape. Repeated values are deduplicated:
 
 - `rows[i].columns[j]` may be an **index into `uniqueValues[columns[j]]`**, not a value
   (`ResultTableConverter.cs:71-78`, decoded client-side in `Finder.tsx:2009-2026`).
-- The `Entity` column is **hoisted** out of `columns` into `rows[i].entity`.
+- The `Entity` column is **hoisted** out of `columns` into `rows[i].entity` — the response's
+  `columns` array does **not** contain it (`ResultTable.cs:55-56` filters it out, and
+  `ResultTableConverter.cs:61-65` writes `entity` per row only when `EntityColumn != null`).
+  Its token is exactly `"Entity"` (`QueryDescription.cs:17`).
+- With `groupResults: true` nothing is hoisted — the entity column stays inline
+  (`ResultTable.cs:55`).
+- The framework's own reconstruction puts it **first**: `AllColumns()` is
+  `Columns.PreAnd(entityColumn)` (`ResultTable.cs:51`). A client that wants the caller's
+  requested order has to track the request's `columns` list itself.
 - A `QueryDescription` always has an injected `Entity` column of type `Lite<T>`.
 
-Any table/CSV renderer must de-intern first.
+Any table/CSV renderer must de-intern **and** put the hoisted column back first.
 
 ---
 

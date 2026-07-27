@@ -75,6 +75,55 @@ git/sfcl/
 └── signum-cli/         ← this repo
 ```
 
+Common commands (Bun):
+
+```
+bun install
+bun run check          # typecheck + tests (the CI gate)
+bun run build          # single binary for this host → dist/signum
+bun run build:all      # all platform binaries + SHA256SUMS → dist/
+```
+
+## Building & releasing
+
+CI is GitHub Actions (`.github/workflows/`):
+
+- **`ci.yml`** — runs `check` (typecheck + `bun test`) on every PR into `develop`/`main`
+  (issue #57). No PR merges red.
+- **`release.yml`** — on a pushed tag, builds the self-contained binaries for linux/macOS/
+  windows (all cross-compiled from one Linux job) and publishes a GitHub Release with a
+  `SHA256SUMS` manifest (issue #56).
+
+Versioning is **SemVer**, and **`package.json` is the source of truth** — a tag must match it.
+
+| Channel | Cut from | Tag | Result |
+|---|---|---|---|
+| Pre-release | `develop` | `v0.1.0-b.1` (SemVer pre-release) | GitHub Release marked *pre-release* |
+| Release | `main` | `v0.1.0` (plain SemVer) | full GitHub Release |
+
+To cut a release: bump `version` in `package.json`, commit, then tag `v<that-version>` and push
+the tag. The pipeline refuses a tag that doesn't match `package.json`, a PEP 440 tag
+(`0.1.0b1`), or a channel mismatch (a pre-release tag on `main`, or vice versa).
+
+**First running client (after this PR merges to `develop`):**
+
+```
+git switch develop && git pull
+git tag v0.1.0-b.1 && git push origin v0.1.0-b.1
+```
+
+That fires the pre-release pipeline and produces downloadable binaries. Then:
+
+```
+curl -LO <release-asset-url>/signum-0.1.0-b.1-linux-x64
+chmod +x signum-0.1.0-b.1-linux-x64
+./signum-0.1.0-b.1-linux-x64 --url https://your-app types   # explore without logging in
+```
+
+> **Maintainer setup (one-time):** require the `check` status on `develop` and `main` in branch
+> protection so the PR gate actually blocks merges. A workflow can't configure its own protection
+> rule (issue #57).
+
 ## License
 
 Not yet chosen — see [#1](https://github.com/pajoma/signum-cli/issues).

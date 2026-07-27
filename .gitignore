@@ -23,3 +23,6 @@ dist/
 .DS_Store
 .vscode/
 .idea/
+
+# Build output
+dist/
