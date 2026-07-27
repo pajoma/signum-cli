@@ -8,7 +8,10 @@
  * are therefore atomic and their failure is surfaced, not swallowed (AC-12.12).
  */
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync, unlinkSync } from "node:fs";
+import {
+  chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync,
+  writeFileSync, unlinkSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { normalizeUrl } from "./text.ts";
@@ -177,4 +180,76 @@ export function saveMetadataCache(
     payload,
   };
   writePrivate(cachePath(url, authenticated, env), JSON.stringify(envelope));
+}
+
+// ── cache inspection and clearing (AC-24.3) ─────────────────────────────────
+
+/** The directory holding every cached reflection document. */
+export function cacheDir(env?: NodeJS.ProcessEnv): string {
+  return join(configDir(env), "cache");
+}
+
+export interface CacheEntry {
+  /** The target this document describes, as it was written. */
+  url: string;
+  /** Whether it was fetched with a credential — anonymous and authenticated differ. */
+  authenticated: boolean;
+  fetchedAt: string;
+  lastModified: string | undefined;
+  /** Number of types in the document, as a cheap "is this useful" signal. */
+  types: number;
+  path: string;
+  sizeBytes: number;
+}
+
+/**
+ * Every cached document, newest first.
+ *
+ * Reads the envelopes rather than parsing filenames: the filename carries a non-reversible
+ * digest of the URL (so one cannot be recovered from the other), which is exactly why the URL
+ * has to be stored inside. A file that will not parse is skipped rather than thrown on — a
+ * corrupt cache entry must never stop the user from clearing it.
+ */
+export function listMetadataCache(env?: NodeJS.ProcessEnv): CacheEntry[] {
+  const dir = cacheDir(env);
+  if (!existsSync(dir)) return [];
+  const out: CacheEntry[] = [];
+  for (const name of readdirSync(dir)) {
+    if (!name.startsWith("reflection-") || !name.endsWith(".json")) continue;
+    const path = join(dir, name);
+    try {
+      const env_ = JSON.parse(readFileSync(path, "utf8")) as CacheEnvelope;
+      const payload = env_.payload;
+      out.push({
+        url: env_.url,
+        authenticated: env_.authenticated === true,
+        fetchedAt: env_.fetchedAt,
+        lastModified: env_.lastModified,
+        types: payload !== null && typeof payload === "object" ? Object.keys(payload).length : 0,
+        path,
+        sizeBytes: statSync(path).size,
+      });
+    } catch {
+      continue;
+    }
+  }
+  return out.sort((a, b) => b.fetchedAt.localeCompare(a.fetchedAt) || a.url.localeCompare(b.url));
+}
+
+/**
+ * Delete cached documents, optionally only those for one target. Returns what was removed, so
+ * the caller can report it rather than claiming a number it did not verify.
+ *
+ * Clearing a URL removes BOTH its anonymous and authenticated documents: a user asking to clear
+ * the cache for a target means the target, not one half of it they cannot see.
+ */
+export function clearMetadataCache(url: string | undefined, env?: NodeJS.ProcessEnv): CacheEntry[] {
+  const wanted = url !== undefined ? normalizeUrl(url) : undefined;
+  const removed: CacheEntry[] = [];
+  for (const entry of listMetadataCache(env)) {
+    if (wanted !== undefined && normalizeUrl(entry.url) !== wanted) continue;
+    rmSync(entry.path, { force: true });
+    removed.push(entry);
+  }
+  return removed;
 }

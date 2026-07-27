@@ -148,7 +148,8 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
   // `resolveQueryKey` is the SAME resolution `signum queries` lists from, so a key this accepts
   // is a key that was offered, and vice versa (Brooks review: those were two definitions).
   const md = await loadMetadata({
-    url: target.url, http: target.http, env: ctx.io.env, warn: (l) => ctx.io.err(l),
+    url: target.url, http: target.http, offline: ctx.args.flags.offline,
+    env: ctx.io.env, warn: (l) => ctx.io.err(l),
   });
   resolveQueryKey(md, queryKey);
 

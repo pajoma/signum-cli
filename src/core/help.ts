@@ -40,6 +40,7 @@ export const GLOBAL_FLAGS: FlagSpec[] = [
   { name: "no-color", summary: "Disable colour (also honours NO_COLOR)" },
   { name: "timeout", arg: "<seconds>", summary: "Request timeout" },
   { name: "caller-context", arg: "<ctx>", summary: "Override caller detection: interactive|automated|agent" },
+  { name: "offline", summary: "Never fetch metadata; use the cache (or SIGNUM_OFFLINE=1)" },
   { name: "help", alias: "h", summary: "Show help for any command" },
 ];
 
@@ -182,6 +183,43 @@ export const COMMANDS: CommandSpec[] = [
     milestone: "m1",
     flags: [{ name: "exists", summary: "Check presence only; print nothing" }],
     examples: ["signum get Order 42", 'signum get "Order;42" --json'],
+  },
+  {
+    name: "cache",
+    summary: "Inspect or clear the cached application metadata",
+    usage: "signum cache <show|clear|path>",
+    milestone: "m1",
+    description:
+      "Discovery, dynamic help and pre-flight query validation all read a cached copy of " +
+      "api/reflection/types. This command makes that cache visible and removable — with " +
+      "--offline it is the only thing the CLI will read.\n\n" +
+      "Anonymous and authenticated documents are cached separately: reflection answers depend " +
+      "on who is asking, so one fetched before login reports nothing as queryable.",
+    examples: ["signum cache show", "signum cache clear", "signum cache path"],
+    subcommands: [
+      {
+        name: "show",
+        summary: "List cached documents: target, scope, age, size",
+        usage: "signum cache show",
+        milestone: "m1",
+        examples: ["signum cache show", "signum cache show --json"],
+      },
+      {
+        name: "clear",
+        summary: "Delete cached documents, all of them or one target's",
+        usage: "signum cache clear [--url <url>]",
+        milestone: "m1",
+        description: "Clearing a target removes both its anonymous and authenticated documents.",
+        examples: ["signum cache clear", "signum cache clear --url https://app.example"],
+      },
+      {
+        name: "path",
+        summary: "Print the cache directory, bare, for scripting",
+        usage: "signum cache path",
+        milestone: "m1",
+        examples: ["signum cache path", 'ls "$(signum cache path)"'],
+      },
+    ],
   },
 ];
 
@@ -369,6 +407,16 @@ export const TOPICS: Record<string, string> = {
     "  A context bundles a target URL, a credential, and a metadata cache.",
     "",
     "  Named contexts are m2 (REQ-001). In this milestone use --url, or set SIGNUM_URL.",
+    "",
+    "  The metadata cache is per-target and inspectable:",
+    "",
+    "    signum cache show                 what is cached, for which target, how old",
+    "    signum cache clear [--url <url>]  drop it",
+    "    signum --offline <command>        never fetch; use the cache only",
+    "",
+    "  Anonymous and authenticated documents are cached separately, because the server's",
+    "  reflection answer depends on who is asking: one fetched before you logged in reports",
+    "  nothing as queryable.",
   ].join("\n"),
 };
 
