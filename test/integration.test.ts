@@ -57,6 +57,34 @@ const REFLECTION = {
   Ledger: { kind: "Main", niceName: "Ledger", members: { Id: { type: { name: "number" } } }, operations: {} },
 };
 
+/**
+ * Token continuations, keyed by the token asked about (`null` = the query's own root columns).
+ * Shapes follow `QueryTokenTS` (`QueryController.cs:251-272`): camelCase, `type` is a
+ * TypeReferenceTS, and `queryTokenType` is absent for an ordinary column token.
+ */
+const SUB_TOKENS: Record<string, unknown[]> = {
+  "": [
+    { key: "Id", fullKey: "Id", niceName: "Id", type: { name: "number" }, isGroupable: true },
+    { key: "Entity", fullKey: "Entity", niceName: "Order", type: { name: "Order" }, isGroupable: true },
+    { key: "State", fullKey: "State", niceName: "State", type: { name: "string" }, isGroupable: true },
+  ],
+  Entity: [
+    { key: "Customer", fullKey: "Entity.Customer", niceName: "Customer", type: { name: "Customer" }, isGroupable: true },
+    { key: "Details", fullKey: "Entity.Details", niceName: "Details", type: { name: "OrderDetail" }, isGroupable: false },
+  ],
+  "Entity.Customer": [
+    { key: "Name", fullKey: "Entity.Customer.Name", niceName: "Name", type: { name: "string" }, isGroupable: true },
+  ],
+  "Entity.Details": [
+    // The AC-24.7 trap: offered by subTokens (SubTokensOptions.All includes CanNested) but
+    // rejected by executeQuery, which never passes CanNested.
+    { key: "Nested", fullKey: "Entity.Details.Nested", niceName: "Nested", queryTokenType: "Nested",
+      type: { name: "OrderDetail" }, isGroupable: false },
+    { key: "Count", fullKey: "Entity.Details.Count", niceName: "Count", queryTokenType: "Aggregate",
+      type: { name: "number" }, isGroupable: false },
+  ],
+};
+
 /** Interned: `State` cells are indices, `Total` cells are literals. */
 const RESULT_TABLE = {
   columns: ["State", "Total"],
@@ -72,7 +100,7 @@ beforeAll(() => {
   configDir = mkdtempSync(join(tmpdir(), "signum-test-"));
   server = Bun.serve({
     port: 0,
-    fetch(req) {
+    async fetch(req) {
       const url = new URL(req.url);
       const auth = req.headers.get("authorization");
       const token = auth?.replace(/^Bearer /, "");
@@ -103,6 +131,56 @@ beforeAll(() => {
           JSON.stringify({ exceptionType: "Signum.Services.AuthenticationException", exceptionMessage: "bad token" }),
           { status: 403, headers },
         );
+      }
+
+      // Token discovery. QueryController carries no [SignumAllowAnonymous], so these sit AFTER
+      // the authentication check above — unlike api/reflection/types, they need a credential.
+      if (url.pathname === "/api/query/subTokens") {
+        const body = (await req.json()) as { queryKey: string; token: string | null };
+        // A VALID token with no continuations returns an empty list; only an INVALID one throws.
+        // The real server parses first (QueryUtils.Parse) and then enumerates, so conflating the
+        // two would make every leaf look like a typo.
+        const known = new Set(
+          Object.values(SUB_TOKENS).flatMap((list) => (list as Array<{ fullKey: string }>).map((c) => c.fullKey)),
+        );
+        const children = SUB_TOKENS[body.token ?? ""]
+          ?? (body.token !== null && known.has(body.token) ? [] : undefined);
+        if (children === undefined) {
+          // An unknown token throws FormatException, which the framework's exception filter has
+          // no arm for — so it arrives as HTTP 500 (SignumExceptionFilterAttribute.cs:131-146).
+          return new Response(
+            JSON.stringify({
+              exceptionType: "System.FormatException",
+              exceptionMessage: `Token with key '${String(body.token).split(".").pop()}' not found on token '${String(body.token).split(".").slice(0, -1).join(".")}' of query ${body.queryKey}`,
+            }),
+            { status: 500, headers },
+          );
+        }
+        return new Response(JSON.stringify(children), { headers });
+      }
+      if (url.pathname === "/api/query/parseTokens") {
+        const body = (await req.json()) as { queryKey: string; tokens: string[] };
+        const out: unknown[] = [];
+        for (const t of body.tokens) {
+          const parentKey = t.split(".").slice(0, -1).join("");
+          const leaf = t.split(".").pop() as string;
+          const siblings = SUB_TOKENS[t.split(".").slice(0, -1).join(".")] as
+            Array<{ key: string; fullKey: string }> | undefined;
+          const hit = siblings?.find((c) => c.key === leaf);
+          if (hit === undefined) {
+            return new Response(
+              JSON.stringify({
+                exceptionType: "System.FormatException",
+                exceptionMessage: parentKey === ""
+                  ? `Column '${leaf}' not found on query ${body.queryKey}`
+                  : `Token with key '${leaf}' not found on token '${t.split(".").slice(0, -1).join(".")}' of query ${body.queryKey}`,
+              }),
+              { status: 500, headers },
+            );
+          }
+          out.push(hit);
+        }
+        return new Response(JSON.stringify(out), { headers });
       }
 
       // These two must be checked BEFORE the generic executeQuery catch-all below, or that
@@ -285,10 +363,27 @@ describe("discovery without credentials (STORY-24, STORY-61)", () => {
     expect(getR.out).toContain("shadowed by a built-in");
   });
 
-  it("`explain Type.deeperToken` degrades gracefully to the root type rather than crashing", async () => {
-    const r = await cli(["explain", "Order.Entity.Customer", "--url", baseUrl]);
+  it("`explain <Query>.<token>` needs a credential — token discovery is NOT anonymous", async () => {
+    // QueryController has no [SignumAllowAnonymous], unlike api/reflection/types. So discovery
+    // is not uniformly credential-free, and the boundary falls in the middle of one command.
+    const fresh = mkdtempSync(join(tmpdir(), "signum-anon-"));
+    const r = await cli(["explain", "Order.Entity.Customer", "--url", baseUrl], {
+      env: { SIGNUM_CONFIG_DIR: fresh },
+    });
+    expect(r.code).toBe(ExitCode.NotAuthenticated);
+    rmSync(fresh, { recursive: true, force: true });
+  });
+
+  it("`explain <Query>` alone still works with no credential (AC-61.4 unchanged)", async () => {
+    const fresh = mkdtempSync(join(tmpdir(), "signum-anon2-"));
+    const r = await cli(["explain", "Order", "--url", baseUrl, "--json"], {
+      env: { SIGNUM_CONFIG_DIR: fresh },
+    });
     expect(r.code).toBe(ExitCode.Ok);
-    expect(r.err).toContain("subTokens");
+    // The old "walking a token path is m2" note is gone; the anonymous single-segment path is
+    // unchanged and must stay credential-free.
+    expect((JSON.parse(r.out) as { name: string }).name).toBe("Order");
+    rmSync(fresh, { recursive: true, force: true });
   });
 });
 
@@ -767,6 +862,122 @@ describe("get (STORY-30)", () => {
     const r = await cli(["get", "Order", "42", "--i-understand-data-goes-to-a-model"], { tty: true });
     expect(r.code).toBe(ExitCode.Ok);
     expect(r.out).toContain("Order 42");
+  });
+});
+
+/**
+ * Live token discovery — REQ-012 · AC-24.2, AC-24.7, AC-63.1.
+ *
+ * The last acceptance criterion on STORY-24. `explain <Query>.<token>` used to print
+ * "walking a token path needs api/query/subTokens, which is m2" and then silently show the root
+ * type instead.
+ */
+describe("token discovery (AC-24.2)", () => {
+  it("validates the path and lists its continuations", async () => {
+    const r = await cli(["explain", "Order.Entity", "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const doc = JSON.parse(r.out) as {
+      kind: string; queryKey: string; token: string;
+      subTokens: Array<{ key: string; fullKey: string; usableInQuery: boolean }>;
+    };
+    expect(doc.kind).toBe("token");
+    expect(doc.queryKey).toBe("Order");
+    expect(doc.token).toBe("Entity");
+    expect(doc.subTokens.map((t) => t.key)).toEqual(["Customer", "Details"]);
+    // fullKey is what actually goes on the wire in a --column/--filter, so it must be complete.
+    expect(doc.subTokens[0]?.fullKey).toBe("Entity.Customer");
+  });
+
+  it("walks more than one segment deep", async () => {
+    const r = await cli(["explain", "Order.Entity.Customer", "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const doc = JSON.parse(r.out) as { token: string; subTokens: Array<{ key: string }> };
+    expect(doc.token).toBe("Entity.Customer");
+    expect(doc.subTokens.map((t) => t.key)).toEqual(["Name"]);
+  });
+
+  it("reports a leaf as a leaf, not as an empty list", async () => {
+    const r = await cli(["explain", "Order.Entity.Customer.Name"], { tty: true });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.out).toContain("leaf");
+  });
+
+  it("human output names the token, its type, and each continuation's type", async () => {
+    const r = await cli(["explain", "Order.Entity"], { tty: true });
+    expect(r.out).toContain("Order.Entity");
+    expect(r.out).toContain("CONTINUATIONS");
+    expect(r.out).toContain("Customer");
+    // The next-step line has to be copy-pasteable, which is the point of tracking fullKey.
+    expect(r.out).toContain("--column Entity");
+  });
+
+  it("marks a `.Nested` continuation as unusable in a query (AC-24.7)", async () => {
+    // subTokens resolves with SubTokensOptions.All, which includes CanNested; filter parsing
+    // never passes it. So the server offers a token it will then reject — and discovering that
+    // at query time is too late.
+    const r = await cli(["explain", "Order.Entity.Details", "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const doc = JSON.parse(r.out) as { subTokens: Array<{ key: string; usableInQuery: boolean }> };
+    const nested = doc.subTokens.find((t) => t.key === "Nested");
+    expect(nested?.usableInQuery).toBe(false);
+    const count = doc.subTokens.find((t) => t.key === "Count");
+    expect(count?.usableInQuery).toBe(true);
+  });
+
+  it("warns about the `.Nested` trap in human output too", async () => {
+    const r = await cli(["explain", "Order.Entity.Details"], { tty: true });
+    expect(r.out).toContain("not usable in a query");
+    expect(r.err).toContain("SubTokensOptions.All");
+  });
+
+  it("carries the token KIND through, so an aggregate is identifiable", async () => {
+    const r = await cli(["explain", "Order.Entity.Details", "--json"]);
+    const doc = JSON.parse(r.out) as { subTokens: Array<{ key: string; tokenKind: string | null }> };
+    expect(doc.subTokens.find((t) => t.key === "Count")?.tokenKind).toBe("Aggregate");
+  });
+});
+
+describe("an invalid token is a USAGE error, not a server crash (AC-63.1)", () => {
+  it("maps FormatException-on-500 to a validation error, never exit 1", async () => {
+    // QueryUtils.Parse throws FormatException for an unknown token, and Signum's exception filter
+    // has no arm for it — so a typo arrives as HTTP 500. Reporting that as "unexpected, please
+    // report it" sends the user to file a bug about their own input.
+    const r = await cli(["explain", "Order.Entity.Custmer"]);
+    // Usage (2), the same class as an unknown query key — the caller's input is wrong. The
+    // load-bearing part is that it is NOT Unexpected (1) "please report it", which is what a
+    // raw 500 would otherwise produce.
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.code).not.toBe(ExitCode.Unexpected);
+    expect(r.err).toContain("invalid query token");
+    expect(r.err).not.toContain("please report it");
+  });
+
+  it("suggests the near match from the server's own continuation list (AC-63.1)", async () => {
+    const r = await cli(["explain", "Order.Entity.Custmer"]);
+    // Edit distance, not substring containment — containment cannot get Customer from Custmer.
+    expect(r.err).toContain("Did you mean: Customer?");
+  });
+
+  it("routes to `signum explain <Query>` for the full list", async () => {
+    const r = await cli(["explain", "Order.Entity.Custmer"]);
+    expect(r.err).toContain("signum explain Order");
+  });
+
+  it("a bad FIRST segment is reported against the query, not a parent token", async () => {
+    const r = await cli(["explain", "Order.Nonsense"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("not found on query Order");
+  });
+});
+
+describe("token discovery cannot come from cache", () => {
+  it("--offline says so plainly instead of silently degrading", async () => {
+    // The old behaviour for an unwalkable path was to show the root type instead, which is the
+    // kind of silent substitution this project treats as worse than an error.
+    const r = await cli(["explain", "Order.Entity", "--offline"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("--offline cannot walk the token path");
+    expect(r.err).toContain("api/query/subTokens");
   });
 });
 

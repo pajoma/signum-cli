@@ -352,7 +352,24 @@ throws `UnauthorizedAccessException`.
 singular (`Hour`).
 
 Discover tokens with `POST api/query/subTokens`; validate with `POST api/query/parseTokens`.
-Both use `SubTokensOptions.All`.
+Both use `SubTokensOptions.All` (`QueryController.cs:65,82-86`). `parseTokens` returns each token
+`withParents: true`, so the whole chain comes back rather than only the leaf.
+
+> **Two things that catch a client out, both verified in source:**
+>
+> 1. **`QueryController` carries no `[SignumAllowAnonymous]`** — so unlike `api/reflection/types`,
+>    token discovery **requires a credential**. Discovery is *not* uniformly anonymous, and the
+>    boundary can fall inside a single command.
+> 2. **An unknown token arrives as HTTP 500.** `QueryUtils.Parse` throws `FormatException`
+>    (`QueryUtils.cs:385,390`) and the exception filter has no arm for it
+>    (`SignumExceptionFilterAttribute.cs:131-146` maps only `UnauthorizedAccessException`,
+>    `AuthenticationException`, `EntityNotFoundException` and `IntegrityCheckException`, then falls
+>    through to `InternalServerError`). A user's typo therefore looks exactly like a server crash.
+>    The message is good — it names the offending segment and the token it was not found on — so
+>    discriminate on `exceptionType == "System.FormatException"` and report it as bad input.
+>
+> A valid token with no continuations returns an **empty list**; only an invalid one throws. Do not
+> conflate the two, or every leaf reads as a typo.
 
 **Known traps**
 
