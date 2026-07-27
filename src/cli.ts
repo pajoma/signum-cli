@@ -17,6 +17,7 @@ import { runAuth } from "./commands/auth.ts";
 import { runDiscover } from "./commands/discover.ts";
 import { runQuery } from "./commands/query.ts";
 import { runGet } from "./commands/get.ts";
+import { runCache } from "./commands/cache.ts";
 
 export interface Io {
   out: (s: string) => void;
@@ -183,6 +184,12 @@ export async function run(argv: readonly string[], io: Io): Promise<ExitCode> {
         case "get":
           assertKnownFlags(args, ["get"]);
           return await runGet(ctx);
+        case "cache": {
+          const sub = args.positionals[0]?.toLowerCase();
+          if (sub === "show" || sub === "clear" || sub === "path") assertKnownFlags(args, ["cache", sub]);
+          else assertKnownFlags(args, ["cache"]);
+          return runCache(ctx);
+        }
       }
       break;
 

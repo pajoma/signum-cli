@@ -5,11 +5,11 @@
  * mode, and automatic stale-cache-use when the network fails — had no test proving either
  * actually works. Both are exactly the kind of thing that silently rots.
  *
- * QA finding: `offline` is a real, working parameter on `loadMetadata`, but no command
- * anywhere sets it and there is no `--offline` flag in args.ts/help.ts. It is only reachable
- * here, at the module level — a user cannot currently force offline behaviour even though the
- * capability exists. Noted as a completeness gap, not fixed here (adding a flag is new product
- * surface, not a test-coverage fix).
+ * The QA note that used to sit here — "`offline` is a real, working parameter but no command
+ * sets it, so it is only reachable at the module level" — is resolved: `--offline` and
+ * `SIGNUM_OFFLINE=1` now reach it from every command that loads metadata (AC-24.4). The
+ * end-to-end coverage lives in test/cache.test.ts, which asserts the network is genuinely never
+ * touched; these tests stay at the module level because they exercise the fallback logic itself.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";

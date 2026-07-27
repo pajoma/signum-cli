@@ -228,16 +228,46 @@ describe("every documented example is executable as written (AC-60.4)", () => {
 
   /**
    * The argv a shell would hand to `signum`: everything after the `signum` word, with any
-   * redirection or pipe tail removed. Examples deliberately include `< token.txt` and
-   * `printf … | signum …` because that is how a user really runs them.
+   * redirection, pipe, or command-substitution tail removed.
+   *
+   * Examples are written the way a user actually runs them, so `signum` is not always the first
+   * word and not always at the top level of the line:
+   *
+   *   signum cache path
+   *   printf %s "$TOKEN" | signum auth login --url … --with-token
+   *   signum auth login --url … --with-token < token.txt
+   *   ls "$(signum cache path)"                    ← inside a substitution, and quoted
+   *
+   * Scanning the raw string rather than the split words is what handles the last form: shell
+   * splitting collapses `"$(signum cache path)"` into one quoted token, so `signum` disappears
+   * from the word list entirely. (That is exactly how this test first failed — on an example
+   * added later, which is the drift it exists to catch.)
    */
   function argvOf(example: string): string[] {
-    const words = shellSplit(example);
-    const at = words.lastIndexOf("signum");
+    // The last occurrence of `signum` that STARTS a command: preceded by nothing, by a space, or
+    // by `(` from a substitution. The boundary check stops a URL like `https://signum.example`
+    // from being mistaken for the invocation.
+    let at = -1;
+    for (let i = example.indexOf("signum"); i !== -1; i = example.indexOf("signum", i + 1)) {
+      const before = i === 0 ? " " : (example[i - 1] as string);
+      if (before === " " || before === "(") at = i;
+    }
     expect(at, `example must invoke signum: ${example}`).toBeGreaterThanOrEqual(0);
-    const rest = words.slice(at + 1);
-    const cut = rest.findIndex((w) => w === "<" || w === ">" || w === ">>" || w === "|");
-    return cut === -1 ? rest : rest.slice(0, cut);
+
+    let rest = example.slice(at + "signum".length);
+    // A substitution's closing paren ends the command, the same way a pipe does — but ONLY when
+    // we are actually inside one. Cutting at every `)` would silently truncate a legitimate
+    // grouped filter such as --filter "Total >= 100 and (State = Shipped or State = Delivered)",
+    // and a test that quietly validates half an example is worse than no test.
+    const insideSubstitution = at > 0 && example[at - 1] === "(";
+    if (insideSubstitution) {
+      const close = rest.indexOf(")");
+      if (close !== -1) rest = rest.slice(0, close);
+    }
+
+    const words = shellSplit(rest);
+    const cut = words.findIndex((w) => w === "<" || w === ">" || w === ">>" || w === "|");
+    return cut === -1 ? words : words.slice(0, cut);
   }
 
   /** Walk COMMANDS depth-first, yielding each spec with the path that reaches it. */
@@ -281,6 +311,26 @@ describe("every documented example is executable as written (AC-60.4)", () => {
       });
     }
   }
+
+  it("extracts the invocation from every shape an example takes", () => {
+    // Guards argvOf itself. Each of these forms appears in real examples, and the substitution
+    // form silently broke the extractor once already — shell splitting collapses
+    // `"$(signum cache path)"` into one token, so `signum` vanishes from the word list.
+    const cases: Array<[string, string[]]> = [
+      ["signum cache path", ["cache", "path"]],
+      ['ls "$(signum cache path)"', ["cache", "path"]],
+      ["signum auth login --url https://app.example --with-token < token.txt",
+        ["auth", "login", "--url", "https://app.example", "--with-token"]],
+      ['printf %s "$TOKEN" | signum auth login --url https://app.example --with-token',
+        ["auth", "login", "--url", "https://app.example", "--with-token"]],
+      // A grouped filter must survive intact: its ')' is data, not the end of a substitution.
+      ['signum query Order --filter "Total >= 100 and (State = Shipped or State = Delivered)"',
+        ["query", "Order", "--filter", "Total >= 100 and (State = Shipped or State = Delivered)"]],
+      // A URL containing the word must not be mistaken for the invocation.
+      ["signum types --url https://signum.example", ["types", "--url", "https://signum.example"]],
+    ];
+    for (const [line, expected] of cases) expect(argvOf(line), line).toEqual(expected);
+  });
 
   it("would fail if an example used a flag its command does not declare", () => {
     // Guards the guard: a passing suite above must mean something.

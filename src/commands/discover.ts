@@ -22,6 +22,7 @@ async function metadata(ctx: Ctx): Promise<Metadata> {
   return await loadMetadata({
     url: target.url,
     http: target.http,
+    offline: ctx.args.flags.offline, // AC-24.4
     env: ctx.io.env,
     warn: (line) => ctx.io.err(line),
   });

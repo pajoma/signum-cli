@@ -57,7 +57,8 @@ export async function runGet(ctx: Ctx): Promise<ExitCode> {
   const target = resolveTarget(ctx, { requireAuth: !ctx.args.flags.explain });
 
   const md = await loadMetadata({
-    url: target.url, http: target.http, env: ctx.io.env, warn: (l) => ctx.io.err(l),
+    url: target.url, http: target.http, offline: ctx.args.flags.offline,
+    env: ctx.io.env, warn: (l) => ctx.io.err(l),
   });
   const type = findType(md, typeName);
   if (type === undefined) {
