@@ -43,11 +43,17 @@ rule, one redaction rule**, regardless of how the user authenticated.
 Traces to: REQ-001, REQ-004 · Priority: `m3` · Feasibility: **confirmed possible today**
 
 > **Scope note.** This is the path for deployments using `Signum.Authorization.OpenID`. For the
-> **target application** it is *not* currently reachable: even though Signum does not validate the
-> redirect URI, **Entra does**, so a loopback callback must be registered in the app's Entra
-> registration — access we do not have. Primary path is
-> [STORY-12](#story-12--browser-token-handoff-the-bootstrap-that-always-works). Rank 6 in
-> [ADR 0004](../decisions/0004-entra-primary-identity-provider.md).
+> **target application it is not reachable, and the reason is one step earlier than this story used
+> to say:** `GET api/auth/openIDEndpoints` returns **404** there (observed 2026-07-28). A 404 rather
+> than a 500 means the controller is unregistered, i.e. **the module is not installed** — so the
+> redirect URI never gets a chance to matter. *If* the module were installed, the second blocker
+> would still apply: Signum does not validate the redirect URI but **Entra does**, so a loopback
+> callback must be registered in the app's Entra registration — access we do not have.
+>
+> Primary path is [STORY-12](#story-12--browser-token-handoff-the-bootstrap-that-always-works).
+> Rank 6 in [ADR 0004](../decisions/0004-entra-primary-identity-provider.md). For a `gh`-like
+> experience that needs nothing from the tenant, see
+> [ADR 0008](../decisions/0008-browser-driven-token-capture.md).
 
 **As a developer**, I want to run `signum auth login --web`, complete authentication in my normal
 browser, and have the CLI end up logged in, so that I never type credentials into a terminal and
@@ -315,7 +321,7 @@ Decision 3.
 For the target application there is no fallback, so the flow must be robust rather than merely
 possible.
 
-- AC-12.9: `m3` — **Assisted capture.** **Deferred out of m1** (the AC already marks it `[TEST]` and optional). `signum auth login` binds a loopback listener and prints a one-line
+- AC-12.9: `m2` — **Assisted capture, as the fallback to browser-driven capture** ([ADR 0008](../decisions/0008-browser-driven-token-capture.md) Option 4 — used when no supported browser is present). Two findings since this was written: `SessionSharing` broadcasts the whole `sessionStorage`, `authToken` included, through `localStorage` (`Services.ts:420-458`), so the snippet need **not** run in the logged-in tab — any new tab on that origin self-populates; and the Private Network Access worry below is solvable, because the CLI controls the listener and can answer with `Access-Control-Allow-Private-Network`. `signum auth login` binds a loopback listener and prints a one-line
   browser-console snippet that POSTs `sessionStorage.getItem("authToken")` to it, so the user does
   not hand-copy a long secret. The listener accepts exactly one request, from loopback only, then
   closes. **[TEST]** — a cross-origin POST from an HTTPS page to `http://127.0.0.1` may be blocked by

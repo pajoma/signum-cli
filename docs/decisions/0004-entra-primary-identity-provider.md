@@ -198,7 +198,7 @@ The CLI must therefore never try password login as an automatic fallback.
 | — | API key (any variant) | ❌ `Signum.Rest` not installed |
 | — | Username/password | ❌ `PasswordHash` is null for Entra users; attempting it risks lockout |
 | — | Entra device code (STORY-10) | ⛔ blocked on an Entra app-registration change |
-| — | OpenID loopback (STORY-01) | ⛔ blocked on tenant **and** module |
+| — | OpenID loopback (STORY-01) | ⛔ blocked on tenant **and** module — module absence **confirmed** 2026-07-28: `api/auth/openIDEndpoints` returns 404, so the controller is unregistered ([ADR 0008](0008-browser-driven-token-capture.md)) |
 | — | `Signum.Agent` MCP surface | ❌ not installed either — no alternative authenticated surface |
 
 **Consequence:** STORY-12 is not merely the primary path, it is the *sole* path. The CLI's
