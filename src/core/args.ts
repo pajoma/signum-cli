@@ -52,6 +52,15 @@ export interface GlobalFlags {
   help: boolean;
   timeoutMs: number | undefined;
   callerContext: string | undefined;
+  /**
+   * `--version`, which everyone types first. It resolves to the `version` COMMAND rather than a
+   * separate path, so the two can never drift.
+   *
+   * There is no `-V`: flag names are lowercased before dispatch, so `-V` would collide with `-v`
+   * (verbose). Silently printing help for `--version` — which is what happened before — is worse
+   * than not supporting it, because it looks like it worked.
+   */
+  version: boolean;
   /** STORY-51 acknowledgement (AC-51.2). Deliberately unmissable. */
   allowAgentData: boolean;
   /**
@@ -117,6 +126,7 @@ function emptyFlags(): GlobalFlags {
     help: false,
     timeoutMs: undefined,
     callerContext: undefined,
+    version: false,
     allowAgentData: false,
     pseudonymize: undefined,
     offline: false,
@@ -171,6 +181,7 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
         case "caller-context": flags.callerContext = value; break;
         case "i-understand-data-goes-to-a-model": flags.allowAgentData = true; break;
         case "offline": flags.offline = true; break;
+        case "version": flags.version = true; break;
         case "pseudonymize": flags.pseudonymize = value; break;
         case "timeout": {
           const ms = Number(value);
@@ -212,6 +223,12 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
   if (flags.url === undefined) {
     const fromEnv = env["SIGNUM_URL"];
     if (fromEnv !== undefined && fromEnv !== "") flags.url = fromEnv;
+  }
+
+  // `--version` with no command IS the version command. Resolving it here rather than in cli.ts
+  // means one implementation, one output shape, and no chance of the two disagreeing.
+  if (flags.version && positionals.length === 0) {
+    return { kind: "builtin", command: "version", positionals: [], flags, options, booleans, rawFlagNames };
   }
 
   const first = positionals[0];

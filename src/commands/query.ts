@@ -160,6 +160,13 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
     { groupEnabled },
   );
 
+  // Pagination is validated HERE, beside the filter, because it is equally local: `--top abc` is
+  // wrong whatever the server says. It used to be parsed while building the request, so an invalid
+  // value was masked first by "no target application" and then by "no credential" — a user had to
+  // fix two unrelated things before being told what was actually wrong with their command. Same
+  // "two round trips of confusion" argument the filter already makes below.
+  const pagination = parsePagination(ctx);
+
   // The gate is unconditional from here on, evaluated before touching credentials or the
   // network: being told to fix auth and *then* refused would be two round trips of confusion.
   // --explain emits no data, so it stays exempt. The writer this returns is discarded; the
@@ -255,7 +262,7 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
     filters,
     orders,
     columns,
-    pagination: parsePagination(ctx),
+    pagination,
   };
 
   // REQ-078: print the command a HUMAN should run, and send nothing. Sits beside --explain because

@@ -36,10 +36,26 @@ function assertHuman(ctx: Ctx): void {
   });
 }
 
-export function runUnmask(ctx: Ctx): ExitCode {
+export async function runUnmask(ctx: Ctx): Promise<ExitCode> {
   if (flag(ctx, "clear")) {
     // Lifetime, made explicit (AC-53.6): clearing is how a handle expires, and it is irreversible —
     // every outstanding handle stops resolving, which `resolveHandle` then reports honestly.
+    //
+    // Which is exactly why it asks first. REQ-046's destructive-action guard is scoped to server
+    // mutations and is m2, but the principle does not care where the data lives: this permanently
+    // orphans every handle, and it used to do so on a bare `--clear` with no confirmation at all.
+    // Non-interactively it proceeds — a script asked for it, and prompting would hang (STORY-09).
+    const stored = Object.keys(loadHandles(ctx.io.env)).length;
+    if (stored > 0 && !flag(ctx, "yes") && ctx.io.prompt !== undefined && ctx.io.stdoutIsTty) {
+      const answer = await ctx.io.prompt(
+        `Forget ${stored} handle${stored === 1 ? "" : "s"}? Every outstanding ref: stops resolving. [y/N] `,
+      );
+      if (!/^y(es)?$/i.test(answer.trim())) {
+        ctx.io.err("Left untouched.\n");
+        return ExitCode.Ok;
+      }
+    }
+
     const removed = clearHandles(ctx.io.env);
     ctx.io.out(removed ? "Handle mapping removed.\n" : "No handle mapping stored.\n");
     if (removed) {

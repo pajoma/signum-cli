@@ -4,14 +4,15 @@
  * STORY-09 (non-interactive by construction) · STORY-51 (agent gate) · STORY-63 (errors route to help)
  */
 
-import { assertKnownFlags, parseArgs, type ParsedArgs } from "./core/args.ts";
+import { assertKnownFlags, BUILT_INS, parseArgs, type ParsedArgs } from "./core/args.ts";
+import { nearest } from "./core/text.ts";
 import { CliError, ExitCode, UsageError, exitCodeOf } from "./core/errors.ts";
 import { detectCallerContext, type CallerDetection } from "./core/caller.ts";
 import { makeDataOpener, type DataWriter } from "./core/policy.ts";
 import { parseMode, resolvePolicy, type PrivacyPolicy } from "./core/privacy.ts";
 import { colorEnabled, effectiveFormat, renderDocument, type OutputFormat } from "./core/output.ts";
 import {
-  COMMANDS, TOPICS, findCommand, helpAsJson, renderCommand, renderOverview,
+  COMMANDS, TOPICS, findCommand, helpAsJson, renderCommand, renderOverview, topicNames,
 } from "./core/help.ts";
 import { runVersion } from "./commands/version.ts";
 import { runAuth } from "./commands/auth.ts";
@@ -28,6 +29,14 @@ export interface Io {
   stdinIsTty: boolean;
   env: NodeJS.ProcessEnv;
   readStdin: () => Promise<string>;
+  /**
+   * Ask the person at the terminal something. `hidden` suppresses echo, for a credential.
+   *
+   * Absent when there is nothing to ask — no TTY, or a test that has not opted in — so every caller
+   * must handle its absence rather than assume an interactive human is there (STORY-09: never hang
+   * waiting for input that cannot arrive).
+   */
+  prompt?: ((question: string, opts?: { hidden?: boolean }) => Promise<string>) | undefined;
 }
 
 export interface Ctx {
@@ -125,7 +134,7 @@ function showHelp(args: ParsedArgs, io: Io): ExitCode {
     throw new UsageError(`no help topic or command '${path.join(" ")}'`, {
       hint:
         "Commands: " + COMMANDS.map((c) => c.name).join(", ") + "\n" +
-        "Topics:   " + Object.keys(TOPICS).join(", "),
+        "Topics:   " + topicNames().join(", "),
     });
   }
 
@@ -207,7 +216,7 @@ export async function run(argv: readonly string[], io: Io): Promise<ExitCode> {
           return await runGet(ctx);
         case "unmask":
           assertKnownFlags(args, ["unmask"]);
-          return runUnmask(ctx);
+          return await runUnmask(ctx);
         case "cache": {
           const sub = args.positionals[0]?.toLowerCase();
           if (sub === "show" || sub === "clear" || sub === "path") assertKnownFlags(args, ["cache", sub]);
@@ -218,7 +227,30 @@ export async function run(argv: readonly string[], io: Io): Promise<ExitCode> {
       break;
 
     case "operation-key":
-    case "verb-noun":
+    case "verb-noun": {
+      // A MISTYPED built-in reaches here, because dispatch rule 3 treats anything unrecognised as a
+      // verb-noun operation. Telling someone who typed `typs` about m2 operation keys is a lecture
+      // about the wrong subject — and flags already get edit-distance suggestions, so the machinery
+      // and the expectation both existed. Check for a near-miss before assuming intent.
+      const typed = String(args.command).toLowerCase();
+
+      // A RENAMED command is not a typo — no edit distance connects `de-pseudonymize` to `unmask` —
+      // so the only way to help someone with the old name in muscle memory is to say so. One entry
+      // per rename, removable once nobody could plausibly still be typing it.
+      const renamed = RENAMED_COMMANDS[typed];
+      if (renamed !== undefined) {
+        throw new UsageError(`'${typed}' was renamed to '${renamed}'`, {
+          hint: `Run \`signum ${renamed}\` instead. See \`signum ${renamed} --help\`.`,
+        });
+      }
+
+      const near = nearest(typed, BUILT_INS);
+      if (near !== undefined) {
+        throw new UsageError(`unknown command '${String(args.command)}'`, {
+          hint: `Did you mean \`signum ${near}\`?\nRun \`signum help\` to see every command.`,
+        });
+      }
+
       throw new UsageError(
         `operations are not available in this milestone (m1 is read-only)`,
         {
@@ -229,12 +261,24 @@ export async function run(argv: readonly string[], io: Io): Promise<ExitCode> {
             "  signum explain <OperationKey>   arguments and target kind",
         },
       );
+    }
   }
 
   throw new UsageError(`unknown command '${String(args.command)}'`, {
     hint: "Run `signum help` to see available commands.",
   });
 }
+
+/**
+ * Commands that used to exist under another name.
+ *
+ * Kept deliberately small and dated: an alias map that grows without pruning becomes a museum. This
+ * one exists because `de-pseudonymize` -> `unmask` (2026-07-28) happened before release, so nobody
+ * has it in a script — only in their fingers.
+ */
+const RENAMED_COMMANDS: Readonly<Record<string, string>> = {
+  "de-pseudonymize": "unmask",
+};
 
 function report(err: unknown, io: Io): ExitCode {
   const code = exitCodeOf(err);
@@ -249,6 +293,50 @@ function report(err: unknown, io: Io): ExitCode {
   return code;
 }
 
+/**
+ * Read one line from the terminal, optionally without echoing it.
+ *
+ * Only offered when stdin is a TTY, so it can never hang a pipeline. A hidden read uses raw mode and
+ * writes nothing back, so a pasted credential reaches neither the screen nor the shell's history —
+ * which is what AC-12.1 is protecting, and why refusing to prompt at all was the wrong reading of it.
+ *
+ * The prompt goes to STDERR: stdout is reserved for data (AC-22.2), and a prompt is not data.
+ */
+async function promptAtTerminal(question: string, opts: { hidden?: boolean } = {}): Promise<string> {
+  const stdin = process.stdin;
+  process.stderr.write(question);
+
+  const hidden = opts.hidden === true;
+  const wasRaw = stdin.isRaw === true;
+  if (hidden) stdin.setRawMode(true);
+  stdin.resume();
+
+  try {
+    return await new Promise<string>((resolve, reject) => {
+      let buffer = "";
+      const onData = (chunk: Buffer | string): void => {
+        for (const ch of chunk.toString("utf8")) {
+          if (ch === "\r" || ch === "\n") { cleanup(); resolve(buffer); return; }
+          if (ch === "\u0003") { cleanup(); reject(new UsageError("cancelled")); return; } // Ctrl-C
+          if (ch === "\u007f" || ch === "\b") { buffer = buffer.slice(0, -1); continue; }
+          if (ch < " ") continue; // ignore other control characters rather than storing them
+          buffer += ch;
+        }
+        // Not raw: the terminal delivers whole lines, so anything here is already complete.
+        if (!hidden) { cleanup(); resolve(buffer); }
+      };
+      const cleanup = (): void => {
+        stdin.off("data", onData);
+        if (hidden) { stdin.setRawMode(wasRaw); process.stderr.write("\n"); }
+        stdin.pause();
+      };
+      stdin.on("data", onData);
+    });
+  } finally {
+    if (hidden && stdin.isRaw !== wasRaw) stdin.setRawMode(wasRaw);
+  }
+}
+
 export async function main(argv: readonly string[]): Promise<number> {
   const io: Io = {
     out: (s) => process.stdout.write(s),
@@ -261,6 +349,7 @@ export async function main(argv: readonly string[]): Promise<number> {
       for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
       return Buffer.concat(chunks).toString("utf8");
     },
+    ...(process.stdin.isTTY === true ? { prompt: promptAtTerminal } : {}),
   };
   try {
     return await run(argv, io);

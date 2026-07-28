@@ -41,15 +41,27 @@ async function login(ctx: Ctx): Promise<ExitCode> {
     });
   }
 
-  // Read from stdin ONLY — never an argument, which would leak into shell history (AC-12.1).
+  // Never an argument, which would leak into shell history and the process list (AC-12.1). But
+  // "not an argument" does not have to mean "not typed": a hidden read from the terminal keeps the
+  // token out of both, and refusing to prompt made the CLI's own GETTING STARTED line — the second
+  // thing a new user runs — fail every time with "no token on stdin".
+  //
+  // AC-12.8 asked for exactly this ("terminal echo suppressed while pasting on a TTY"). It was
+  // amended away in #78 on the reasoning that TTY paste is refused — circular, since the refusal was
+  // the problem. Reinstated.
+  let token: string;
   if (ctx.io.stdinIsTty) {
-    // A TTY here means nothing was piped. Refusing beats hanging (STORY-09).
-    throw new UsageError("no token on stdin", {
-      hint: "The token is read from stdin so it never appears in shell history.\n\n" + HANDOFF_INSTRUCTIONS,
-    });
+    if (ctx.io.prompt === undefined) {
+      // No way to ask and nothing piped. Refusing beats hanging (STORY-09).
+      throw new UsageError("no token on stdin", {
+        hint: "The token is read from stdin so it never appears in shell history.\n\n" + HANDOFF_INSTRUCTIONS,
+      });
+    }
+    ctx.io.err(HANDOFF_INSTRUCTIONS + "\n\n");
+    token = (await ctx.io.prompt("Paste the token (not echoed): ", { hidden: true })).trim();
+  } else {
+    token = (await ctx.io.readStdin()).trim();
   }
-
-  const token = (await ctx.io.readStdin()).trim();
   if (token === "") {
     throw new UsageError("empty token on stdin", { hint: HANDOFF_INSTRUCTIONS });
   }

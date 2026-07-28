@@ -51,7 +51,8 @@ export const COMMANDS: CommandSpec[] = [
     summary: "Show help, or long-form help on a topic",
     usage: "signum help [<topic>]",
     milestone: "m1",
-    description: `Topics: ${["filter", "tokens", "output", "exit-codes", "auth", "contexts", "pseudonymization"].join(", ")}.`,
+    // Derived, not a second hand-maintained list — the drift risk AC-62.2 exists to prevent.
+    get description() { return `Topics: ${topicNames().join(", ")}.`; },
     examples: ["signum help", "signum help exit-codes", "signum help filter"],
   },
   {
@@ -220,6 +221,7 @@ export const COMMANDS: CommandSpec[] = [
     flags: [
       { name: "list", summary: "How many handles are stored (never what they mean)" },
       { name: "clear", summary: "Forget them all - every outstanding handle stops resolving" },
+      { name: "yes", summary: "Skip the confirmation for --clear" },
     ],
     examples: [
       "signum unmask ref:7f3a1c2b4d5e",
@@ -317,11 +319,15 @@ export function renderOverview(): string {
   out.push(...renderFlags(GLOBAL_FLAGS));
   out.push("");
   out.push("GETTING STARTED");
-  out.push("  signum --url https://app.example types      # explore without logging in");
-  out.push("  signum auth login --url https://app.example --with-token");
-  out.push("  signum auth status");
+  out.push("  signum --url https://app.example types      # explore, no login needed");
+  out.push("  signum auth login --url https://app.example --with-token   # prompts for the token");
+  out.push("  signum auth status                          # who am I, against what");
   out.push("");
-  out.push("  signum help <topic>   for filter syntax, exit codes, output formats, and more");
+  out.push("HELP TOPICS");
+  // Listed, not hinted at. They were previously discoverable only by making a mistake — the error
+  // for an unknown topic printed the list, and nothing else did.
+  out.push(`  ${topicNames().join("  ")}`);
+  out.push("  signum help <topic>");
   return out.join("\n") + "\n";
 }
 
@@ -354,6 +360,11 @@ export function renderCommand(spec: CommandSpec, path: readonly string[]): strin
   out.push("");
   out.push("Run `signum help` for global flags.");
   return out.join("\n") + "\n";
+}
+
+/** Topic names, sorted — an arbitrary order in a list a human scans reads as noise. */
+export function topicNames(): string[] {
+  return Object.keys(TOPICS).sort();
 }
 
 export const TOPICS: Record<string, string> = {
