@@ -58,6 +58,27 @@ const REFLECTION = {
 };
 
 /**
+ * `QueryDescriptionTS` (`QueryController.cs:139-158`): every column the query exposes, keyed by
+ * name, PLUS two injected pseudo-tokens — an `AggregateToken` for Count and a `TimeSeriesToken`.
+ * `Entity` is present too. The framework's own default-column rule drops all three
+ * (`Finder.tsx:383-387`), which is what the CLI must reproduce.
+ */
+const QUERY_DESCRIPTION = {
+  queryKey: "Order",
+  columns: {
+    Entity: { key: "Entity", fullKey: "Entity", niceName: "Order", type: { name: "Order" }, isGroupable: true },
+    Count: { key: "Count", fullKey: "Count", queryTokenType: "Aggregate", type: { name: "number" }, isGroupable: false },
+    TimeSeries: { key: "TimeSeries", fullKey: "TimeSeries", queryTokenType: "TimeSeries", type: { name: "DateTime" }, isGroupable: false },
+    Id: { key: "Id", fullKey: "Id", niceName: "Id", type: { name: "number" }, isGroupable: true },
+    State: { key: "State", fullKey: "State", niceName: "State", type: { name: "string" }, isGroupable: true },
+    Total: { key: "Total", fullKey: "Total", niceName: "Total", type: { name: "decimal" }, isGroupable: true },
+  },
+};
+
+/** Every executeQuery request the mock received, so tests can assert what was actually sent. */
+const executeQueryRequests: Array<{ queryKey: string; columns: Array<{ token: string }> }> = [];
+
+/**
  * Token continuations, keyed by the token asked about (`null` = the query's own root columns).
  * Shapes follow `QueryTokenTS` (`QueryController.cs:251-272`): camelCase, `type` is a
  * TypeReferenceTS, and `queryTokenType` is absent for an ordinary column token.
@@ -195,7 +216,13 @@ beforeAll(() => {
       if (url.pathname === "/api/query/executeQuery/Broken") {
         return new Response(JSON.stringify({ exceptionMessage: "something went wrong server-side" }), { status: 500, headers });
       }
+      if (url.pathname.startsWith("/api/query/description/")) {
+        return new Response(JSON.stringify(QUERY_DESCRIPTION), { headers });
+      }
       if (url.pathname.startsWith("/api/query/executeQuery/")) {
+        executeQueryRequests.push(
+          (await req.json()) as { queryKey: string; columns: Array<{ token: string }> },
+        );
         return new Response(JSON.stringify(RESULT_TABLE), { headers });
       }
       if (url.pathname.startsWith("/api/query/queryValue/")) {
@@ -655,6 +682,61 @@ describe("query (STORY-20, STORY-21, STORY-22)", () => {
     expect(r.code).toBe(ExitCode.Usage);
     expect(r.err).toContain("no query you can run");
     expect(r.err).toContain("signum queries");
+  });
+
+  it("sends the query's DEFAULT columns when none are named (AC-20.3)", async () => {
+    // The live-run bug: `columns: []` means "no columns", not "the defaults". The server then
+    // injects an entity column because the request has none (AutoDynamicQuery.cs:96-98) and hoists
+    // it straight out again, so the user saw a one-column table containing only the Lite key.
+    executeQueryRequests.length = 0;
+    const r = await cli(["query", "Order", "--top", "1", "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
+
+    const sent = executeQueryRequests.at(-1);
+    const tokens = (sent?.columns ?? []).map((c) => c.token);
+    // Entity, Count and TimeSeries are all excluded — the framework's own rule (Finder.tsx:383-387).
+    expect(tokens).toEqual(["Id", "State", "Total"]);
+  });
+
+  it("named columns REPLACE the defaults rather than adding to them", async () => {
+    executeQueryRequests.length = 0;
+    const r = await cli(["query", "Order", "--column", "State", "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect((executeQueryRequests.at(-1)?.columns ?? []).map((c) => c.token)).toEqual(["State"]);
+  });
+
+  it("--count resolves no columns — it transfers no rows", async () => {
+    const r = await cli(["query", "Order", "--count"], { tty: true });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.out.trim()).toBe("7");
+  });
+
+  it("--group does NOT get default columns — only the caller can choose grouping keys", async () => {
+    const r = await cli(["query", "Order", "--group", "--explain"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const doc = JSON.parse(r.out) as { body: { columns: unknown[]; groupResults: boolean } };
+    expect(doc.body.groupResults).toBe(true);
+    expect(doc.body.columns).toEqual([]);
+  });
+
+  it("--explain resolves the defaults too, so the preview matches what would be sent", async () => {
+    const r = await cli(["query", "Order", "--explain"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const doc = JSON.parse(r.out) as { body: { columns: Array<{ token: string }> } };
+    expect(doc.body.columns.map((c) => c.token)).toEqual(["Id", "State", "Total"]);
+  });
+
+  it("--explain degrades with a note when the defaults cannot be resolved, rather than failing", async () => {
+    // The description endpoint needs a credential; --explain must keep working without one.
+    const dir = mkdtempSync(join(tmpdir(), "signum-nocred-"));
+    const r = await cli(["query", "Order", "--explain"], {
+      env: { SIGNUM_CONFIG_DIR: dir, SIGNUM_URL: baseUrl },
+    });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.err).toContain("could not resolve this query's default columns");
+    const doc = JSON.parse(r.out) as { body: { columns: unknown[] } };
+    expect(doc.body.columns).toEqual([]);
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it("puts the Entity column where it was asked for, end to end (AC-21.2)", async () => {
