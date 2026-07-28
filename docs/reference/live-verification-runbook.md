@@ -178,7 +178,7 @@ leaking through). **Do not paste the row.**
 
 | # | Command | Expected |
 |---|---|---|
-| 5.1 | `SIGNUM_TOKEN=deliberately-invalid signum auth status` | `authenticated: false`. Signum **silently degrades a bad token to anonymous** rather than rejecting it (AC-04.6) — confirm it does |
+| 5.1 | `SIGNUM_TOKEN=deliberately-invalid signum auth status` | `authenticated: false`, **exit 3**, and `reachable: true` — the server answered, so it is reachable. The failure *shape* tells you about the app: a **403** `No authentication information found!` means it does **not** configure `AuthLogic.AnonymousUser` (what the target app does — #83); a 200 with a null body means it does. Both are correct behaviour. *An earlier version of this line asserted only the second shape, and produced a false bug report — see #83.* |
 | 5.2 | `SIGNUM_TOKEN=deliberately-invalid signum query "$Q" --top 1 --i-understand-data-goes-to-a-model` | **exit 3**, and the body should carry `exceptionType` containing `AuthenticationException`. **Never a 401** (AC-08.1) |
 | 5.3 | `signum explain "$Q.Entity" --json` | Live `subTokens`. **Newest and least-verified code in the repo** (#77) — compare the `QueryTokenTS` key names against `SUB_TOKENS` in `test/integration.test.ts` |
 | 5.4 | `signum explain "$Q.NoSuchToken"` | **exit 2**, `invalid query token`, with a `Did you mean:` suggestion. Confirms `FormatException` really arrives as HTTP 500 and is reclassified rather than surfacing as exit 1 |
