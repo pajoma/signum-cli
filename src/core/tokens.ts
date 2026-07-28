@@ -26,6 +26,7 @@
 
 import type { SignumHttp } from "./http.ts";
 import { CliError, UsageError, ValidationError } from "./errors.ts";
+import { ENTITY_TOKEN } from "./resulttable.ts";
 import { editDistance } from "./text.ts";
 
 /** `QueryTokenType` (`QueryController.cs:274-286`). Absent for an ordinary column token. */
@@ -193,4 +194,43 @@ export function nearestTokens(wanted: string, candidates: readonly QueryTokenInf
     .sort((a, b) => a.score - b.score || a.key.localeCompare(b.key))
     .slice(0, limit)
     .map((s) => s.key);
+}
+
+/**
+ * The query's DEFAULT columns, for when the caller named none (AC-20.3).
+ *
+ * `GET api/query/description/{queryKey}` returns `QueryDescriptionTS { queryKey, columns }`, where
+ * `columns` is a dictionary of every column the query exposes plus two injected pseudo-tokens
+ * (`QueryController.cs:139-158`: an `AggregateToken` for Count and a `TimeSeriesToken`).
+ *
+ * The filter below is the framework's own definition, transcribed from `Finder.tsx:383-387`:
+ *
+ *     Dic.getValues(qd.columns).filter(a => a.fullKey != "Entity"
+ *        && a.queryTokenType != "Aggregate" && a.queryTokenType != "TimeSeries")
+ *
+ * Dropping `Entity` is safe and deliberate: the server re-adds an entity column when the request
+ * carries none (`AutoDynamicQuery.cs:96-98`), then hoists it back out of `columns`
+ * (`ResultTable.cs:55-56`). So the rows still arrive with their identity attached — which is
+ * exactly what the web client relies on.
+ *
+ * Requires a credential: `QueryController` carries no `[SignumAllowAnonymous]`.
+ */
+export async function fetchDefaultColumns(
+  http: SignumHttp,
+  queryKey: string,
+): Promise<QueryTokenInfo[]> {
+  const res = await http.request<unknown>({
+    method: "GET",
+    path: `api/query/description/${encodeURIComponent(queryKey)}`,
+  });
+
+  const body = res.body;
+  if (body === null || typeof body !== "object") return [];
+  const columns = (body as Record<string, unknown>)["columns"];
+  if (columns === null || typeof columns !== "object") return [];
+
+  return Object.values(columns as Record<string, unknown>)
+    .map(parseToken)
+    .filter((t) => t.fullKey !== "" && t.fullKey !== ENTITY_TOKEN)
+    .filter((t) => t.kind !== "Aggregate" && t.kind !== "TimeSeries");
 }

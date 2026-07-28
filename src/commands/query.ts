@@ -14,6 +14,7 @@ import { ExitCode, UsageError } from "../core/errors.ts";
 import { renderResultTable, renderDataDocument, renderDocument } from "../core/output.ts";
 import { resolveResultTable, type RawResultTable } from "../core/resulttable.ts";
 import { loadMetadata, resolveQueryKey } from "../core/metadata.ts";
+import { fetchDefaultColumns } from "../core/tokens.ts";
 import { lowerFilterExpressions, parseFilterExpression, type FilterWire } from "../core/filter.ts";
 import { opt, optAll, flag, resolveTarget } from "./context.ts";
 import { readFileSync } from "node:fs";
@@ -153,16 +154,51 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
   });
   resolveQueryKey(md, queryKey);
 
+  // Needed before column resolution: a count transfers no rows, so it needs no columns.
+  const wantCount = flag(ctx, "count");
+
+  // AC-20.3: "--column selects columns by token … Omitted, the query's default columns are used."
+  //
+  // The second half was missing, and it made the core read path nearly useless: sending
+  // `columns: []` does not mean "give me the defaults", it means "give me no columns". The server
+  // then injects an entity column because the request has none
+  // (`AutoDynamicQuery.cs:96-98`) and hoists it straight back out (`ResultTable.cs:55-56`), so
+  // `signum query UserSkill --top 1` rendered a table with exactly one column — the Entity — and
+  // nothing else. Found on the first live run against a real application.
+  //
+  // Named columns REPLACE the defaults rather than adding to them. The web client defaults to
+  // ColumnOptionsMode "Add" (`Finder.tsx:362`), but `--column X` on a CLI plainly means "show me
+  // X", and AC-20.3 says "selects".
   const requestedColumns = optAll(ctx, "column");
-  const columns = requestedColumns.map((token) => ({ token }));
+  let effectiveColumns = requestedColumns;
+
+  if (requestedColumns.length === 0 && !groupEnabled && !wantCount) {
+    // --group is excluded: a grouped query's columns are the grouping keys plus aggregates, which
+    // only the caller can choose. Defaulting them would invent a query nobody asked for.
+    try {
+      effectiveColumns = (await fetchDefaultColumns(target.http, queryKey)).map((c) => c.fullKey);
+    } catch (err) {
+      // --explain must keep working without a credential, and this endpoint needs one
+      // (QueryController is not [SignumAllowAnonymous]). Degrade rather than fail, and say so, so
+      // the previewed request is never silently different from the one that would be sent.
+      if (ctx.args.flags.explain) {
+        ctx.io.err(
+          "note: could not resolve this query's default columns, so the preview shows none.\n" +
+          "They are resolved at execution time from api/query/description.\n",
+        );
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  const columns = effectiveColumns.map((token) => ({ token }));
   const orders = parseOrders(optAll(ctx, "order"));
   const filterJsonSource = opt(ctx, "filter-json");
   // DSL and --filter-json are combined by concatenation — both are ANDed at the top level,
   // matching the design's "may be combined" rule (design/filter-expression-syntax.md).
   const jsonFilters = filterJsonSource !== undefined ? (readFilterJson(filterJsonSource) as FilterWire[]) : [];
   const filters: FilterWire[] = [...dslFilters, ...jsonFilters];
-
-  const wantCount = flag(ctx, "count");
 
   const request: Record<string, unknown> = {
     queryKey,
