@@ -11,10 +11,14 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  classify, disclosure, HANDLE_PREFIX, isIdentityValue, parseMode, pseudonymizeDocument,
+  disclosure, HANDLE_PREFIX, isIdentityValue, parseMode, pseudonymizeDocument, sensitivity,
   resolvePolicy, surrogate,
 } from "../src/core/privacy.ts";
 import { UsageError } from "../src/core/errors.ts";
+
+/** The old `classify(name, policy)` shape, kept for readability in these name-only cases. */
+const sensitivityOf = (name: string, policy: Parameters<typeof sensitivity>[1]) =>
+  sensitivity({ name }, policy);
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "signum-privacy-")); });
@@ -75,51 +79,51 @@ describe("classification, with reasons (REQ-059)", () => {
 
   it("matches English and German member names (AC-52.4)", () => {
     for (const m of ["Name", "Email", "Phone", "Nachname", "Telefon", "Geburtsdatum", "IBAN", "Steuernummer"]) {
-      expect(classify(m, p()).pseudonymize, m).toBe(true);
+      expect(sensitivityOf(m, p()).pseudonymize, m).toBe(true);
     }
   });
 
   it("matches inside a PascalCase member: CustomerName -> [customer, name]", () => {
-    const c = classify("CustomerName", p());
+    const c = sensitivityOf("CustomerName", p());
     expect(c.pseudonymize).toBe(true);
     expect(c.matched).toBe("name");
   });
 
   it("classifies on the LAST segment of a dotted token", () => {
-    expect(classify("Entity.Customer.Email", p()).pseudonymize).toBe(true);
-    expect(classify("Entity.Customer.State", p()).pseudonymize).toBe(false);
+    expect(sensitivityOf("Entity.Customer.Email", p()).pseudonymize).toBe(true);
+    expect(sensitivityOf("Entity.Customer.State", p()).pseudonymize).toBe(false);
   });
 
   it("leaves plainly non-personal members alone", () => {
     for (const m of ["State", "Total", "Quantity", "OrderDate", "IsActive", "Level"]) {
-      expect(classify(m, p()).pseudonymize, m).toBe(false);
+      expect(sensitivityOf(m, p()).pseudonymize, m).toBe(false);
     }
   });
 
   it("does NOT misfire on Filename, which merely contains 'name'", () => {
     // Word matching, not substring. `FileName` would still misfire, which is exactly why the
     // disclosure has to name what it replaced (AC-52.6) — a false positive must be visible.
-    expect(classify("Filename", p()).pseudonymize).toBe(false);
+    expect(sensitivityOf("Filename", p()).pseudonymize).toBe(false);
   });
 
   it("reports WHY, which is what lets an agent explain without deciding", () => {
-    expect(classify("Email", p()).reason).toBe("heuristic-match");
-    expect(classify("Total", p()).reason).toBe("not-sensitive");
-    expect(classify("Email", policy({ callerIsAgent: false })).reason).toBe("mode-off");
+    expect(sensitivityOf("Email", p()).reason).toBe("heuristic-match");
+    expect(sensitivityOf("Total", p()).reason).toBe("not-sensitive");
+    expect(sensitivityOf("Email", policy({ callerIsAgent: false })).reason).toBe("mode-off");
   });
 
   it("an explicit policy overrides heuristics in BOTH directions (AC-52.5)", () => {
     writeFileSync(join(dir, "privacy.json"), JSON.stringify({ always: ["Total"], allow: ["Name"] }));
     const p2 = policy();
-    expect(classify("Total", p2)).toMatchObject({ pseudonymize: true, reason: "policy-always" });
-    expect(classify("Name", p2)).toMatchObject({ pseudonymize: false, reason: "policy-allow" });
+    expect(sensitivityOf("Total", p2)).toMatchObject({ pseudonymize: true, reason: "policy-always" });
+    expect(sensitivityOf("Name", p2)).toMatchObject({ pseudonymize: false, reason: "policy-allow" });
   });
 
   it("strict replaces everything not allowlisted (AC-52.3, AC-52.8)", () => {
     writeFileSync(join(dir, "privacy.json"), JSON.stringify({ mode: "strict", allow: ["State"] }));
     const p2 = policy();
-    expect(classify("Total", p2)).toMatchObject({ pseudonymize: true, reason: "strict-default" });
-    expect(classify("State", p2)).toMatchObject({ pseudonymize: false, reason: "policy-allow" });
+    expect(sensitivityOf("Total", p2)).toMatchObject({ pseudonymize: true, reason: "strict-default" });
+    expect(sensitivityOf("State", p2)).toMatchObject({ pseudonymize: false, reason: "policy-allow" });
   });
 });
 
@@ -258,5 +262,57 @@ describe("entity references are always identities (the merge leak)", () => {
     // will actually run left them readable.
     const h = surrogate({ EntityType: "User", id: 102 }, "User", policy());
     expect(String(h)).toStartWith(HANDLE_PREFIX);
+  });
+});
+
+/**
+ * `get` must protect entity references too — the Brooks review's critical finding.
+ *
+ * `pseudonymizeDocument` decided from the member NAME alone, so a nested Lite came through with a
+ * real type, a real id and a real label under the DEFAULT agent policy — while the disclosure
+ * reported that nothing had been pseudonymized. The rule now has one home, so both data paths get it.
+ */
+describe("entity documents protect nested identities (the get leak)", () => {
+  it("replaces a nested Lite with a handle, though `Customer` matches no heuristic", () => {
+    const { value, pseudonymized, handles } = pseudonymizeDocument(
+      { Type: "Order", id: 42, Customer: { EntityType: "Customer", id: 7, model: "Anna Müller" }, total: 99 },
+      policy(),
+    );
+    const doc = value as Record<string, unknown>;
+    expect(String(doc["Customer"])).toStartWith(HANDLE_PREFIX);
+    expect(JSON.stringify(doc)).not.toContain("Anna Müller");
+    expect(JSON.stringify(doc)).not.toContain('"id":7');
+    expect(pseudonymized).toContain("Customer");
+    // The handle is recorded, so a human can still audit what the agent acted on (AC-53.4).
+    expect(Object.values(handles)).toContain("Customer;7");
+  });
+
+  it("still leaves structural keys and non-sensitive values alone", () => {
+    const { value } = pseudonymizeDocument({ Type: "Order", id: 42, ticks: "638", total: 99 }, policy());
+    expect(value).toEqual({ Type: "Order", id: 42, ticks: "638", total: 99 });
+  });
+
+  it("reports what it replaced, so the disclosure cannot claim safety it did not deliver", () => {
+    const { pseudonymized } = pseudonymizeDocument(
+      { Type: "Order", id: 1, Customer: { EntityType: "Customer", id: 7 } },
+      policy(),
+    );
+    expect(pseudonymized).not.toEqual([]);
+  });
+
+  it("agrees with the query path — one rule, both paths", () => {
+    // The two paths disagreeing is the defect this consolidation exists to prevent.
+    const lite = { EntityType: "Customer", id: 7 };
+    const fromDocument = (pseudonymizeDocument({ Customer: lite }, policy()).value as Record<string, unknown>)["Customer"];
+    const fromValue = surrogate(lite, "Customer", policy());
+    expect(fromDocument).toBe(fromValue);
+  });
+});
+
+describe("the disclosure names the frequency limit (review finding)", () => {
+  it("warns that few distinct values are reversible by counting", () => {
+    const d = disclosure(policy(), ["State"]);
+    expect(d).toContain("FEW DISTINCT VALUES");
+    expect(d).toContain("counting");
   });
 });

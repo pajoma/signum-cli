@@ -20,7 +20,7 @@
  */
 
 import { CliError, ExitCode } from "./errors.ts";
-import { classify, isIdentityValue, surrogate, type HandleRecorder, type PrivacyPolicy } from "./privacy.ts";
+import { createRecorder, sensitivity, surrogate, type PrivacyPolicy } from "./privacy.ts";
 
 /** Raw wire shape of `ResultTable`, exactly as the server sends it. */
 export interface RawResultTable {
@@ -55,6 +55,16 @@ export interface ResolvedTable {
   readonly totalElements: number | undefined;
   /** Columns whose values were replaced by surrogates, for the AC-52.6 disclosure. */
   readonly pseudonymized: readonly string[];
+  /**
+   * `ref:` handles minted while pseudonymizing, which the caller MUST persist before emitting
+   * (REQ-058, AC-53.5).
+   *
+   * Carried on the result rather than collected through an optional in-parameter. An optional
+   * recorder meant a caller could omit it and silently mint handles that would never resolve —
+   * the same "protection by convention" shape this codebase already rejected for the data-output
+   * boundary. Now the mapping is simply there, and dropping it takes an act rather than an omission.
+   */
+  readonly mintedHandles: Readonly<Record<string, string>>;
 }
 
 export interface ResolvedRow {
@@ -93,12 +103,6 @@ export interface ResolveOptions {
    * judged as `User` — the token the reader asked about, and therefore the right one to judge.
    */
   privacy?: PrivacyPolicy | undefined;
-  /**
-   * Collects `ref:` handles minted while pseudonymizing, so the caller can persist them BEFORE
-   * emitting anything (REQ-058). Emitting a handle we have not stored would create the
-   * "unresolvable handle" AC-53.5 exists to prevent, and we would have caused it ourselves.
-   */
-  handles?: HandleRecorder | undefined;
 }
 
 function columnToken(col: NonNullable<RawResultTable["columns"]>[number], index: number): string {
@@ -158,12 +162,8 @@ export function resolveResultTable(raw: RawResultTable, options: ResolveOptions 
     ? serverColumns
     : [...serverColumns.slice(0, entityIndex), ENTITY_TOKEN, ...serverColumns.slice(entityIndex)];
 
-  // Classify once per column where the answer is name-based: it cannot vary by row, and a per-cell
-  // decision would be both slower and a place for inconsistency to hide.
   const privacy = options.privacy?.mode === "off" ? undefined : options.privacy;
-  const pseudoColumns = new Set(
-    privacy === undefined ? [] : columns.filter((c) => classify(c, privacy).pseudonymize),
-  );
+  const recorder = createRecorder();
 
   /**
    * Columns whose values are an entity's LABEL because `--resolve` rewrote them to `.ToString`.
@@ -221,12 +221,16 @@ export function resolveResultTable(raw: RawResultTable, options: ResolveOptions 
       ? aligned
       : aligned.map((v, i) => {
           const token = columns[i] as string;
-          // An identity is identifying whatever its column is called, so it is judged by VALUE.
-          const sensitive =
-            pseudoColumns.has(token) || labelColumns.has(token) || isIdentityValue(v);
-          if (!sensitive) return v;
+          // One decision function for every path (privacy.ts `sensitivity`). Called per cell because
+          // an identity is only visible in the VALUE; the name-based half is memoized on the policy,
+          // so this costs a map lookup and a shape check rather than a re-classification.
+          const decision = sensitivity(
+            { name: token, value: v, isEntityLabel: labelColumns.has(token) },
+            privacy,
+          );
+          if (!decision.pseudonymize) return v;
           replaced.add(token);
-          return surrogate(v, token, privacy, options.handles);
+          return surrogate(v, token, privacy, recorder);
         });
 
     return { entity, values };
@@ -240,6 +244,7 @@ export function resolveResultTable(raw: RawResultTable, options: ResolveOptions 
     totalElements: raw.totalElements,
     // Report what was actually replaced, not what a name-based rule predicted.
     pseudonymized: [...replaced],
+    mintedHandles: recorder.entries(),
   };
 }
 

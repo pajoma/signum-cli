@@ -151,6 +151,14 @@ export async function run(argv: readonly string[], io: Io): Promise<ExitCode> {
     io.err(`warning: caller context loosened to '${caller.context}' by override\n`);
   }
 
+  // Help FIRST, before anything reads configuration. AC-60.2 promises static help works with no
+  // config at all, and resolving the privacy policy here meant `signum help` stat-ed and read
+  // privacy.json — and a malformed one printed "warning: could not read …" over plain help.
+  // Nothing above this line touches the filesystem.
+  if (args.kind === "none" || args.flags.help || args.command === "help") {
+    return showHelp(args, io);
+  }
+
   const privacy = resolvePolicy({
     callerIsAgent: caller.context === "agent",
     requested: args.flags.pseudonymize !== undefined ? parseMode(args.flags.pseudonymize) : undefined,
@@ -169,11 +177,6 @@ export async function run(argv: readonly string[], io: Io): Promise<ExitCode> {
     openData: makeDataOpener(caller, args.flags.allowAgentData, io.out, privacy.mode !== "off"),
     privacy,
   };
-
-  // `--help` anywhere, and bare invocation, both land on help (AC-60.1).
-  if (args.kind === "none" || args.flags.help || args.command === "help") {
-    return showHelp(args, io);
-  }
 
   switch (args.kind) {
     case "builtin":

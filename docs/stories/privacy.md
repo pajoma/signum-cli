@@ -109,6 +109,10 @@ more protection than exists:
 - **Heuristics are incomplete and locale-dependent**, always.
 - **Metadata can identify.** Type names, query names, and validation messages carry context even when values are surrogates.
 - **Aggregates leak.** Row counts and distributions are informative even with every value replaced.
+- **Low cardinality defeats a stable surrogate.** Counting rows per surrogate re-identifies the mapping
+  when a column has few distinct values — `3 / 1 / 1` over a `State` column is enough. Inherent to
+  AC-52.1's stability requirement, so it is stated in the AC-52.6 disclosure rather than pretended
+  away, and it is why `strict` protects a low-cardinality column less than its name suggests.
 - **Detection is spoofable**, which is precisely why the default fails closed and why `strict` exists.
 - **This is not a compliance control.** It reduces exposure; it does not make a given use lawful.
 

@@ -167,3 +167,38 @@ describe("the data-output boundary cannot be bypassed inside src/", () => {
     }
   });
 });
+
+/**
+ * Guard-rails for the two rules this codebase has already had to learn twice.
+ *
+ * A Brooks review found four copies of the sensitivity decision, which had drifted into two real
+ * defects — introspection contradicting behaviour, and `get` emitting entity references while
+ * reporting it had protected them. These assert the shape that prevents a fifth copy.
+ */
+describe("the sensitivity decision has exactly one home", () => {
+  async function sources(): Promise<Array<{ path: string; text: string }>> {
+    const glob = new Bun.Glob("src/**/*.ts");
+    const out: Array<{ path: string; text: string }> = [];
+    for await (const path of glob.scan(".")) out.push({ path, text: await Bun.file(path).text() });
+    return out;
+  }
+
+  it("nothing outside privacy.ts decides sensitivity for itself", async () => {
+    // The heuristic word list and the identity predicate are implementation details of the one
+    // decision function. A caller reaching for them is a caller about to disagree with it.
+    const offenders = (await sources())
+      .filter((f) => f.path !== "src/core/privacy.ts")
+      .filter((f) => /SENSITIVE_WORDS|isIdentityValue\s*\(/.test(f.text))
+      .map((f) => f.path);
+    expect(offenders).toEqual([]);
+  });
+
+  it("both data paths persist minted handles before emitting", async () => {
+    // A handle printed but not stored is permanently unresolvable, and we would have caused it
+    // (AC-53.5). The mapping now rides on the result rather than an optional parameter, but nothing
+    // stops a caller from ignoring it — so assert that neither does.
+    for (const path of ["src/commands/query.ts", "src/commands/get.ts"]) {
+      expect(await Bun.file(path).text()).toContain("persistHandles(ctx,");
+    }
+  });
+});

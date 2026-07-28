@@ -15,7 +15,7 @@ import { renderResultTable, renderDataDocument, renderDocument } from "../core/o
 import { resolveResultTable, type RawResultTable } from "../core/resulttable.ts";
 import { loadMetadata, resolveQueryKey } from "../core/metadata.ts";
 import { fetchDefaultColumns, resolveLiteColumns, validateTokens } from "../core/tokens.ts";
-import { createRecorder, disclosure, isHandle, resolveHandle } from "../core/privacy.ts";
+import { disclosure, isHandle, resolveHandle } from "../core/privacy.ts";
 import { loadHandles } from "../core/config.ts";
 import { emitCommandEcho, persistHandles } from "./context.ts";
 import { lowerFilterExpressions, parseFilterExpression, type FilterWire } from "../core/filter.ts";
@@ -300,14 +300,11 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
   // The de-interning boundary: nothing downstream sees a raw row (AC-21.1). The requested
   // column order goes in so the hoisted `Entity` column comes back at the position the user
   // asked for, in every format (AC-21.2).
-  const recorder = createRecorder();
-  const table = resolveResultTable(res.body, {
-    requestedColumns, columnLabels, privacy: ctx.privacy, handles: recorder,
-  });
+  const table = resolveResultTable(res.body, { requestedColumns, columnLabels, privacy: ctx.privacy });
 
   // Persist BEFORE emitting. A handle we have printed but not stored is exactly the unresolvable
   // handle AC-53.5 exists to prevent — and we would have created it ourselves.
-  persistHandles(ctx, recorder.entries());
+  persistHandles(ctx, table.mintedHandles);
 
   renderResultTable(table, {
     format: ctx.format,

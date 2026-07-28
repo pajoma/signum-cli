@@ -16,7 +16,7 @@ import {
   findType, loadMetadata, queryableTypes, suggestTypes, type Metadata, type TypeInfo,
 } from "../core/metadata.ts";
 import { flag, resolveTarget } from "./context.ts";
-import { classify } from "../core/privacy.ts";
+import { sensitivity } from "../core/privacy.ts";
 import { fetchSubTokens, validateTokens } from "../core/tokens.ts";
 
 async function metadata(ctx: Ctx): Promise<Metadata> {
@@ -188,22 +188,20 @@ async function explain(ctx: Ctx, md: Metadata, subject: string | undefined): Pro
   // it (ADR 0009 Decision 1).
   if (segments.length === 1 && flag(ctx, "privacy")) {
     const rows = root.members.map((m) => {
-      const c = classify(m.name, ctx.privacy);
-
-      // A member whose TYPE resolves to another reflected type is an entity reference, and those are
-      // identities by construction — pseudonymized whatever they are called (AC-52.12). Without this
-      // the introspection would say "User will not be hidden" while the query hid it, which defeats
-      // the entire point of being able to ask (AC-52.11).
-      const isIdentity =
-        ctx.privacy.mode !== "off" &&
-        m.type !== undefined &&
-        findType(md, m.type) !== undefined;
+      // The same decision function the query path uses, given the one thing only this path has:
+      // a member's declared type, and the metadata to tell whether it denotes an entity. Sharing
+      // the function is what keeps introspection honest — it cannot disagree with behaviour if
+      // there is only one rule (AC-52.11).
+      const c = sensitivity(
+        { name: m.name, memberType: m.type, isEntityType: (t) => findType(md, t) !== undefined },
+        ctx.privacy,
+      );
 
       return {
         member: m.name,
         type: m.type ?? null,
-        pseudonymize: c.pseudonymize || isIdentity,
-        reason: c.pseudonymize ? c.reason : isIdentity ? "identity" : c.reason,
+        pseudonymize: c.pseudonymize,
+        reason: c.reason,
         matched: c.matched ?? null,
       };
     });

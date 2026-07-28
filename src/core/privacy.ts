@@ -90,6 +90,8 @@ export interface PrivacyPolicy {
   secret: () => string;
   /** Where the policy came from, for `--privacy` output. */
   origin: "default" | "profile";
+  /** Per-run cache for the name-based half of the decision. Cells are many; names are few. */
+  memo: Map<string, Classification>;
 }
 
 export type ClassificationReason =
@@ -109,35 +111,94 @@ export interface Classification {
   matched?: string;
 }
 
+export interface SensitivityInput {
+  /** Member name or column token. */
+  name: string;
+  /**
+   * The value, where one exists. An entity reference is an identity whatever its column is called,
+   * and only the value can tell us (AC-52.12).
+   */
+  value?: unknown;
+  /** The member's declared type, from reflection metadata, for the introspection path. */
+  memberType?: string | undefined;
+  /** True when this column's values are an entity's LABEL because `--resolve` rewrote it. */
+  isEntityLabel?: boolean;
+  /** Does this type name denote a reflected entity type? Supplied by callers that hold metadata. */
+  isEntityType?: ((typeName: string) => boolean) | undefined;
+}
+
 /**
- * Decide whether one token or member name is pseudonymized, and **why**.
+ * **The** sensitivity decision. One function, every path.
  *
- * The reason is not decoration: REQ-059 (#89) exposes it so an agent can explain what will be
- * hidden without being able to change it, and so a human can spot a misfire.
+ * There were four of these — name-based here, name+value+label in `resolveResultTable`,
+ * name+member-type in `explain --privacy`, and name-only in `pseudonymizeDocument`. They drifted
+ * twice: introspection contradicted behaviour, and `get` emitted entity references in full under the
+ * default policy while claiming it had pseudonymized nothing. A rule with four homes is a rule that
+ * will disagree with itself, so this is now the only producer of a `Classification`.
+ *
+ * Precedence, and each step earns its place:
+ *   1. mode off                       — nothing to decide
+ *   2. explicit allowlist             — a human said this one is fine, and that beats every
+ *                                       inference including the identity rule, which is what makes
+ *                                       allowlisting `Entity` a usable workaround
+ *   3. explicit always                — a human said this one is not
+ *   4. identity (value / type / label) — identifying by construction, whatever it is called
+ *   5. name heuristics                — English and German member names (AC-52.4)
+ *   6. strict                         — allowlist-only, so anything left is replaced
+ *
+ * The reason is not decoration: REQ-059 exposes it so an agent can explain what will be hidden
+ * without being able to change it, and so a human can spot a misfire.
  */
-export function classify(token: string, policy: PrivacyPolicy): Classification {
+export function sensitivity(input: SensitivityInput, policy: PrivacyPolicy): Classification {
   if (policy.mode === "off") return { pseudonymize: false, reason: "mode-off" };
+
+  const byName = nameDecision(input.name, policy);
+  // An explicit allowlist wins outright — see precedence note above.
+  if (byName.reason === "policy-allow") return byName;
+  if (byName.reason === "policy-always") return byName;
+
+  if (isIdentityInput(input)) return { pseudonymize: true, reason: "identity" };
+
+  return byName;
+}
+
+/** Name-only half, memoized per policy: the answer cannot vary by row, and cells are many. */
+function nameDecision(token: string, policy: PrivacyPolicy): Classification {
+  const cached = policy.memo.get(token);
+  if (cached !== undefined) return cached;
 
   const segment = token.split(".").filter((s) => s !== "").pop() ?? token;
   const lower = segment.toLowerCase();
   const full = token.toLowerCase();
 
+  let result: Classification;
   // Explicit policy beats heuristics in both directions (AC-52.5).
   if (policy.allow.has(lower) || policy.allow.has(full)) {
-    return { pseudonymize: false, reason: "policy-allow" };
-  }
-  if (policy.always.has(lower) || policy.always.has(full)) {
-    return { pseudonymize: true, reason: "policy-always" };
+    result = { pseudonymize: false, reason: "policy-allow" };
+  } else if (policy.always.has(lower) || policy.always.has(full)) {
+    result = { pseudonymize: true, reason: "policy-always" };
+  } else {
+    const hit = words(segment).find((w) => SENSITIVE_WORDS.has(w));
+    if (hit !== undefined) {
+      result = { pseudonymize: true, reason: "heuristic-match", matched: hit };
+    } else if (policy.mode === "strict") {
+      // strict is allowlist-only: anything not explicitly permitted is replaced (AC-52.3, AC-52.8).
+      result = { pseudonymize: true, reason: "strict-default" };
+    } else {
+      result = { pseudonymize: false, reason: "not-sensitive" };
+    }
   }
 
-  for (const w of words(segment)) {
-    if (SENSITIVE_WORDS.has(w)) return { pseudonymize: true, reason: "heuristic-match", matched: w };
-  }
+  policy.memo.set(token, result);
+  return result;
+}
 
-  // strict is allowlist-only: anything not explicitly permitted is pseudonymized (AC-52.3, AC-52.8).
-  if (policy.mode === "strict") return { pseudonymize: true, reason: "strict-default" };
-
-  return { pseudonymize: false, reason: "not-sensitive" };
+/** The three ways we can know a member denotes an entity, none of which is its name. */
+function isIdentityInput(input: SensitivityInput): boolean {
+  if (input.isEntityLabel === true) return true;
+  if (input.value !== undefined && isIdentityValue(input.value)) return true;
+  if (input.memberType !== undefined && input.isEntityType?.(input.memberType) === true) return true;
+  return false;
 }
 
 /**
@@ -398,6 +459,7 @@ export function resolvePolicy(opts: ResolvePolicyOptions): PrivacyPolicy {
       return () => (cached ??= loadSecret(opts.env));
     })(),
     origin,
+    memo: new Map(),
   };
 }
 
@@ -413,8 +475,10 @@ export function disclosure(policy: PrivacyPolicy, pseudonymizedTokens: readonly 
     `note: pseudonymized (${policy.mode}): ${[...new Set(pseudonymizedTokens)].join(", ")}`,
     "Surrogates are stable per profile, so the same value reads the same across commands.",
     "Coverage is INCOMPLETE: free text is not scanned, heuristics are locale-dependent, and",
-    "aggregates can still identify. Pseudonymized data remains personal data (GDPR Art. 4(5));",
-    "this is not a compliance control. See `signum help pseudonymization`.",
+    "aggregates can still identify. A surrogate over FEW DISTINCT VALUES is also reversible by",
+    "counting rows — stability is what makes grouping work, and what makes that possible.",
+    "Pseudonymized data remains personal data (GDPR Art. 4(5)); this is not a compliance control.",
+    "See `signum help pseudonymization`.",
     "",
   ].join("\n");
 }
@@ -436,10 +500,11 @@ const STRUCTURAL_KEYS = new Set(["type", "entitytype", "modeltype", "id", "ticks
 export function pseudonymizeDocument(
   value: unknown,
   policy: PrivacyPolicy,
-  recorder?: HandleRecorder,
-  seen: string[] = [],
-): { value: unknown; pseudonymized: string[] } {
-  if (policy.mode === "off") return { value, pseudonymized: [] };
+): { value: unknown; pseudonymized: string[]; handles: Readonly<Record<string, string>> } {
+  if (policy.mode === "off") return { value, pseudonymized: [], handles: {} };
+
+  const recorder = createRecorder();
+  const seen: string[] = [];
 
   const walk = (node: unknown, path: string): unknown => {
     if (Array.isArray(node)) return node.map((n) => walk(n, path));
@@ -451,8 +516,14 @@ export function pseudonymizeDocument(
         out[key] = v;
         continue;
       }
-      const decision = classify(key, policy);
-      if (decision.pseudonymize && (v === null || typeof v !== "object")) {
+      // The value is passed in, which is what fixes the leak: a nested Lite is an identity even
+      // though `Customer` matches no name heuristic. Previously this path saw the NAME only, so
+      // `get` emitted real entity types, real ids and real labels under the default policy — and
+      // reported that it had pseudonymized nothing.
+      const decision = sensitivity({ name: key, value: v }, policy);
+      if (decision.pseudonymize) {
+        // A sensitive value is replaced WHOLE, object or not. Recursing into something already
+        // judged sensitive would emit its parts while claiming the whole was protected.
         out[key] = surrogate(v, key, policy, recorder);
         seen.push(key);
       } else {
@@ -463,5 +534,5 @@ export function pseudonymizeDocument(
   };
 
   const result = walk(value, "");
-  return { value: result, pseudonymized: [...new Set(seen)] };
+  return { value: result, pseudonymized: [...new Set(seen)], handles: recorder.entries() };
 }
