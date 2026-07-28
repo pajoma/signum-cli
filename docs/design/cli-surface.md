@@ -134,7 +134,7 @@ signum ship order --help          # same, reached the way you would expect
 | `signum auth token` | m2 | Print the stored token (guarded; see §7). |
 | `signum config get-contexts` · `use-context` · `set-context` · `current-context` | m2 | Target selection. |
 | `signum mcp` | m3 | Serve the command set over MCP on stdio. |
-| `signum de-pseudonymize <ref…>` | m2 | Human-only resolution of `ref:` handles (AC-53.4). Refused under an agent context. |
+| `signum unmask <ref…>` | m2 | Human-only resolution of `ref:` handles (AC-53.4). Refused under an agent context. |
 | `signum auth key create` · `show` | m3 | API-key provisioning. Not applicable to the target app — no `Signum.Rest` ([target profile](../target-application.md)). |
 | `signum completion <shell>` | m3 | Shell completion. |
 | `signum version` | **m1** | Version, and the target app's version when reachable. |

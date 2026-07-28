@@ -238,7 +238,7 @@ export function resolveHandle(handle: string, handles: Readonly<Record<string, s
     throw new UsageError(`cannot resolve ${handle}`, {
       hint:
         "Handles are local, per profile, and only valid for the surrogate secret that produced\n" +
-        "them — so one from another profile, or from before `de-pseudonymize --clear`, is gone for\n" +
+        "them — so one from another profile, or from before `unmask --clear`, is gone for\n" +
         "good. Re-run the query that produced it to mint a fresh handle.",
     });
   }

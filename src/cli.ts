@@ -19,7 +19,7 @@ import { runDiscover } from "./commands/discover.ts";
 import { runQuery } from "./commands/query.ts";
 import { runGet } from "./commands/get.ts";
 import { runCache } from "./commands/cache.ts";
-import { runDePseudonymize } from "./commands/depseudonymize.ts";
+import { runUnmask } from "./commands/unmask.ts";
 
 export interface Io {
   out: (s: string) => void;
@@ -202,9 +202,9 @@ export async function run(argv: readonly string[], io: Io): Promise<ExitCode> {
         case "get":
           assertKnownFlags(args, ["get"]);
           return await runGet(ctx);
-        case "de-pseudonymize":
-          assertKnownFlags(args, ["de-pseudonymize"]);
-          return runDePseudonymize(ctx);
+        case "unmask":
+          assertKnownFlags(args, ["unmask"]);
+          return runUnmask(ctx);
         case "cache": {
           const sub = args.positionals[0]?.toLowerCase();
           if (sub === "show" || sub === "clear" || sub === "path") assertKnownFlags(args, ["cache", sub]);

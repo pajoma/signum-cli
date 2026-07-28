@@ -1316,14 +1316,14 @@ describe("ref: handles, end to end (REQ-058)", () => {
     rmSync(d, { recursive: true, force: true });
   });
 
-  it("de-pseudonymize resolves a handle for a human", async () => {
+  it("unmask resolves a handle for a human", async () => {
     const d = profile();
     const q = await cli(["query", "Order", "--pseudonymize", "strict", "--json"], {
       env: { SIGNUM_CONFIG_DIR: d, CLAUDECODE: "1" },
     });
     const handle = String((JSON.parse(q.out) as Array<Record<string, unknown>>)[0]?.["Entity"]);
 
-    const r = await cli(["de-pseudonymize", handle], { tty: true, env: { SIGNUM_CONFIG_DIR: d } });
+    const r = await cli(["unmask", handle], { tty: true, env: { SIGNUM_CONFIG_DIR: d } });
     expect(r.code).toBe(ExitCode.Ok);
     expect(r.out).toContain("Order;42");
     rmSync(d, { recursive: true, force: true });
@@ -1335,7 +1335,7 @@ describe("ref: handles, end to end (REQ-058)", () => {
     // because resolving a handle is the act of removing the protection.
     const d = profile();
     saveHandles({ "ref:aaaaaaaaaaaa": "Order;42" }, { SIGNUM_CONFIG_DIR: d } as unknown as NodeJS.ProcessEnv);
-    const r = await cli(["de-pseudonymize", "ref:aaaaaaaaaaaa"], {
+    const r = await cli(["unmask", "ref:aaaaaaaaaaaa"], {
       env: { SIGNUM_CONFIG_DIR: d, CLAUDECODE: "1" },
     });
     expect(r.code).toBe(ExitCode.Policy);
@@ -1347,20 +1347,20 @@ describe("ref: handles, end to end (REQ-058)", () => {
     const d = profile();
     saveHandles({ "ref:aaaaaaaaaaaa": "Order;42" }, { SIGNUM_CONFIG_DIR: d } as unknown as NodeJS.ProcessEnv);
 
-    const list = await cli(["de-pseudonymize", "--list"], { tty: true, env: { SIGNUM_CONFIG_DIR: d } });
+    const list = await cli(["unmask", "--list"], { tty: true, env: { SIGNUM_CONFIG_DIR: d } });
     expect(list.out).toContain("1 handle stored");
     expect(list.out).not.toContain("Order;42"); // a count is not a disclosure
 
-    const cleared = await cli(["de-pseudonymize", "--clear"], { tty: true, env: { SIGNUM_CONFIG_DIR: d } });
+    const cleared = await cli(["unmask", "--clear"], { tty: true, env: { SIGNUM_CONFIG_DIR: d } });
     expect(cleared.out).toContain("removed");
-    const after = await cli(["de-pseudonymize", "ref:aaaaaaaaaaaa"], { tty: true, env: { SIGNUM_CONFIG_DIR: d } });
+    const after = await cli(["unmask", "ref:aaaaaaaaaaaa"], { tty: true, env: { SIGNUM_CONFIG_DIR: d } });
     expect(after.code).toBe(ExitCode.Usage);
     expect(after.err).toContain("cannot resolve");
     rmSync(d, { recursive: true, force: true });
   });
 
   it("rejects something that is not a handle rather than pretending to resolve it", async () => {
-    const r = await cli(["de-pseudonymize", "Order;42"], { tty: true, env: { SIGNUM_CONFIG_DIR: configDir } });
+    const r = await cli(["unmask", "Order;42"], { tty: true, env: { SIGNUM_CONFIG_DIR: configDir } });
     expect(r.code).toBe(ExitCode.Usage);
     expect(r.err).toContain("not a handle");
   });

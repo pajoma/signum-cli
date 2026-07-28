@@ -29,7 +29,7 @@ export const BUILT_INS = [
   "query",
   "get",
   "cache",
-  "de-pseudonymize",
+  "unmask",
 ] as const;
 
 export type BuiltIn = (typeof BUILT_INS)[number];

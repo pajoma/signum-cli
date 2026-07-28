@@ -309,7 +309,7 @@ export function clearMetadataCache(url: string | undefined, env?: NodeJS.Process
  * is only meaningful against the secret that produced it, so the two must live and die together.
  *
  * **This file is the one place real identities and their surrogates sit side by side.** It is never
- * emitted — not to stdout, not to `--json`, not to a trace (AC-53.3). `de-pseudonymize` reads it and
+ * emitted — not to stdout, not to `--json`, not to a trace (AC-53.3). `unmask` reads it and
  * prints one answer at a time, for a human.
  */
 export function handlesPath(env?: NodeJS.ProcessEnv): string {
@@ -329,7 +329,7 @@ export function loadHandles(env?: NodeJS.ProcessEnv): Record<string, string> {
     return out;
   } catch {
     // A corrupt store must not stop the CLI working; it means handles stop resolving, which
-    // `de-pseudonymize` reports honestly rather than guessing (AC-53.5).
+    // `unmask` reports honestly rather than guessing (AC-53.5).
     return {};
   }
 }

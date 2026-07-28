@@ -1,5 +1,5 @@
 /**
- * `signum de-pseudonymize <ref:…> [<ref:…> …]` · `--list` · `--clear`
+ * `signum unmask <ref:…> [<ref:…> …]` · `--list` · `--clear`
  *
  * REQ-058 (#52) · STORY-53 · AC-53.4, AC-53.6.
  *
@@ -26,7 +26,7 @@ import { flag } from "./context.ts";
 /** AC-53.4: a human resolves handles, not the agent whose protection they are. */
 function assertHuman(ctx: Ctx): void {
   if (ctx.caller.context !== "agent" || ctx.args.flags.allowAgentData) return;
-  throw new PolicyError("de-pseudonymize is for a human, not a detected AI caller", {
+  throw new PolicyError("unmask is for a human, not a detected AI caller", {
     hint:
       "Signals: " + ctx.caller.signals.join("; ") + ".\n" +
       "Resolving a handle removes the protection the handle exists to provide, so it is not the\n" +
@@ -36,7 +36,7 @@ function assertHuman(ctx: Ctx): void {
   });
 }
 
-export function runDePseudonymize(ctx: Ctx): ExitCode {
+export function runUnmask(ctx: Ctx): ExitCode {
   if (flag(ctx, "clear")) {
     // Lifetime, made explicit (AC-53.6): clearing is how a handle expires, and it is irreversible —
     // every outstanding handle stops resolving, which `resolveHandle` then reports honestly.
@@ -64,11 +64,11 @@ export function runDePseudonymize(ctx: Ctx): ExitCode {
 
   const refs = ctx.args.positionals;
   if (refs.length === 0) {
-    throw new UsageError("`de-pseudonymize` needs at least one ref: handle", {
+    throw new UsageError("`unmask` needs at least one ref: handle", {
       hint:
-        `signum de-pseudonymize ${HANDLE_PREFIX}7f3a1c2b4d5e\n` +
-        "signum de-pseudonymize --list     how many are stored\n" +
-        "signum de-pseudonymize --clear    forget them all",
+        `signum unmask ${HANDLE_PREFIX}7f3a1c2b4d5e\n` +
+        "signum unmask --list     how many are stored\n" +
+        "signum unmask --clear    forget them all",
     });
   }
 

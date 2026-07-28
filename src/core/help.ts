@@ -197,9 +197,9 @@ export const COMMANDS: CommandSpec[] = [
     examples: ["signum get Order 42", 'signum get "Order;42" --json'],
   },
   {
-    name: "de-pseudonymize",
+    name: "unmask",
     summary: "Resolve local ref: handles back to the records they stand for",
-    usage: "signum de-pseudonymize <ref:...> [<ref:...> ...] | --list | --clear",
+    usage: "signum unmask <ref:...> [<ref:...> ...] | --list | --clear",
     milestone: "m2",
     description:
       "Pseudonymized output emits entity identities as opaque local handles (ref:...) rather than " +
@@ -215,9 +215,9 @@ export const COMMANDS: CommandSpec[] = [
       { name: "clear", summary: "Forget them all - every outstanding handle stops resolving" },
     ],
     examples: [
-      "signum de-pseudonymize ref:7f3a1c2b4d5e",
-      "signum de-pseudonymize --list",
-      "signum de-pseudonymize --clear",
+      "signum unmask ref:7f3a1c2b4d5e",
+      "signum unmask --list",
+      "signum unmask --clear",
     ],
   },
   {
@@ -423,8 +423,8 @@ export const TOPICS: Record<string, string> = {
     "  so an agent can act on a record it cannot identify:",
     "",
     "    signum get ref:7f3a1c2b4d5e         resolved locally, never sent to the server",
-    "    signum de-pseudonymize ref:7f3a...  what it stands for (human only)",
-    "    signum de-pseudonymize --clear      forget every handle",
+    "    signum unmask ref:7f3a...  what it stands for (human only)",
+    "    signum unmask --clear      forget every handle",
     "",
     "  LIMITS, and they are real: free text is never scanned, so a comment field",
     "  containing a name defeats this entirely. Heuristics both miss and misfire.",
