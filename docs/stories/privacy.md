@@ -67,6 +67,8 @@ that an agent can still group and reason across rows without seeing real persona
 - AC-52.3: Three modes — `off`, `heuristic` (default under `agent`), and `strict` (allowlist only; everything not explicitly permitted is pseudonymized).
 - AC-52.4: Heuristics cover common personal-data member names in **English and German** at minimum (`name`/`nachname`, `email`, `phone`/`telefon`, `address`/`anschrift`, `birthdate`/`geburtsdatum`, `iban`, `taxid`/`steuernummer`), because the target deployment is German-language.
 - AC-52.5: An explicit per-profile policy can add and remove tokens and types, and **overrides** heuristics.
+- AC-52.10: The policy is **resolved locally and is never a per-call parameter.** A caller cannot request, weaken or waive pseudonymization; only a human can, via `--i-understand-data-goes-to-a-model` or by editing the profile. Rationale: an agent-supplied policy puts the protection in the hands of the party whose interest is to read the data, and a malicious row value could talk an agent into omitting a flag it should never have been able to set ([ADR 0009](../decisions/0009-agent-mediated-privacy.md) Decision 1).
+- AC-52.11: `signum explain <Type> --privacy` reports per member whether it would be pseudonymized and **why** — heuristic match, explicit policy, or allowlisted under `strict` (REQ-059). Read-only and value-free, so it is safe under `agent`. This is how an agent explains what will be hidden without being able to change it.
 - AC-52.6: Output **states** what was pseudonymized and warns that heuristic coverage is incomplete. Silent partial protection is worse than none, because it invites false confidence.
 - AC-52.7: Type preservation where it matters: a pseudonymized date stays date-shaped and a number stays numeric, so downstream parsing does not break.
 - AC-52.8: `strict` mode is available for anyone needing a defensible position rather than best effort.
@@ -89,6 +91,8 @@ the app; pseudonymizing it naively would break the ability to act at all.
 - AC-53.2: Any argument accepting a `Lite` also accepts `ref:…`, resolving it locally **before** the request is built.
 - AC-53.3: The surrogate→real mapping is stored locally with `0600` permissions and is **never** included in stdout, `--json`, MCP tool results, traces, logs, or telemetry.
 - AC-53.4: A `de-pseudonymize` command lets a **human** resolve surrogates locally, for auditing what an agent acted on.
+- AC-53.8: Surrogate scope defaults to **per-profile** where the caller context is `agent`, not per-run. A multi-invocation workflow — discover the type, resolve a lookup entity, then query rows — otherwise sees a different surrogate for the same person at each step and cannot correlate them at all, which defeats the purpose of surrogates over redaction ([ADR 0009](../decisions/0009-agent-mediated-privacy.md) open question 1).
+- AC-53.9: An output mode emits a **runnable `signum` command instead of rows** (REQ-078), so an agent can hand a human an exact, inspectable invocation and never see the result. The human runs it where the context is `interactive` and no gate applies. This is the sound half of "pipe it or print the command": an agent that can pipe real values has not been constrained at all.
 - AC-53.5: An unresolvable or expired `ref:` fails clearly rather than being forwarded as a literal string.
 - AC-53.6: Handle scope and lifetime are documented; a stale handle after a scope change is an explicit error, never a silent mismatch.
 - AC-53.7: Mutations performed via a `ref:` handle are recorded in the local audit log (AC-46.6) with the **real** target, so an operator can reconstruct what actually happened.
@@ -116,4 +120,4 @@ more protection than exists:
 | STORY-50 Know who is asking | REQ-056 | `m1` |
 | STORY-51 No data to a model by default | REQ-056 | `m1` |
 | STORY-52 Pseudonymize, do not redact | REQ-057 | `m2` |
-| STORY-53 Capable agents without real ids | REQ-058 | `m2` |
+| STORY-53 Capable agents without real ids | REQ-058, REQ-059, REQ-078 | `m2` |
