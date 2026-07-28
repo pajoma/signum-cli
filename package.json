@@ -1,6 +1,6 @@
 {
   "name": "signum-cli",
-  "version": "0.1.0-b.1",
+  "version": "0.1.0-b.2",
   "private": true,
   "type": "module",
   "description": "Command-line client for Signum Framework applications",
