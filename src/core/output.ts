@@ -51,17 +51,60 @@ function scalar(v: unknown): string {
 }
 
 /**
+ * The human-readable label of a Lite or entity, mirroring the framework's own renderer
+ * (`Signum.Entities.ts:194-224` `getToString`) in the same order:
+ *
+ *   1. `entity` present  -> that entity's own label
+ *   2. `model` a string  -> the model (the common case for a query result)
+ *   3. `model` an object -> that model's label
+ *   4. otherwise         -> undefined; the caller falls back to the key
+ *
+ * Note there is **no `toStr` on a Lite** — `LiteJsonConverter.cs:23-67` writes `EntityType`, `id`,
+ * an optional `model` and an optional `entity`, and nothing else. (An earlier version of this file
+ * assumed `toStr`, which came from a hand-written test fixture rather than from the framework.)
+ * `toStr` does exist on a full **entity**, which is why step 1 finds it.
+ */
+function entityLabel(v: unknown): string | undefined {
+  if (v === null || typeof v !== "object") return undefined;
+  const o = v as Record<string, unknown>;
+
+  const inner = o["entity"];
+  if (inner !== null && inner !== undefined && typeof inner === "object") {
+    const t = (inner as Record<string, unknown>)["toStr"];
+    if (typeof t === "string" && t !== "") return t;
+  }
+
+  const model = o["model"];
+  if (typeof model === "string" && model !== "") return model;
+  if (model !== null && model !== undefined && typeof model === "object") {
+    const t = (model as Record<string, unknown>)["toStr"];
+    if (typeof t === "string" && t !== "") return t;
+  }
+
+  const own = o["toStr"];
+  if (typeof own === "string" && own !== "") return own;
+
+  return undefined;
+}
+
+/**
  * One cell of a FLAT format (table, csv, tsv).
  *
- * A `Lite<T>` — which the reinserted `Entity` column always is, and which any entity-valued
- * column may be — has no flat representation except its Lite key. Serializing the object into a
- * CSV cell (`"{""EntityType"":""Order"",""id"":42,…}"`, and truncated to nothing useful in the
- * human table) technically preserves the identity while making it unusable. The Lite key is the
- * identity, it is what `-o name` emits, and it pipes straight back into `signum get "Order;42"`.
- * json/ndjson keep the full object — a structured format loses nothing by staying structured.
+ * A `Lite<T>` has no flat representation except a key or a label, and which one is useful depends
+ * on WHICH column it is:
+ *
+ *   • the reinserted `Entity` column is the row's identity — its value is that you can paste it
+ *     into `signum get "Order;42"`, and `-o name` emits exactly that. Always the key.
+ *   • any other entity-valued column (`User`, `Skill`, …) is being read, not actioned. `User;102`
+ *     tells a human nothing; the label does. Prefer the label, fall back to the key.
+ *
+ * Serializing the object instead (`"{""EntityType"":""Order"",""id"":42,…}"`, truncated to nothing
+ * useful in a table) preserves the identity while making it unusable. json/ndjson keep the full
+ * object — a structured format loses nothing by staying structured.
  */
-function flatCell(v: unknown): string {
-  return liteKey(v) ?? scalar(v);
+function flatCell(v: unknown, isEntityColumn: boolean): string {
+  if (isEntityColumn) return liteKey(v) ?? scalar(v);
+  return entityLabel(v) ?? liteKey(v) ?? scalar(v);
 }
 
 /** Lite keys are `TypeName;id`; `-o name` emits them bare for piping. */
@@ -87,7 +130,11 @@ function delimitedHeader(table: ResolvedTable, sep: string): string {
 
 function delimited(table: ResolvedTable, sep: string): string {
   const lines = [delimitedHeader(table, sep).slice(0, -1)]; // header, without its own trailing \n yet
-  for (const row of table.rows) lines.push(row.values.map((v) => csvEscape(flatCell(v), sep)).join(sep));
+  for (const row of table.rows) {
+    lines.push(
+      row.values.map((v, i) => csvEscape(flatCell(v, i === table.entityIndex), sep)).join(sep),
+    );
+  }
   return lines.join("\n") + "\n";
 }
 
@@ -101,8 +148,8 @@ function renderTable(table: ResolvedTable, color: boolean): string {
   if (table.rows.length === 0) return "";
   // Truncation applies ONLY to the human table form; machine formats are never truncated (AC-22.4).
   const cells = table.rows.map((r) =>
-    r.values.map((v) => {
-      const s = flatCell(v);
+    r.values.map((v, i) => {
+      const s = flatCell(v, i === table.entityIndex);
       return s.length > MAX_CELL ? s.slice(0, MAX_CELL - 1) + "…" : s;
     }),
   );

@@ -234,3 +234,31 @@ export async function fetchDefaultColumns(
     .filter((t) => t.fullKey !== "" && t.fullKey !== ENTITY_TOKEN)
     .filter((t) => t.kind !== "Aggregate" && t.kind !== "TimeSeries");
 }
+
+/** The server-side token that renders an entity as its label (`EntityToStringToken.Key`). */
+export const TO_STRING_TOKEN = "ToString";
+
+/**
+ * Rewrite entity-valued columns to their label, for `--resolve` (`AC-20.3` ergonomics).
+ *
+ * A column whose `filterType` is `Lite` arrives as `{EntityType, id}` and renders as `User;102`,
+ * which tells a human nothing. Appending `.ToString` asks the SERVER for the label instead —
+ * `EntityToStringToken` (`Key == "ToString"`) — so it costs no extra requests and no N+1: the label
+ * is resolved in the same query, by the database.
+ *
+ * The `Entity` column is left alone deliberately: it is the row's identity, and its whole value is
+ * that it pastes into `signum get`.
+ */
+export function resolveLiteColumns(
+  columns: readonly QueryTokenInfo[],
+): { columns: string[]; labels: Record<string, string> } {
+  const labels: Record<string, string> = {};
+  const out = columns.map((c) => {
+    if (c.filterType !== "Lite" || c.fullKey === ENTITY_TOKEN) return c.fullKey;
+    const rewritten = `${c.fullKey}.${TO_STRING_TOKEN}`;
+    // The reader asked about `User`, not `User.ToString`; the header should say what they asked.
+    labels[rewritten] = c.fullKey;
+    return rewritten;
+  });
+  return { columns: out, labels };
+}
