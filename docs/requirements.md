@@ -339,6 +339,8 @@ Requirement IDs are stable; issue numbers are not a substitute for them.
 | REQ-056 | [#50](https://github.com/pajoma/signum-cli/issues/50) | `m1` | Caller-context detection |
 | REQ-057 | [#51](https://github.com/pajoma/signum-cli/issues/51) | `m2` | Pseudonymization |
 | REQ-058 | [#52](https://github.com/pajoma/signum-cli/issues/52) | `m2` | Local re-identification mapping |
+| REQ-059 | [#89](https://github.com/pajoma/signum-cli/issues/89) | `m2` | Privacy policy introspection |
+| REQ-078 | [#90](https://github.com/pajoma/signum-cli/issues/90) | `m2` | Emit the command instead of the data |
 
 **G. MCP server mode**
 
