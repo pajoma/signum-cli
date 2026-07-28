@@ -79,6 +79,14 @@ export interface ParsedArgs {
   /** Repeatable/unknown flags, kept for command-specific parsing. */
   options: Map<string, string[]>;
   booleans: Set<string>;
+  /**
+   * Every flag name actually TYPED on the command line, before environment fallbacks are applied.
+   *
+   * Needed to tell an explicit `--url` from one inherited from `SIGNUM_URL` or a stored credential:
+   * REQ-078's echo reproduces what the caller gave, and printing a customer's hostname nobody asked
+   * for would be gratuitous.
+   */
+  rawFlagNames: Set<string>;
 }
 
 const FLAGS_WITH_VALUE = new Set([
@@ -91,7 +99,7 @@ const FLAGS_WITH_VALUE = new Set([
 /** Boolean flags — listing one above would make it demand a value. */
 export const BOOLEAN_FLAGS = new Set([
   "with-token", "exists", "count", "all", "yes", "y", "raw", "group",
-  "resolve", "privacy", "list", "clear",
+  "resolve", "privacy", "list", "clear", "as-command",
 ]);
 
 /** Invariant: a flag cannot need a value and be boolean-only at once. Checked by test. */
@@ -119,6 +127,7 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
   const flags = emptyFlags();
   const options = new Map<string, string[]>();
   const booleans = new Set<string>();
+  const rawFlagNames = new Set<string>();
   const positionals: string[] = [];
 
   const push = (name: string, value: string) => {
@@ -139,6 +148,7 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
       const bare = arg.replace(/^--?/, "");
       const eq = bare.indexOf("=");
       const name = (eq === -1 ? bare : bare.slice(0, eq)).toLowerCase();
+      rawFlagNames.add(name);
       let value = eq === -1 ? undefined : bare.slice(eq + 1);
 
       if (value === undefined && FLAGS_WITH_VALUE.has(name)) {
@@ -206,19 +216,19 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
 
   const first = positionals[0];
   if (first === undefined) {
-    return { kind: "none", command: undefined, positionals: [], flags, options, booleans };
+    return { kind: "none", command: undefined, positionals: [], flags, options, booleans, rawFlagNames };
   }
 
   // 1. dot ⇒ canonical operation key
   if (first.includes(".")) {
-    return { kind: "operation-key", command: first, positionals: positionals.slice(1), flags, options, booleans };
+    return { kind: "operation-key", command: first, positionals: positionals.slice(1), flags, options, booleans, rawFlagNames };
   }
   // 2. built-ins always win
   if (isBuiltIn(first)) {
-    return { kind: "builtin", command: first.toLowerCase(), positionals: positionals.slice(1), flags, options, booleans };
+    return { kind: "builtin", command: first.toLowerCase(), positionals: positionals.slice(1), flags, options, booleans, rawFlagNames };
   }
   // 3. verb-noun operation
-  return { kind: "verb-noun", command: first, positionals: positionals.slice(1), flags, options, booleans };
+  return { kind: "verb-noun", command: first, positionals: positionals.slice(1), flags, options, booleans, rawFlagNames };
 }
 
 /**

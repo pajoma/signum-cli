@@ -17,7 +17,7 @@ import { loadMetadata, resolveQueryKey } from "../core/metadata.ts";
 import { fetchDefaultColumns, resolveLiteColumns, validateTokens } from "../core/tokens.ts";
 import { createRecorder, disclosure, isHandle, resolveHandle } from "../core/privacy.ts";
 import { loadHandles } from "../core/config.ts";
-import { persistHandles } from "./context.ts";
+import { emitCommandEcho, persistHandles } from "./context.ts";
 import { lowerFilterExpressions, parseFilterExpression, type FilterWire } from "../core/filter.ts";
 import { opt, optAll, flag, resolveTarget } from "./context.ts";
 import { readFileSync } from "node:fs";
@@ -257,6 +257,14 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
     columns,
     pagination: parsePagination(ctx),
   };
+
+  // REQ-078: print the command a HUMAN should run, and send nothing. Sits beside --explain because
+  // it is the same shape of thing — emit a description instead of doing the work — and it lands
+  // AFTER key validation so the command handed over is one that actually resolves.
+  if (flag(ctx, "as-command")) {
+    emitCommandEcho(ctx);
+    return ExitCode.Ok;
+  }
 
   // --explain prints the request and sends nothing (AC-20.6).
   if (ctx.args.flags.explain) {

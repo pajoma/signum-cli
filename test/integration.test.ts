@@ -1394,6 +1394,101 @@ describe("ref: handles, end to end (REQ-058)", () => {
   });
 });
 
+/**
+ * REQ-078 (#90) — the last piece of the agent-mediated workflow.
+ *
+ * An agent composes the query and hands a human the command rather than reading the rows. Available
+ * under any policy, because a command line is not data.
+ */
+describe("explain --privacy agrees with what the query actually does (AC-52.11)", () => {
+  it("reports an entity-typed member as an identity, matching the value-based rule", async () => {
+    // Introspection that contradicts behaviour is worse than none: an agent would confidently tell a
+    // human "User will not be hidden" while the query hid it.
+    const r = await cli(["explain", "Order", "--privacy", "--json"], {
+      env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" },
+    });
+    expect(r.code).toBe(ExitCode.Ok);
+    const doc = JSON.parse(r.out) as {
+      members: Array<{ member: string; pseudonymize: boolean; reason: string }>;
+    };
+    const state = doc.members.find((m) => m.member === "State");
+    expect(state).toMatchObject({ pseudonymize: false, reason: "not-sensitive" });
+  });
+
+  it("says nothing is hidden when the mode is off", async () => {
+    const r = await cli(["explain", "Order", "--privacy", "--json"], {
+      tty: true, env: { SIGNUM_CONFIG_DIR: configDir },
+    });
+    const doc = JSON.parse(r.out) as { mode: string; members: Array<{ pseudonymize: boolean }> };
+    expect(doc.mode).toBe("off");
+    expect(doc.members.every((m) => !m.pseudonymize)).toBe(true);
+  });
+});
+
+describe("--as-command: emit the invocation, not the data (REQ-078)", () => {
+  it("prints a runnable command and sends NO query", async () => {
+    executeQueryRequests.length = 0;
+    const r = await cli(["query", "Order", "--top", "5", "--as-command"], {
+      env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" },
+    });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.out.trim()).toBe("signum query Order --top 5");
+    // The point: no rows were fetched, so none could leak.
+    expect(executeQueryRequests).toHaveLength(0);
+  });
+
+  it("is allowed under a detected agent with NO acknowledgement — it emits no data", async () => {
+    const r = await cli(["query", "Order", "--as-command"], {
+      env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" },
+    });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.err).not.toContain("refusing to emit");
+    expect(r.err).not.toContain("pseudonymized (");
+  });
+
+  it("carries filters through, quoted so the line runs verbatim", async () => {
+    const r = await cli(["query", "Order", "--filter", "State = Shipped", "--as-command"], {
+      env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" },
+    });
+    expect(r.out.trim()).toBe('signum query Order --filter "State = Shipped"');
+  });
+
+  it("omits the acknowledgement flag — a human at a terminal needs no such assertion", async () => {
+    const r = await cli(["query", "Order", "--as-command", "--i-understand-data-goes-to-a-model"], {
+      env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" },
+    });
+    expect(r.out).not.toContain("i-understand");
+    expect(r.out.trim()).toBe("signum query Order");
+  });
+
+  it("works for get too, and quotes a Lite key", async () => {
+    const r = await cli(["get", "Order;42", "--as-command"], {
+      env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" },
+    });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.out.trim()).toBe('signum get "Order;42"');
+  });
+
+  it("still validates the query key, so the human is never handed a broken command", async () => {
+    // The echo sits AFTER validation deliberately: an unvalidated command would be a footgun
+    // handed to someone who trusted the agent that produced it.
+    const r = await cli(["query", "Nope", "--as-command"], {
+      env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" },
+    });
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("unknown query key");
+  });
+
+  it("is REJECTED on a command that does not support it, rather than ignored", async () => {
+    // The project's own rule since the --filer QA finding: a flag that does nothing must say so.
+    const r = await cli(["types", "--url", baseUrl, "--as-command"], {
+      env: { SIGNUM_CONFIG_DIR: configDir },
+    });
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("--as-command");
+  });
+});
+
 describe("403 disambiguation (STORY-08)", () => {
   it("maps an AuthenticationException 403 to exit 3, not 4", async () => {
     const r = await cli(["query", "Order"], { env: { SIGNUM_CONFIG_DIR: mkdtempSync(join(tmpdir(), "signum-empty-")), SIGNUM_URL: baseUrl } });

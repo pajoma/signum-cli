@@ -94,6 +94,8 @@ export interface PrivacyPolicy {
 
 export type ClassificationReason =
   | "mode-off"
+  /** An entity reference: identifying by construction, whatever the member is called (AC-52.12). */
+  | "identity"
   | "policy-allow"
   | "policy-always"
   | "heuristic-match"

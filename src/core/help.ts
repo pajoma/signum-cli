@@ -181,6 +181,7 @@ export const COMMANDS: CommandSpec[] = [
       { name: "group", summary: "Set groupResults; required for aggregate tokens (Total.Sum, …)" },
       { name: "count", summary: "Return only the row count" },
       { name: "resolve", summary: "Show entity columns by name instead of Type;id (adds .ToString)" },
+      { name: "as-command", summary: "Print the command for a human to run; emit no data (REQ-078)" },
     ],
     examples: [
       'signum query Order --filter "State = Shipped" --top 20',
@@ -188,6 +189,7 @@ export const COMMANDS: CommandSpec[] = [
       'signum query Order --filter "State in Shipped,Delivered"',
       "signum query Order --count",
       "signum query Order --resolve --top 20",
+      'signum query Order --filter "State = Shipped" --as-command',
     ],
   },
   {
@@ -195,7 +197,10 @@ export const COMMANDS: CommandSpec[] = [
     summary: "Retrieve one entity by type and id, or by Lite key",
     usage: "signum get <Type> <id> | signum get <Lite>",
     milestone: "m1",
-    flags: [{ name: "exists", summary: "Check presence only; print nothing" }],
+    flags: [
+      { name: "exists", summary: "Check presence only; print nothing" },
+      { name: "as-command", summary: "Print the command for a human to run; emit no data (REQ-078)" },
+    ],
     examples: ["signum get Order 42", 'signum get "Order;42" --json'],
   },
   {

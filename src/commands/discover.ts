@@ -189,11 +189,21 @@ async function explain(ctx: Ctx, md: Metadata, subject: string | undefined): Pro
   if (segments.length === 1 && flag(ctx, "privacy")) {
     const rows = root.members.map((m) => {
       const c = classify(m.name, ctx.privacy);
+
+      // A member whose TYPE resolves to another reflected type is an entity reference, and those are
+      // identities by construction — pseudonymized whatever they are called (AC-52.12). Without this
+      // the introspection would say "User will not be hidden" while the query hid it, which defeats
+      // the entire point of being able to ask (AC-52.11).
+      const isIdentity =
+        ctx.privacy.mode !== "off" &&
+        m.type !== undefined &&
+        findType(md, m.type) !== undefined;
+
       return {
         member: m.name,
         type: m.type ?? null,
-        pseudonymize: c.pseudonymize,
-        reason: c.reason,
+        pseudonymize: c.pseudonymize || isIdentity,
+        reason: c.pseudonymize ? c.reason : isIdentity ? "identity" : c.reason,
         matched: c.matched ?? null,
       };
     });

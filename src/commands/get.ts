@@ -8,7 +8,7 @@ import type { Ctx } from "../cli.ts";
 import { ExitCode, NotFoundError, UsageError } from "../core/errors.ts";
 import { renderDataDocument, renderDocument } from "../core/output.ts";
 import { findType, loadMetadata, suggestTypes } from "../core/metadata.ts";
-import { flag, persistHandles, resolveTarget } from "./context.ts";
+import { emitCommandEcho, flag, persistHandles, resolveTarget } from "./context.ts";
 import { loadHandles } from "../core/config.ts";
 import { parseLiteKey } from "../core/text.ts";
 import { createRecorder, disclosure, isHandle, pseudonymizeDocument, resolveHandle } from "../core/privacy.ts";
@@ -83,6 +83,11 @@ export async function runGet(ctx: Ctx): Promise<ExitCode> {
   const path = existsOnly
     ? `api/exists/${encodeURIComponent(cleanName)}/${encodeURIComponent(id)}`
     : `api/entity/${encodeURIComponent(cleanName)}/${encodeURIComponent(id)}`;
+
+  if (flag(ctx, "as-command")) {
+    emitCommandEcho(ctx); // REQ-078 — see the note in query.ts
+    return ExitCode.Ok;
+  }
 
   if (ctx.args.flags.explain) {
     renderDocument({ method: "GET", url: `${target.url}/${path}` },
