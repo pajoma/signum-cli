@@ -7,7 +7,7 @@
  */
 
 import type { Ctx } from "../cli.ts";
-import { ExitCode, NotAuthenticatedError, UsageError } from "../core/errors.ts";
+import { ExitCode, NotAuthenticatedError, TransportError, UsageError } from "../core/errors.ts";
 import { renderDocument } from "../core/output.ts";
 import { deleteCredential, loadCredential, saveCredential } from "../core/config.ts";
 import { SignumHttp } from "../core/http.ts";
@@ -73,14 +73,43 @@ async function login(ctx: Ctx): Promise<ExitCode> {
     env: ctx.io.env,
   });
 
-  const res = await http.request<unknown>({ method: "GET", path: "api/auth/currentUser" });
+  // A bad paste can surface two different ways, depending on the target application, and both must
+  // land on the handoff instructions rather than a generic "re-authenticate" hint (AC-12.3).
+  //
+  // The authenticator chain is Token -> AnonymousUser -> AllowAnonymous -> Invalid(throws)
+  // (`AuthTokensServer.cs:27-30`). A malformed token makes TokenAuthenticator return null rather
+  // than throw (`:66-74`), so what happens next depends on whether the app configures
+  // `AuthLogic.AnonymousUser`:
+  //
+  //   configured    -> the anonymous user is adopted, and `currentUser` returns 200 with a NULL
+  //                    body, because it maps the anonymous user to null (`AuthController.cs:108-113`)
+  //   NOT configured -> `currentUser` carries no [SignumAllowAnonymous], so InvalidAuthenticator
+  //                    throws AuthenticationException("No authentication information found!") -> 403
+  //
+  // The second is what the target application does (observed live, #83). Only the first was
+  // handled, so a bad paste there produced http.ts's generic 403 hint and never showed the user
+  // how to obtain a correct token.
+  let res: { body: unknown };
+  try {
+    res = await http.request<unknown>({ method: "GET", path: "api/auth/currentUser" });
+  } catch (err) {
+    if (err instanceof NotAuthenticatedError) {
+      throw new NotAuthenticatedError("the server rejected this token", {
+        hint:
+          "The token is wrong, truncated, expired against a changed password, or from a different\n" +
+          "application. Check you copied the whole value.\n\n" + HANDOFF_INSTRUCTIONS,
+      });
+    }
+    throw err; // transport, timeout, anything else — report it as itself
+  }
+
   const user = res.body;
   if (user === null || user === undefined || user === "") {
     throw new NotAuthenticatedError("the token was accepted but resolved to no user (anonymous)", {
       hint:
-        "Signum silently degrades an invalid token to anonymous rather than rejecting it, so this\n" +
-        "almost certainly means the token is wrong, truncated, or from a different application.\n\n" +
-        HANDOFF_INSTRUCTIONS,
+        "This application configures an anonymous user, so Signum degraded the token instead of\n" +
+        "rejecting it — which almost certainly means the token is wrong, truncated, or from a\n" +
+        "different application.\n\n" + HANDOFF_INSTRUCTIONS,
     });
   }
 
@@ -178,12 +207,17 @@ async function status(ctx: Ctx): Promise<ExitCode> {
   try {
     const res = await target.http.request<unknown>({ method: "GET", path: "api/auth/currentUser" });
     const name = userName(res.body);
-    // Distinguish "authenticated as anonymous" from "authenticated as a user" (AC-06.2).
+    // Distinguish "authenticated as anonymous" from "authenticated as a user" (AC-06.2). A 200 with
+    // a null body is the anonymous case, and only happens on an app that configures
+    // AuthLogic.AnonymousUser — see the note on the catch below.
     report.authenticated = name !== undefined;
     report.user = name ?? null;
     report.reachable = true;
   } catch (err) {
-    report.reachable = false;
+    // Only a TRANSPORT failure means the target is unreachable. A 403 proves the opposite: the
+    // server answered. Reporting `reachable: false` next to "not authenticated: No authentication
+    // information found!" sent a reader looking for a network problem that did not exist (#83).
+    report.reachable = !(err instanceof TransportError);
     report.detail = err instanceof Error ? err.message : String(err);
   }
 
