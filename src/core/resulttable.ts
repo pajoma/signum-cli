@@ -20,7 +20,7 @@
  */
 
 import { CliError, ExitCode } from "./errors.ts";
-import { classify, surrogate, type HandleRecorder, type PrivacyPolicy } from "./privacy.ts";
+import { classify, isIdentityValue, surrogate, type HandleRecorder, type PrivacyPolicy } from "./privacy.ts";
 
 /** Raw wire shape of `ResultTable`, exactly as the server sends it. */
 export interface RawResultTable {
@@ -158,12 +158,26 @@ export function resolveResultTable(raw: RawResultTable, options: ResolveOptions 
     ? serverColumns
     : [...serverColumns.slice(0, entityIndex), ENTITY_TOKEN, ...serverColumns.slice(entityIndex)];
 
-  // Classify once per column rather than once per cell: the answer cannot vary by row, and a
-  // per-cell decision would be both slower and a place for inconsistency to hide.
+  // Classify once per column where the answer is name-based: it cannot vary by row, and a per-cell
+  // decision would be both slower and a place for inconsistency to hide.
   const privacy = options.privacy?.mode === "off" ? undefined : options.privacy;
   const pseudoColumns = new Set(
     privacy === undefined ? [] : columns.filter((c) => classify(c, privacy).pseudonymize),
   );
+
+  /**
+   * Columns whose values are an entity's LABEL because `--resolve` rewrote them to `.ToString`.
+   *
+   * The value arrives as a plain string, so the value-based identity rule below cannot see it — but
+   * we know what it is, because we asked for it. `columnLabels` maps `User.ToString` -> `User`, so
+   * its values are exactly the entity-derived display columns. Without this, `--resolve` under
+   * `heuristic` prints real people's names: the column is called `User`, which matches no
+   * name-based heuristic.
+   */
+  const labelColumns = new Set(Object.values(options.columnLabels ?? {}));
+
+  /** Columns where something was actually replaced, for the AC-52.6 disclosure. */
+  const replaced = new Set<string>();
 
   const rows: ResolvedRow[] = rawRows.map((row, rowIndex) => {
     const cells = row.columns ?? [];
@@ -205,11 +219,15 @@ export function resolveResultTable(raw: RawResultTable, options: ResolveOptions 
     // Pseudonymize AFTER alignment, so a column's policy is decided by the column it actually is.
     const values = privacy === undefined
       ? aligned
-      : aligned.map((v, i) =>
-          pseudoColumns.has(columns[i] as string)
-            ? surrogate(v, columns[i] as string, privacy, options.handles)
-            : v,
-        );
+      : aligned.map((v, i) => {
+          const token = columns[i] as string;
+          // An identity is identifying whatever its column is called, so it is judged by VALUE.
+          const sensitive =
+            pseudoColumns.has(token) || labelColumns.has(token) || isIdentityValue(v);
+          if (!sensitive) return v;
+          replaced.add(token);
+          return surrogate(v, token, privacy, options.handles);
+        });
 
     return { entity, values };
   });
@@ -220,7 +238,8 @@ export function resolveResultTable(raw: RawResultTable, options: ResolveOptions 
     rows,
     entityIndex,
     totalElements: raw.totalElements,
-    pseudonymized: [...pseudoColumns],
+    // Report what was actually replaced, not what a name-based rule predicted.
+    pseudonymized: [...replaced],
   };
 }
 

@@ -1422,13 +1422,26 @@ describe("privacy gate (STORY-50, STORY-51)", () => {
     expect(r.code).toBe(ExitCode.Ok); // m1 refused this outright
   });
 
-  it("heuristic mode does NOT fire on columns that are not sensitive", async () => {
-    // State and Total match nothing, so nothing is replaced and nothing is claimed. A heuristic
-    // that pseudonymized these would be over-firing, and the disclosure would be noise.
+  it("heuristic mode leaves non-sensitive columns alone but ALWAYS protects identities", async () => {
+    // State and Total match no heuristic, so they are untouched — a rule that replaced them would
+    // be over-firing. The Entity column is different: it is an identity by VALUE, whatever the
+    // column is called, so it becomes a handle even under heuristic. Name-based rules cannot catch
+    // that, because entity columns are called User/Customer/Owner, not "name".
     const r = await cli(["query", "Order", "--json"], { env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" } });
-    expect(r.err).not.toContain("pseudonymized (");
     const rows = JSON.parse(r.out) as Array<Record<string, unknown>>;
     expect(rows[0]?.["State"]).toBe("Shipped");
+    expect(rows[0]?.["Total"]).toBe(1200.5);
+    expect(String(rows[0]?.["Entity"])).toStartWith("ref:");
+    expect(r.err).toContain("pseudonymized (heuristic): Entity");
+  });
+
+  it("an identity is protected even when its column name suggests nothing (the merge leak)", async () => {
+    // #88's label rendering surfaced a Lite's `model` — a person's name — while classification only
+    // looked at the column name. Two individually-correct behaviours that jointly printed real
+    // names. Judged by value, the identity is caught regardless.
+    const r = await cli(["query", "Order", "-o", "csv"], { env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" } });
+    expect(r.out).not.toContain("Order;42");
+    expect(r.out).toContain("ref:");
   });
 
   it("strict mode replaces everything not allowlisted, and discloses honestly (AC-52.6, 52.8)", async () => {
@@ -1580,9 +1593,11 @@ describe("caller-context override end-to-end (AC-50.4) — previously only unit-
       tty: true, env: { SIGNUM_CONFIG_DIR: configDir },
     });
     expect(r.code).toBe(ExitCode.Ok);
-    // Nothing in this fixture's columns is sensitive, so tightening the CONTEXT must not invent
-    // sensitivity — it changes the policy, not the classification.
-    expect(r.err).not.toContain("pseudonymized (");
+    // Tightening the context tightens the outcome: the identity column is now protected, while
+    // State and Total — which match no heuristic — are left exactly as they were.
+    expect(r.err).toContain("pseudonymized (heuristic): Entity");
+    const rows = JSON.parse(r.out) as Array<Record<string, unknown>>;
+    expect(rows[0]?.["State"]).toBe("Shipped");
   });
 
   it("tightening the context is silent — no loosening warning", async () => {

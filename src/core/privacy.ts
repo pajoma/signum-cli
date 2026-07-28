@@ -222,6 +222,22 @@ function liteKeyOf(value: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * Is this VALUE an entity reference, i.e. an identity?
+ *
+ * Name-based heuristics cannot catch these. An entity-valued column is called `User`, `Customer` or
+ * `Owner` — none of which contains "name" or "email" — yet its value denotes a *person*, and
+ * `flatCell` renders that person's label. So the two independently-correct behaviours (label
+ * rendering, name-based classification) combined to print real names under `heuristic`.
+ *
+ * The fix is to classify by VALUE rather than by name here: a Lite is an identity by construction,
+ * whatever the column happens to be called, so it always becomes a handle under any pseudonymizing
+ * mode. That also removes the earlier oddity where identities were only protected under `strict`.
+ */
+export function isIdentityValue(value: unknown): boolean {
+  return liteKeyOf(value) !== undefined;
+}
+
 export function isHandle(value: string): boolean {
   return value.startsWith(HANDLE_PREFIX);
 }

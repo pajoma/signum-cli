@@ -11,7 +11,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  classify, disclosure, parseMode, pseudonymizeDocument, resolvePolicy, surrogate,
+  classify, disclosure, HANDLE_PREFIX, isIdentityValue, parseMode, pseudonymizeDocument,
+  resolvePolicy, surrogate,
 } from "../src/core/privacy.ts";
 import { UsageError } from "../src/core/errors.ts";
 
@@ -227,5 +228,35 @@ describe("disclosure (AC-52.6, AC-52.9)", () => {
   it("stays silent when nothing was replaced — no noise, no false reassurance", () => {
     expect(disclosure(policy(), [])).toBe("");
     expect(disclosure(policy({ callerIsAgent: false }), ["Name"])).toBe("");
+  });
+});
+
+/**
+ * Identities are judged by VALUE, not by column name.
+ *
+ * Two individually-correct behaviours combined to leak: #88 renders a Lite's `model` — a person's
+ * name — as a readable label, while classification only ever looked at the column NAME. An
+ * entity-valued column is called `User`, `Customer` or `Owner`, none of which matches a name-based
+ * heuristic, so real names printed under `heuristic`. Only visible once both landed together.
+ */
+describe("entity references are always identities (the merge leak)", () => {
+  it("recognises a Lite by shape, whatever the column is called", () => {
+    expect(isIdentityValue({ EntityType: "User", id: 102 })).toBe(true);
+    expect(isIdentityValue({ Type: "User", id: 102 })).toBe(true);
+  });
+
+  it("does not mistake ordinary values for identities", () => {
+    expect(isIdentityValue("Shipped")).toBe(false);
+    expect(isIdentityValue(1200.5)).toBe(false);
+    expect(isIdentityValue(null)).toBe(false);
+    expect(isIdentityValue({ id: 1 })).toBe(false);           // no type
+    expect(isIdentityValue({ EntityType: "User" })).toBe(false); // no id
+  });
+
+  it("becomes a handle under HEURISTIC, not only under strict", () => {
+    // Previously identities were protected only by strict's allowlist rule, so the mode most people
+    // will actually run left them readable.
+    const h = surrogate({ EntityType: "User", id: 102 }, "User", policy());
+    expect(String(h)).toStartWith(HANDLE_PREFIX);
   });
 });
