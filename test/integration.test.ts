@@ -22,6 +22,12 @@ let baseUrl: string;
 let configDir: string;
 /** Set when the server decides to rotate; consumed by the next response. */
 let rotateNext = false;
+/**
+ * Whether this fixture's app configures `AuthLogic.AnonymousUser`. The real target application does
+ * NOT (observed 2026-07-28, #83), which is why false is the default — it decides whether an invalid
+ * token degrades to a null `currentUser` or is rejected with a 403.
+ */
+let anonymousUserConfigured = false;
 
 const REFLECTION = {
   Order: {
@@ -142,8 +148,30 @@ beforeAll(() => {
       const authenticated = token === GOOD_TOKEN || token === ROTATED_TOKEN;
 
       if (url.pathname === "/api/auth/currentUser") {
-        // A bad token degrades SILENTLY to anonymous rather than erroring (AC-04.6).
-        return new Response(JSON.stringify(authenticated ? { userName: "alice", toStr: "alice" } : null), { headers });
+        if (authenticated) {
+          return new Response(JSON.stringify({ userName: "alice", toStr: "alice" }), { headers });
+        }
+        // A bad token behaves DIFFERENTLY depending on the target app, and this fixture used to
+        // model only one of the two (#83, found by the first live run).
+        //
+        // TokenAuthenticator returns null for a malformed token rather than throwing
+        // (`AuthTokensServer.cs:66-74`), then the chain continues:
+        //   app configures AuthLogic.AnonymousUser -> 200 with a null body
+        //   app does NOT                           -> currentUser has no [SignumAllowAnonymous],
+        //                                             so InvalidAuthenticator throws -> 403
+        // The real target application does the latter, so that is the default here; the
+        // anonymous-user variant is selectable, because both are legitimate Signum deployments
+        // and the CLI has to handle each.
+        if (anonymousUserConfigured) {
+          return new Response(JSON.stringify(null), { headers });
+        }
+        return new Response(
+          JSON.stringify({
+            exceptionType: "Signum.Services.AuthenticationException",
+            exceptionMessage: "No authentication information found!",
+          }),
+          { status: 403, headers },
+        );
       }
 
       if (!authenticated) {
@@ -421,10 +449,55 @@ describe("login and status (STORY-12, STORY-06)", () => {
     expect(r.err).toContain("stdin");
   });
 
-  it("rejects a token that resolves to anonymous (AC-12.3)", async () => {
+  it("rejects a bad token with the handoff instructions, when the server 403s it (AC-12.3)", async () => {
+    // The target application's actual behaviour (#83): no AuthLogic.AnonymousUser configured, so
+    // currentUser — which carries no [SignumAllowAnonymous] — is refused outright.
     const r = await cli(["auth", "login", "--url", baseUrl, "--with-token"], { stdin: "wrong-token" });
     expect(r.code).toBe(ExitCode.NotAuthenticated);
-    expect(r.err).toContain("anonymous");
+    expect(r.err).toContain("the server rejected this token");
+    // The point of the fix: a bad paste must show HOW to get a good one, not just "re-authenticate".
+    expect(r.err).toContain('sessionStorage.getItem("authToken")');
+  });
+
+  it("rejects a bad token that DEGRADES to anonymous, on an app that configures one (AC-12.3)", async () => {
+    // The other legitimate deployment shape: AuthLogic.AnonymousUser is configured, the token is
+    // silently degraded, and currentUser answers 200 with a null body. Both must be handled — this
+    // is the variant the fixture used to model exclusively, which is why it hid the one above.
+    anonymousUserConfigured = true;
+    try {
+      const r = await cli(["auth", "login", "--url", baseUrl, "--with-token"], { stdin: "wrong-token" });
+      expect(r.code).toBe(ExitCode.NotAuthenticated);
+      expect(r.err).toContain("anonymous");
+      expect(r.err).toContain('sessionStorage.getItem("authToken")');
+    } finally {
+      anonymousUserConfigured = false;
+    }
+  });
+
+  it("auth status reports a 403'd token as REACHABLE — the server answered (#83)", async () => {
+    // `reachable: false` next to an auth error sent a reader hunting a network problem that did not
+    // exist. Only a transport failure means unreachable.
+    const dir = mkdtempSync(join(tmpdir(), "signum-badtok-"));
+    const r = await cli(["auth", "status", "--json"], {
+      env: { SIGNUM_CONFIG_DIR: dir, SIGNUM_URL: baseUrl, SIGNUM_TOKEN: "deliberately-invalid" },
+    });
+    const doc = JSON.parse(r.out) as { reachable: boolean; authenticated: boolean; detail: string | null };
+    expect(doc.reachable).toBe(true);
+    expect(doc.authenticated).toBe(false);
+    expect(doc.detail).toContain("not authenticated");
+    expect(r.code).toBe(ExitCode.NotAuthenticated);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("a genuinely unreachable host still reports reachable: false", async () => {
+    // The other side of the same fix — the distinction has to cut both ways to be worth anything.
+    const dir = mkdtempSync(join(tmpdir(), "signum-unreach-"));
+    const r = await cli(["auth", "status", "--json"], {
+      env: { SIGNUM_CONFIG_DIR: dir, SIGNUM_URL: "http://127.0.0.1:1", SIGNUM_TOKEN: "whatever" },
+    });
+    const doc = JSON.parse(r.out) as { reachable: boolean };
+    expect(doc.reachable).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it("stores a valid token with 0600 permissions (AC-04.1, AC-11.5)", async () => {

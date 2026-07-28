@@ -75,8 +75,21 @@ Content-Type: application/json
 2. **Opacity.** The token is *not* a JWT — JSON → Deflate → AES-128-CBC/PKCS7 with the key
    derived as MD5 of the app secret, IV prepended, **no MAC**. Never parse it; there is no
    expiry claim to read and no integrity check to rely on.
-3. **Verify after load.** A malformed, tampered, or wrong-key token is **swallowed and degrades
-   silently to anonymous**, not rejected. After loading a stored token, confirm it with
+3. **Verify after load.** A malformed, tampered, or wrong-key token is **never rejected on its own
+   terms** — `TokenAuthenticator` returns null rather than throwing
+   (`AuthTokensServer.cs:66-74`). What happens next depends on the **target application's
+   configuration**, and both shapes are real:
+
+   | `AuthLogic.AnonymousUser` | Chain outcome | `GET api/auth/currentUser` |
+   |---|---|---|
+   | configured | the anonymous user is adopted | **200 with a `null` body** — it maps the anonymous user to null (`AuthController.cs:108-113`) |
+   | **not** configured | falls through to `InvalidAuthenticator`, which throws | **403** `AuthenticationException("No authentication information found!")` |
+
+   The chain is `Token → AnonymousUser → AllowAnonymous → Invalid(throws)`
+   (`AuthTokensServer.cs:27-30`), and `currentUser` carries **no** `[SignumAllowAnonymous]` — which
+   is why the second row reaches the throwing authenticator. **Observed live 2026-07-28: the target
+   application does NOT configure an anonymous user**, so an invalid token there yields a 403, not a
+   null body (#83). A client must handle both. Either way, confirm a stored token with
    `GET api/auth/currentUser` before relying on it.
 
 Token invalidation happens only on the rotation path: user deleted, `State != Active`, username
