@@ -11,7 +11,7 @@ import { ExitCode, NotAuthenticatedError, TransportError, UsageError } from "../
 import { renderDocument } from "../core/output.ts";
 import { deleteCredential, loadCredential, permissionsAreUnenforceable, saveCredential } from "../core/config.ts";
 import { SignumHttp } from "../core/http.ts";
-import { flag, opt, resolveTarget } from "./context.ts";
+import { flag, resolveTarget } from "./context.ts";
 
 const HANDOFF_INSTRUCTIONS = [
   "To obtain a token:",
@@ -32,14 +32,31 @@ async function login(ctx: Ctx): Promise<ExitCode> {
     });
   }
 
-  const withToken = flag(ctx, "with-token") || opt(ctx, "with-token") !== undefined;
-  if (!withToken) {
-    throw new UsageError("--with-token is required", {
+  // A token given as an ARGUMENT is refused, loudly. `--with-token` is boolean, so a value after it
+  // lands in positionals — where login ignored it, prompted anyway, and said nothing. The user's
+  // token was then sitting in their shell history and their process list for no benefit at all,
+  // which is the precise failure AC-12.1 exists to prevent.
+  const stray = ctx.args.positionals[1];
+  if (stray !== undefined) {
+    throw new UsageError("the token must not be passed as an argument", {
       hint:
-        "This application accepts only a browser token handoff — it has no Signum.Rest module,\n" +
-        "and Entra-provisioned users have no local password.\n\n" + HANDOFF_INSTRUCTIONS,
+        "It is now in your shell history and was visible in the process list, so treat it as\n" +
+        "compromised: obtain a fresh one and clear the entry (`history -d`, or your shell's\n" +
+        "equivalent).\n\n" +
+        "Run the command WITHOUT the token and paste it at the prompt, or pipe it:\n" +
+        "  signum auth login --url " + url + "\n" +
+        '  printf %s "$TOKEN" | signum auth login --url ' + url + "\n",
     });
   }
+
+  // `--with-token` is accepted but NOT required. The browser handoff is the only mechanism this
+  // application supports (ADR 0004 Decision 4), so demanding a flag that selects the only option is
+  // ceremony — and it made `signum auth login --url …`, the obvious command, fail with an error
+  // telling the user to add something that changes nothing.
+  //
+  // The flag stays meaningful for later: once REQ-004's `--web` or REQ-002's API keys exist, `auth
+  // login` will have a mechanism to choose and this becomes how you choose it.
+  void flag(ctx, "with-token");
 
   // Never an argument, which would leak into shell history and the process list (AC-12.1). But
   // "not an argument" does not have to mean "not typed": a hidden read from the terminal keeps the

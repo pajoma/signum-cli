@@ -71,23 +71,27 @@ export const COMMANDS: CommandSpec[] = [
     // and being shown only a list of subcommand names is one step short of useful.
     examples: [
       "signum auth status",
-      "signum auth login --url https://app.example --with-token < token.txt",
+      "signum auth login --url https://app.example",
       "signum auth logout",
     ],
     subcommands: [
       {
         name: "login",
         summary: "Store a bearer token handed over from a browser session",
-        usage: "signum auth login --url <url> --with-token",
+        usage: "signum auth login --url <url> [--with-token]",
         milestone: "m1",
         description:
           "The target application uses Entra SSO with no Signum.Rest module, so a browser token " +
           "handoff is the only viable mechanism. Sign in to the web app, then in the browser " +
           "console run:\n\n    sessionStorage.getItem(\"authToken\")\n\n" +
-          "and pipe the value in. The token is read from stdin only — never from an argument, " +
-          "which would leak it into shell history.",
-        flags: [{ name: "with-token", summary: "Read the token from stdin" }],
+          "At a terminal you are prompted for it and it is not echoed. Piping works too. It is " +
+          "never read from an argument, which would leave it in your shell history and the process " +
+          "list — passing one there is refused, not ignored.\n\n" +
+          "--with-token is optional while the handoff is the only mechanism this application " +
+          "supports; it becomes how you choose one when others exist.",
+        flags: [{ name: "with-token", summary: "Browser-handoff token (optional; the only mechanism today)" }],
         examples: [
+          "signum auth login --url https://app.example",
           "signum auth login --url https://app.example --with-token < token.txt",
           'printf %s "$TOKEN" | signum auth login --url https://app.example --with-token',
         ],
@@ -320,7 +324,7 @@ export function renderOverview(): string {
   out.push("");
   out.push("GETTING STARTED");
   out.push("  signum --url https://app.example types      # explore, no login needed");
-  out.push("  signum auth login --url https://app.example --with-token   # prompts for the token");
+  out.push("  signum auth login --url https://app.example    # prompts for the token");
   out.push("  signum auth status                          # who am I, against what");
   out.push("");
   out.push("HELP TOPICS");

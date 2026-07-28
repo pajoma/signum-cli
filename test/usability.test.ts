@@ -145,6 +145,43 @@ describe("auth login prompts instead of refusing at a terminal", () => {
   });
 });
 
+describe("auth login: --with-token is optional, and a token argument is refused", () => {
+  it("prompts when --with-token is omitted entirely", async () => {
+    // `signum auth login --url …` is the obvious command. It used to fail with "--with-token is
+    // required" — an error telling the user to add a flag that selects the only available mechanism.
+    const dir = mkdtempSync(join(tmpdir(), "signum-ua-wt-"));
+    const r = await cli(["auth", "login", "--url", "http://127.0.0.1:1"], {
+      env: { SIGNUM_CONFIG_DIR: dir }, answers: ["some-token"],
+    });
+    expect(r.err).not.toContain("--with-token is required");
+    // Transport failure proves the token was collected and used.
+    expect(r.code).toBe(ExitCode.Transport);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("REFUSES a token passed as an argument, and says it is compromised", async () => {
+    // `--with-token` is boolean, so a value after it became a positional: login ignored it, prompted
+    // anyway, and said nothing — leaving the token in shell history for no benefit. That is exactly
+    // the leak AC-12.1 exists to prevent.
+    const r = await cli(["auth", "login", "--url", "http://127.0.0.1:1", "--with-token", "my-token"], {
+      answers: ["ignored"],
+    });
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("must not be passed as an argument");
+    expect(r.err).toContain("shell history");
+    expect(r.err).toContain("compromised");
+  });
+
+  it("still accepts --with-token, for when other mechanisms exist", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "signum-ua-wt2-"));
+    const r = await cli(["auth", "login", "--url", "http://127.0.0.1:1", "--with-token"], {
+      env: { SIGNUM_CONFIG_DIR: dir }, answers: ["some-token"],
+    });
+    expect(r.code).toBe(ExitCode.Transport);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 describe("unmask --clear asks before destroying the mapping", () => {
   /** A profile with one handle stored. */
   async function withHandle(): Promise<string> {
