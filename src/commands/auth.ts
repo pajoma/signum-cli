@@ -9,7 +9,7 @@
 import type { Ctx } from "../cli.ts";
 import { ExitCode, NotAuthenticatedError, TransportError, UsageError } from "../core/errors.ts";
 import { renderDocument } from "../core/output.ts";
-import { deleteCredential, loadCredential, saveCredential } from "../core/config.ts";
+import { deleteCredential, loadCredential, permissionsAreUnenforceable, saveCredential } from "../core/config.ts";
 import { SignumHttp } from "../core/http.ts";
 import { flag, opt, resolveTarget } from "./context.ts";
 
@@ -250,6 +250,14 @@ async function status(ctx: Ctx): Promise<ExitCode> {
       ctx.io.err(
         "SIGNUM_TOKEN is ambient: it is never written to disk, and a server-side rotation cannot\n" +
         "be saved back into it — refresh the variable when the value stops working.\n",
+      );
+    } else if (permissionsAreUnenforceable()) {
+      // Where POSIX modes do not exist, say what actually protects the file rather than asserting
+      // a 0600 guarantee the platform cannot give (#84).
+      ctx.io.err(
+        `On this platform the CLI cannot set or verify file permissions. ${stored?.path ?? "The credential"}\n` +
+        "is protected by the access control list inherited from your user profile directory —\n" +
+        "check it yourself if this machine has non-default ACLs or a roaming/redirected profile.\n",
       );
     }
   }

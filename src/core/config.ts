@@ -38,6 +38,10 @@ function credentialPath(env?: NodeJS.ProcessEnv): string {
 }
 
 function writePrivate(path: string, contents: string): void {
+  // mode/chmod below are POSIX-only. On Windows they toggle nothing but the read-only attribute
+  // (see checkPermissions), and the file's real protection is the profile directory's inherited
+  // ACL — which Node cannot set. Kept unconditional because they are correct where they work and
+  // harmless where they do not.
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   // Write-then-rename so a concurrent reader never sees a half-written token (AC-04.4).
   const tmp = `${path}.${process.pid}.tmp`;
@@ -60,19 +64,52 @@ export interface LoadedCredential {
   permissionWarning: string | undefined;
 }
 
-export function loadCredential(env?: NodeJS.ProcessEnv): LoadedCredential | undefined {
-  const path = credentialPath(env);
-  if (!existsSync(path)) return undefined;
-
-  let permissionWarning: string | undefined;
+/**
+ * Whether the credential file's POSIX mode is wider than 0600 (AC-11.5).
+ *
+ * **Returns undefined on Windows, deliberately.** Node cannot express this check there:
+ * `chmod` only toggles the read-only attribute, and `stat().mode` is *synthesized* — 0o666 when
+ * writable, 0o444 when read-only — with NTFS ACLs invisible to it. So `saveCredential`'s
+ * `chmod 0o600` is a no-op on Windows and the file can only ever report 666, which made this check
+ * fire on **every single invocation** with a warning the user could not act on (#84).
+ *
+ * A warning nobody can satisfy is worse than no warning: it trains people to ignore the ones that
+ * matter. And the 666 was never evidence of exposure — on Windows the file's actual protection is
+ * the ACL inherited from the user's profile directory, which grants the owner, SYSTEM and
+ * Administrators, not everyone. The CLI cannot read or set that ACL with Node, so it reports what
+ * it knows and says so (see `auth status`) rather than asserting a guarantee it cannot make.
+ *
+ * `platform` is injectable so both branches are testable from either host.
+ */
+export function checkPermissions(
+  path: string,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  if (platform === "win32") return undefined;
   try {
     const mode = statSync(path).mode & 0o777;
     if ((mode & 0o077) !== 0) {
-      permissionWarning = `${path} is mode ${mode.toString(8)}; expected 600`;
+      return `${path} is mode ${mode.toString(8)}; expected 600`;
     }
   } catch {
     // Non-fatal: a stat failure must not prevent using a readable credential.
   }
+  return undefined;
+}
+
+/**
+ * True where the CLI cannot enforce or verify credential file permissions itself. Callers that
+ * diagnose (`auth status`) should say where the protection actually comes from.
+ */
+export function permissionsAreUnenforceable(platform: NodeJS.Platform = process.platform): boolean {
+  return platform === "win32";
+}
+
+export function loadCredential(env?: NodeJS.ProcessEnv): LoadedCredential | undefined {
+  const path = credentialPath(env);
+  if (!existsSync(path)) return undefined;
+
+  const permissionWarning = checkPermissions(path);
 
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<StoredCredential>;

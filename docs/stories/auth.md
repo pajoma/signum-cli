@@ -359,7 +359,7 @@ approve its use against production.
 - AC-11.2: `--explain` and `--trace` show `X-ApiKey: <redacted>` and `Authorization: Bearer <redacted>`.
 - AC-11.3: No secret is ever placed in a URL, for any reason (AC-02.2).
 - AC-11.4: Server responses are **never** echoed verbatim, because at least one error path returns the submitted API key in its message (AC-02.4).
-- AC-11.5: Credential files are created `0600`; a wrong-permissions file is a warning.
+- AC-11.5: Credential files are created `0600` **on POSIX hosts**; a wrong-permissions file is a warning, never a refusal to work. *(Amended: on **Windows** this cannot be expressed — Node's `chmod` only toggles the read-only attribute and `stat().mode` is synthesized, so the file always reports 666 and the check fired on every invocation with a message the user could not act on (#84). There the file is protected by the ACL inherited from the user's profile directory, which Node can neither read nor set; `auth status` states that rather than asserting a guarantee the platform cannot give. A warning nobody can satisfy trains people to ignore the ones that matter.)*
 - AC-11.6: Passwords are never accepted as command-line arguments.
 - AC-11.7: A redaction test runs in CI and fails the build on regression.
 
