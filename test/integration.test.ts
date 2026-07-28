@@ -257,7 +257,11 @@ beforeAll(() => {
         return new Response("7", { headers });
       }
       if (url.pathname === "/api/entity/Order/42") {
-        return new Response(JSON.stringify({ Type: "Order", id: 42, ticks: "638", toStr: "Order 42" }), { headers });
+                // `name` is a heuristic hit; Type/id/ticks are structural and must survive untouched.
+        return new Response(
+          JSON.stringify({ Type: "Order", id: 42, ticks: "638", toStr: "Order 42", name: "Acme GmbH" }),
+          { headers },
+        );
       }
       if (url.pathname === "/api/entity/Order/999") {
         return new Response(JSON.stringify({ exceptionMessage: "not found" }), { status: 404, headers });
@@ -977,14 +981,26 @@ describe("get (STORY-30)", () => {
     expect(r.err).toContain("Order;");
   });
 
-  it("blocks entity data under a detected agent context, same as query (STORY-51 parity)", async () => {
+  it("gives an agent PSEUDONYMIZED entity data instead of a refusal (REQ-057, AC-51.4)", async () => {
+    // m1 refused outright and named pseudonymization as "the intended remedy". The remedy exists
+    // now, so the honest behaviour is to apply it rather than keep refusing.
     const r = await cli(["get", "Order", "42"], { env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" } });
-    expect(r.code).toBe(ExitCode.Policy);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.err).toContain("pseudonymized (heuristic)");
+    const doc = JSON.parse(r.out) as Record<string, unknown>;
+    // `name` matched the heuristic and was replaced...
+    expect(doc["name"]).not.toBe("Acme GmbH");
+    expect(String(doc["name"])).toMatch(/-[0-9a-f]{4}$/);
+    // ...while structural keys survive untouched. Replacing Type/id/ticks would corrupt the
+    // document and break the round-trip invariants REQ-031 depends on.
+    expect(doc["id"]).toBe(42);
+    expect(doc["Type"]).toBe("Order");
+    expect(doc["ticks"]).toBe("638");
   });
 
-  it("blocks --exists under a detected agent context too", async () => {
+  it("--exists is likewise allowed under pseudonymization — it emits no personal values", async () => {
     const r = await cli(["get", "Order", "42", "--exists"], { env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" } });
-    expect(r.code).toBe(ExitCode.Policy);
+    expect(r.code).toBe(ExitCode.Ok);
   });
 
   it("--explain is exempt from the agent gate, same as query", async () => {
@@ -1264,10 +1280,95 @@ describe("privacy gate (STORY-50, STORY-51)", () => {
     expect(r.err).not.toContain("refusing to emit");
   });
 
-  it("refuses row data under a detected agent, with exit 9", async () => {
-    const r = await cli(["query", "Order"], { env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" } });
+  it("gives an agent rows instead of a refusal, now that a remedy exists (REQ-057, AC-51.4)", async () => {
+    const r = await cli(["query", "Order", "--json"], { env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" } });
+    expect(r.code).toBe(ExitCode.Ok); // m1 refused this outright
+  });
+
+  it("heuristic mode does NOT fire on columns that are not sensitive", async () => {
+    // State and Total match nothing, so nothing is replaced and nothing is claimed. A heuristic
+    // that pseudonymized these would be over-firing, and the disclosure would be noise.
+    const r = await cli(["query", "Order", "--json"], { env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" } });
+    expect(r.err).not.toContain("pseudonymized (");
+    const rows = JSON.parse(r.out) as Array<Record<string, unknown>>;
+    expect(rows[0]?.["State"]).toBe("Shipped");
+  });
+
+  it("strict mode replaces everything not allowlisted, and discloses honestly (AC-52.6, 52.8)", async () => {
+    const r = await cli(["query", "Order", "--pseudonymize", "strict", "--json"], {
+      env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" },
+    });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.err).toContain("pseudonymized (strict)");
+    // The disclosure must admit its own incompleteness rather than imply safety.
+    expect(r.err).toContain("INCOMPLETE");
+    expect(r.err).toContain("GDPR Art. 4(5)");
+    const rows = JSON.parse(r.out) as Array<Record<string, unknown>>;
+    expect(rows[0]?.["State"]).not.toBe("Shipped");
+  });
+
+  it("surrogates are STABLE — the same value reads the same across invocations (AC-52.1)", async () => {
+    // Per-profile secret, not per-run: without this a multi-step agent workflow could not correlate
+    // anything and surrogates would be no better than redaction (ADR 0009 Q1, AC-53.8).
+    const a = await cli(["query", "Order", "--pseudonymize", "strict", "--json"], {
+      env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" },
+    });
+    const b = await cli(["query", "Order", "--pseudonymize", "strict", "--json"], {
+      env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" },
+    });
+    expect(a.out).toBe(b.out);
+    // ...and the same value in two rows maps to the same surrogate, which is what makes grouping work.
+    const rows = JSON.parse(a.out) as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.["State"]).not.toBe(rows[1]?.["State"]); // Shipped vs Delivered stay distinct
+  });
+
+  it("STILL refuses when a human's profile turns pseudonymization off (STORY-51 preserved)", async () => {
+    // The refusal is not gone, it is conditional: if the configured policy is `off`, an agent gets
+    // nothing rather than silently getting real values. That is the one case where the m1 behaviour
+    // remains exactly right.
+    const dir = mkdtempSync(join(tmpdir(), "signum-privoff-"));
+    writeFileSync(join(dir, "credential.json"), readFileSync(join(configDir, "credential.json")));
+    writeFileSync(join(dir, "privacy.json"), JSON.stringify({ mode: "off" }));
+    const r = await cli(["query", "Order"], { env: { SIGNUM_CONFIG_DIR: dir, CLAUDECODE: "1" } });
     expect(r.code).toBe(ExitCode.Policy);
     expect(r.err).toContain("--i-understand-data-goes-to-a-model");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("an agent cannot LOOSEN the policy without the human acknowledgement (AC-52.10)", async () => {
+    // The whole point of ADR 0009: the caller asking for weaker protection is the caller that wants
+    // the data. Tightening is free; loosening is not the caller's to decide.
+    const r = await cli(["query", "Order", "--pseudonymize", "off"], {
+      env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" },
+    });
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("refusing to loosen pseudonymization");
+  });
+
+  it("an agent CAN tighten the policy freely, and it is silent", async () => {
+    const r = await cli(["query", "Order", "--pseudonymize", "strict", "--json"], {
+      env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" },
+    });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.err).not.toContain("refusing to loosen");
+    expect(r.err).toContain("pseudonymized (strict)");
+  });
+
+  it("with the acknowledgement, loosening works and is LOGGED", async () => {
+    const r = await cli(["query", "Order", "--pseudonymize", "off", "--json", "--i-understand-data-goes-to-a-model"], {
+      env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" },
+    });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.err).toContain("loosened to 'off'");
+    // Real values, and no disclosure claiming otherwise.
+    expect(r.err).not.toContain("pseudonymized (");
+  });
+
+  it("a human at a terminal is unaffected — no surrogates, no flag (AC-51.5)", async () => {
+    const r = await cli(["query", "Order"], { tty: true, env: { SIGNUM_CONFIG_DIR: configDir } });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.err).not.toContain("pseudonymized (");
   });
 
   it("allows metadata under a detected agent (AC-51.3)", async () => {
@@ -1335,9 +1436,16 @@ describe("caller-context override end-to-end (AC-50.4) — previously only unit-
     expect(r.err).toContain("loosened");
   });
 
-  it("--caller-context agent forces the gate even on an interactive TTY with no agent markers", async () => {
-    const r = await cli(["query", "Order", "--caller-context", "agent"], { tty: true, env: { SIGNUM_CONFIG_DIR: configDir } });
-    expect(r.code).toBe(ExitCode.Policy);
+  it("--caller-context agent forces pseudonymization even on an interactive TTY", async () => {
+    // Tightening the context still tightens the outcome; it just now means surrogates rather than
+    // a refusal, which is the same protection with a usable result.
+    const r = await cli(["query", "Order", "--caller-context", "agent", "--json"], {
+      tty: true, env: { SIGNUM_CONFIG_DIR: configDir },
+    });
+    expect(r.code).toBe(ExitCode.Ok);
+    // Nothing in this fixture's columns is sensitive, so tightening the CONTEXT must not invent
+    // sensitivity — it changes the policy, not the classification.
+    expect(r.err).not.toContain("pseudonymized (");
   });
 
   it("tightening the context is silent — no loosening warning", async () => {

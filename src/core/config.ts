@@ -51,6 +51,15 @@ function writePrivate(path: string, contents: string): void {
   chmodSync(path, 0o600);
 }
 
+/**
+ * Write a secret with the same protections as a credential: 0600 where the platform supports it,
+ * atomic rename so a concurrent reader never sees a half-written value. Used for the
+ * pseudonymization secret, whose loss would silently change every surrogate (REQ-057).
+ */
+export function writeSecret(path: string, contents: string): void {
+  writePrivate(path, contents + "\n");
+}
+
 export function saveCredential(cred: StoredCredential, env?: NodeJS.ProcessEnv): string {
   const path = credentialPath(env);
   writePrivate(path, JSON.stringify(cred, null, 2) + "\n");

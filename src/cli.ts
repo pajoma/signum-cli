@@ -8,6 +8,7 @@ import { assertKnownFlags, parseArgs, type ParsedArgs } from "./core/args.ts";
 import { CliError, ExitCode, UsageError, exitCodeOf } from "./core/errors.ts";
 import { detectCallerContext, type CallerDetection } from "./core/caller.ts";
 import { makeDataOpener, type DataWriter } from "./core/policy.ts";
+import { parseMode, resolvePolicy, type PrivacyPolicy } from "./core/privacy.ts";
 import { colorEnabled, effectiveFormat, renderDocument, type OutputFormat } from "./core/output.ts";
 import {
   COMMANDS, TOPICS, findCommand, helpAsJson, renderCommand, renderOverview,
@@ -46,6 +47,12 @@ export interface Ctx {
    * refusal costs no request. `--explain` emits no data and is exempt.
    */
   openData: (what: string) => DataWriter;
+  /**
+   * The effective pseudonymization policy (REQ-057). Resolved once, from the profile and the caller
+   * context — never from something the caller passed, except that a caller may tighten it
+   * (ADR 0009 Decision 1).
+   */
+  privacy: PrivacyPolicy;
 }
 
 function showHelp(args: ParsedArgs, io: Io): ExitCode {
@@ -143,13 +150,23 @@ export async function run(argv: readonly string[], io: Io): Promise<ExitCode> {
     io.err(`warning: caller context loosened to '${caller.context}' by override\n`);
   }
 
+  const privacy = resolvePolicy({
+    callerIsAgent: caller.context === "agent",
+    requested: args.flags.pseudonymize !== undefined ? parseMode(args.flags.pseudonymize) : undefined,
+    acknowledged: args.flags.allowAgentData,
+    env: io.env,
+    warn: (line) => io.err(line),
+  });
+
   const ctx: Ctx = {
     args,
     io,
     format,
     color: colorEnabled(io.stdoutIsTty, args.flags.noColor, io.env),
     caller,
-    openData: makeDataOpener(caller, args.flags.allowAgentData, io.out),
+    // Pseudonymization active means an agent gets surrogates rather than a refusal (AC-51.4).
+    openData: makeDataOpener(caller, args.flags.allowAgentData, io.out, privacy.mode !== "off"),
+    privacy,
   };
 
   // `--help` anywhere, and bare invocation, both land on help (AC-60.1).

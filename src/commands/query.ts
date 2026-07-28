@@ -15,6 +15,7 @@ import { renderResultTable, renderDataDocument, renderDocument } from "../core/o
 import { resolveResultTable, type RawResultTable } from "../core/resulttable.ts";
 import { loadMetadata, resolveQueryKey } from "../core/metadata.ts";
 import { fetchDefaultColumns } from "../core/tokens.ts";
+import { disclosure } from "../core/privacy.ts";
 import { lowerFilterExpressions, parseFilterExpression, type FilterWire } from "../core/filter.ts";
 import { opt, optAll, flag, resolveTarget } from "./context.ts";
 import { readFileSync } from "node:fs";
@@ -243,7 +244,7 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
   // The de-interning boundary: nothing downstream sees a raw row (AC-21.1). The requested
   // column order goes in so the hoisted `Entity` column comes back at the position the user
   // asked for, in every format (AC-21.2).
-  const table = resolveResultTable(res.body, { requestedColumns });
+  const table = resolveResultTable(res.body, { requestedColumns, privacy: ctx.privacy });
 
   renderResultTable(table, {
     format: ctx.format,
@@ -253,6 +254,11 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
     // colour output didn't exist. Threaded through here now.
     color: ctx.color,
   });
+
+  // AC-52.6: state what was replaced and that coverage is incomplete. Silent partial protection
+  // invites false confidence, which is worse than none.
+  const note = disclosure(ctx.privacy, table.pseudonymized);
+  if (note !== "") ctx.io.err("\n" + note);
 
   // Total is reported distinctly from rows returned, so a page is never mistaken for all (AC-21.5).
   if (ctx.format === "table" && table.totalElements !== undefined && table.totalElements > table.rows.length) {

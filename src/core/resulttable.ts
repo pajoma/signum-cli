@@ -20,6 +20,7 @@
  */
 
 import { CliError, ExitCode } from "./errors.ts";
+import { classify, surrogate, type PrivacyPolicy } from "./privacy.ts";
 
 /** Raw wire shape of `ResultTable`, exactly as the server sends it. */
 export interface RawResultTable {
@@ -52,6 +53,8 @@ export interface ResolvedTable {
   readonly entityIndex: number | undefined;
   /** Server-reported total, distinct from `rows.length` (AC-21.5). */
   readonly totalElements: number | undefined;
+  /** Columns whose values were replaced by surrogates, for the AC-52.6 disclosure. */
+  readonly pseudonymized: readonly string[];
 }
 
 export interface ResolvedRow {
@@ -74,6 +77,12 @@ export interface ResolveOptions {
    * order (`ResultTable.AllColumns()` = `Columns.PreAnd(entityColumn)`).
    */
   requestedColumns?: readonly string[] | undefined;
+  /**
+   * Pseudonymization policy (REQ-057). Applied HERE, inside the de-interning boundary, so no
+   * renderer can ever hold a real value — the same single-choke-point argument as AC-21.1, for the
+   * same reason: a protection applied per output path is a protection one output path will forget.
+   */
+  privacy?: PrivacyPolicy | undefined;
 }
 
 function columnToken(col: NonNullable<RawResultTable["columns"]>[number], index: number): string {
@@ -132,6 +141,13 @@ export function resolveResultTable(raw: RawResultTable, options: ResolveOptions 
     ? serverColumns
     : [...serverColumns.slice(0, entityIndex), ENTITY_TOKEN, ...serverColumns.slice(entityIndex)];
 
+  // Classify once per column rather than once per cell: the answer cannot vary by row, and a
+  // per-cell decision would be both slower and a place for inconsistency to hide.
+  const privacy = options.privacy?.mode === "off" ? undefined : options.privacy;
+  const pseudoColumns = new Set(
+    privacy === undefined ? [] : columns.filter((c) => classify(c, privacy).pseudonymize),
+  );
+
   const rows: ResolvedRow[] = rawRows.map((row, rowIndex) => {
     const cells = row.columns ?? [];
     const resolved = serverColumns.map((token, colIndex) => {
@@ -165,9 +181,14 @@ export function resolveResultTable(raw: RawResultTable, options: ResolveOptions 
     // renderer. `row.entity` is `null` rather than `undefined` when absent, because a hole in
     // a values array must be a value — `undefined` would serialize away in JSON.
     const entity = "entity" in row ? row.entity : null;
-    const values = entityIndex === undefined
+    const aligned = entityIndex === undefined
       ? resolved
       : [...resolved.slice(0, entityIndex), entity, ...resolved.slice(entityIndex)];
+
+    // Pseudonymize AFTER alignment, so a column's policy is decided by the column it actually is.
+    const values = privacy === undefined
+      ? aligned
+      : aligned.map((v, i) => (pseudoColumns.has(columns[i] as string) ? surrogate(v, columns[i] as string, privacy) : v));
 
     return { entity, values };
   });
@@ -178,6 +199,7 @@ export function resolveResultTable(raw: RawResultTable, options: ResolveOptions 
     rows,
     entityIndex,
     totalElements: raw.totalElements,
+    pseudonymized: [...pseudoColumns],
   };
 }
 

@@ -54,6 +54,11 @@ export interface GlobalFlags {
   /** STORY-51 acknowledgement (AC-51.2). Deliberately unmissable. */
   allowAgentData: boolean;
   /**
+   * Requested pseudonymization mode (REQ-057). May TIGHTEN freely; loosening under a detected agent
+   * needs `allowAgentData` and is logged — see privacy.ts `resolvePolicy` (AC-52.10).
+   */
+  pseudonymize: string | undefined;
+  /**
    * Never touch the network for metadata; use whatever is cached (AC-24.4). Global rather than
    * per-command because `loadMetadata` is what honours it, and query/get call it too for
    * pre-flight validation — restricting the flag to the discovery commands would leave
@@ -76,7 +81,7 @@ export interface ParsedArgs {
 }
 
 const FLAGS_WITH_VALUE = new Set([
-  "url", "output", "o", "timeout", "caller-context",
+  "url", "output", "o", "timeout", "caller-context", "pseudonymize",
   "filter", "filter-json", "column", "order", "top", "page", "page-size",
   "context", "pseudonymize", "arg", "arg-string", "arg-lite", "arg-json",
   "lite", "id", "filename", "f",
@@ -84,7 +89,7 @@ const FLAGS_WITH_VALUE = new Set([
 
 /** Boolean flags — listing one above would make it demand a value. */
 export const BOOLEAN_FLAGS = new Set([
-  "with-token", "exists", "count", "all", "yes", "y", "raw", "group",
+  "with-token", "exists", "count", "all", "yes", "y", "raw", "group", "privacy",
 ]);
 
 /** Invariant: a flag cannot need a value and be boolean-only at once. Checked by test. */
@@ -103,6 +108,7 @@ function emptyFlags(): GlobalFlags {
     timeoutMs: undefined,
     callerContext: undefined,
     allowAgentData: false,
+    pseudonymize: undefined,
     offline: false,
   };
 }
@@ -153,6 +159,7 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
         case "caller-context": flags.callerContext = value; break;
         case "i-understand-data-goes-to-a-model": flags.allowAgentData = true; break;
         case "offline": flags.offline = true; break;
+        case "pseudonymize": flags.pseudonymize = value; break;
         case "timeout": {
           const ms = Number(value);
           if (!Number.isFinite(ms) || ms <= 0) throw new UsageError(`--timeout must be a positive number of seconds`);
@@ -182,6 +189,10 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
 
   if (env["SIGNUM_ALLOW_AGENT_DATA"] === "1") flags.allowAgentData = true;
   if (env["SIGNUM_OFFLINE"] === "1") flags.offline = true;
+  if (flags.pseudonymize === undefined) {
+    const fromEnv = env["SIGNUM_PSEUDONYMIZE"];
+    if (fromEnv !== undefined && fromEnv !== "") flags.pseudonymize = fromEnv;
+  }
   if (flags.callerContext === undefined) {
     const fromEnv = env["SIGNUM_CALLER_CONTEXT"];
     if (fromEnv !== undefined && fromEnv !== "") flags.callerContext = fromEnv;

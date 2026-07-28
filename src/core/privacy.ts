@@ -1,0 +1,375 @@
+/**
+ * Pseudonymization — REQ-057 (#51) · STORY-52 · ADR 0007, ADR 0009.
+ *
+ * Replaces sensitive values with **stable surrogates**, not blanks, so an agent can still group and
+ * correlate rows without seeing real personal data.
+ *
+ * Three constraints shape everything here, and they are not negotiable:
+ *
+ * 1. **The framework offers no sensitivity metadata at all.** No `[PersonalData]`, nothing
+ *    GDPR-aware, and this CLI is generic — it cannot know that `Customer.Name` is personal while
+ *    `Product.Name` is not. Correct automatic classification is therefore impossible *in principle*,
+ *    which is why there is an explicit policy and why the output always states its own incompleteness
+ *    (AC-52.6).
+ * 2. **The policy is never a per-call parameter** (ADR 0009 Decision 1, AC-52.10). It is resolved
+ *    from the profile and the caller context. A caller may *tighten* it; loosening it under a
+ *    detected agent needs the human-typed acknowledgement flag and is logged — the same asymmetry
+ *    `--caller-context` already uses (AC-50.4). Otherwise the protection would rest on the party
+ *    whose interest is to read the data.
+ * 3. **This is not a compliance control** (AC-52.9). Pseudonymized data remains personal data under
+ *    GDPR Art. 4(5). The CLI must never claim otherwise.
+ */
+
+import { createHmac, randomBytes } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { configDir, writeSecret } from "./config.ts";
+import { UsageError } from "./errors.ts";
+
+export const PSEUDONYMIZE_MODES = ["off", "heuristic", "strict"] as const;
+export type PseudonymizeMode = (typeof PSEUDONYMIZE_MODES)[number];
+
+/** Ordered, so a caller can tighten but not loosen without an explicit acknowledgement. */
+const STRICTNESS: Record<PseudonymizeMode, number> = { off: 0, heuristic: 1, strict: 2 };
+
+export function parseMode(value: string): PseudonymizeMode {
+  const v = value.trim().toLowerCase();
+  if ((PSEUDONYMIZE_MODES as readonly string[]).includes(v)) return v as PseudonymizeMode;
+  throw new UsageError(`unknown pseudonymization mode '${value}'`, {
+    hint: `Valid modes: ${PSEUDONYMIZE_MODES.join(", ")}.`,
+  });
+}
+
+/**
+ * Member-name heuristics, English and German at minimum (AC-52.4) — the target deployment is
+ * German-language, and a name-based heuristic that only knows English is barely a heuristic.
+ *
+ * Matched against WORDS, after splitting a PascalCase segment: `CustomerName` -> [customer, name].
+ * Substring matching was rejected because `Filename` contains `name`. Word matching still
+ * misfires on `FileName`, which is exactly why AC-52.6 requires the output to say what it
+ * pseudonymized — a false positive must be visible, not silent.
+ */
+const SENSITIVE_WORDS = new Set([
+  // names
+  "name", "names", "firstname", "lastname", "surname", "fullname",
+  "vorname", "nachname", "familienname",
+  // contact
+  "email", "mail", "emailaddress", "phone", "telephone", "mobile", "fax",
+  "telefon", "telefonnummer", "mobil", "handy",
+  // address
+  "address", "street", "postcode", "zipcode", "zip",
+  "adresse", "anschrift", "strasse", "straße", "plz", "wohnort",
+  // identifiers and dates
+  "birthdate", "dateofbirth", "dob", "geburtsdatum", "geburtstag",
+  "iban", "bic", "taxid", "ssn", "steuernummer", "sozialversicherungsnummer",
+  "passport", "ausweisnummer", "personalnummer",
+]);
+
+/** Split a token segment into lowercase words: `Entity.Customer.FirstName` -> [first, name]. */
+function words(segment: string): string[] {
+  return segment
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_\-.]+/g, " ")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((w) => w !== "");
+}
+
+export interface PrivacyPolicy {
+  mode: PseudonymizeMode;
+  /** Token or member names always pseudonymized, whatever the heuristics say. */
+  always: ReadonlySet<string>;
+  /** Token or member names never pseudonymized — the allowlist that gives `strict` its meaning. */
+  allow: ReadonlySet<string>;
+  /**
+   * Per-profile secret, resolved LAZILY. Surrogates are stable across invocations because this is
+   * (ADR 0009 Q1). Lazy because most commands — help, metadata, discovery — pseudonymize nothing,
+   * and creating a secret file for them would both be pointless and fail when the config directory
+   * is not writable.
+   */
+  secret: () => string;
+  /** Where the policy came from, for `--privacy` output. */
+  origin: "default" | "profile";
+}
+
+export type ClassificationReason =
+  | "mode-off"
+  | "policy-allow"
+  | "policy-always"
+  | "heuristic-match"
+  | "strict-default"
+  | "not-sensitive";
+
+export interface Classification {
+  pseudonymize: boolean;
+  reason: ClassificationReason;
+  /** The word that triggered a heuristic match, so a reader can judge a false positive. */
+  matched?: string;
+}
+
+/**
+ * Decide whether one token or member name is pseudonymized, and **why**.
+ *
+ * The reason is not decoration: REQ-059 (#89) exposes it so an agent can explain what will be
+ * hidden without being able to change it, and so a human can spot a misfire.
+ */
+export function classify(token: string, policy: PrivacyPolicy): Classification {
+  if (policy.mode === "off") return { pseudonymize: false, reason: "mode-off" };
+
+  const segment = token.split(".").filter((s) => s !== "").pop() ?? token;
+  const lower = segment.toLowerCase();
+  const full = token.toLowerCase();
+
+  // Explicit policy beats heuristics in both directions (AC-52.5).
+  if (policy.allow.has(lower) || policy.allow.has(full)) {
+    return { pseudonymize: false, reason: "policy-allow" };
+  }
+  if (policy.always.has(lower) || policy.always.has(full)) {
+    return { pseudonymize: true, reason: "policy-always" };
+  }
+
+  for (const w of words(segment)) {
+    if (SENSITIVE_WORDS.has(w)) return { pseudonymize: true, reason: "heuristic-match", matched: w };
+  }
+
+  // strict is allowlist-only: anything not explicitly permitted is pseudonymized (AC-52.3, AC-52.8).
+  if (policy.mode === "strict") return { pseudonymize: true, reason: "strict-default" };
+
+  return { pseudonymize: false, reason: "not-sensitive" };
+}
+
+/**
+ * A stable surrogate for one value (AC-52.1).
+ *
+ * Derived from the VALUE alone, not the value plus the column, so the same person maps to the same
+ * surrogate across columns and across commands — that is what makes surrogates more useful than
+ * redaction, and what lets an agent correlate rows it cannot read.
+ *
+ * The label prefix comes from the token so the output stays readable (`Customer-7f3a`, per
+ * ADR 0007). It is cosmetic: the identity lives in the digest.
+ *
+ * Under `strict` this also replaces the `Entity` column, which is correct by the allowlist rule but
+ * costs the row its pasteable identity — `signum get` and `-o name` lose their input. Turning identity
+ * into a usable opaque handle (`ref:7f3a`) is REQ-058 (#52); until then, allowlist `Entity` in
+ * privacy.json if you need to act on the rows you are reading.
+ *
+ * Type preservation (AC-52.7) is **partial** and knowingly so: a number stays numeric so downstream
+ * parsing does not break, but a date becomes a labelled string rather than a plausible date.
+ * Fabricating a date that looks real risks being mistaken for data, which is worse than being
+ * obviously a surrogate. Full type preservation is follow-up work.
+ */
+export function surrogate(value: unknown, token: string, policy: PrivacyPolicy): unknown {
+  if (value === null || value === undefined) return value; // absence is not identifying
+  if (typeof value === "boolean") return value;            // one bit cannot identify anyone
+
+  const digest = createHmac("sha256", policy.secret()).update(canonical(value)).digest("hex");
+
+  if (typeof value === "number") {
+    // Stable, positive, and numeric — so a csv column of numbers stays a column of numbers.
+    return Number.parseInt(digest.slice(0, 8), 16);
+  }
+
+  return `${labelFor(token)}-${digest.slice(0, 4)}`;
+}
+
+/** Stable string form, so the same logical value always digests identically. */
+function canonical(value: unknown): string {
+  if (typeof value === "object") {
+    const o = value as Record<string, unknown>;
+    // A Lite identifies by type+id; its label is incidental and may vary between queries.
+    const type = o["EntityType"] ?? o["Type"];
+    const id = o["id"];
+    if (type !== undefined && id !== undefined) return `${String(type)};${String(id)}`;
+    return JSON.stringify(value);
+  }
+  return String(value);
+}
+
+/**
+ * `Entity.Customer.Name` -> `Customer`; `Name` -> `Name`; `Entity` -> `Entity`. Readability only —
+ * the identity lives in the digest, never in this prefix.
+ *
+ * The `Entity` segment is dropped as a prefix candidate because `Entity-7f3a` says less than
+ * `Customer-7f3a`. But when the token IS just `Entity` there is nothing else to fall back to, and
+ * the earlier version produced a meaningless `value-7f3a`.
+ */
+function labelFor(token: string): string {
+  const segments = token.split(".").filter((s) => s !== "");
+  const meaningful = segments.filter((s) => s !== ENTITY_SEGMENT);
+  if (meaningful.length >= 2) return meaningful[meaningful.length - 2] as string;
+  return meaningful[meaningful.length - 1] ?? segments[segments.length - 1] ?? "value";
+}
+
+const ENTITY_SEGMENT = "Entity";
+
+interface PolicyFile {
+  mode?: string;
+  always?: string[];
+  allow?: string[];
+}
+
+function policyPath(env?: NodeJS.ProcessEnv): string {
+  return join(configDir(env), "privacy.json");
+}
+
+function secretPath(env?: NodeJS.ProcessEnv): string {
+  return join(configDir(env), "privacy-secret");
+}
+
+/**
+ * The per-profile surrogate secret, created on first use.
+ *
+ * Per-profile rather than per-run is the resolution of ADR 0009 open question 1: the target
+ * workflow spans several invocations — discover the type, resolve a lookup entity, then query rows
+ * — and a per-run secret would give the same person a different surrogate in each step, so nothing
+ * could be correlated and surrogates would be no better than redaction (AC-53.8).
+ */
+function loadSecret(env?: NodeJS.ProcessEnv): string {
+  const path = secretPath(env);
+  if (existsSync(path)) {
+    const existing = readFileSync(path, "utf8").trim();
+    if (existing !== "") return existing;
+  }
+  const fresh = randomBytes(32).toString("hex");
+  writeSecret(path, fresh);
+  return fresh;
+}
+
+export interface ResolvePolicyOptions {
+  callerIsAgent: boolean;
+  /** From `--pseudonymize`. May tighten freely; loosening under an agent needs `acknowledged`. */
+  requested?: PseudonymizeMode | undefined;
+  /** True when the human passed `--i-understand-data-goes-to-a-model`. */
+  acknowledged: boolean;
+  env?: NodeJS.ProcessEnv;
+  warn?: (line: string) => void;
+}
+
+/**
+ * Resolve the effective policy.
+ *
+ * Default is `heuristic` under a detected agent and `off` otherwise (AC-52.3, AC-51.5): a human at
+ * a terminal reading their own application's data needs no surrogates, and a cron job is not the
+ * risk this exists for.
+ */
+export function resolvePolicy(opts: ResolvePolicyOptions): PrivacyPolicy {
+  let mode: PseudonymizeMode = opts.callerIsAgent ? "heuristic" : "off";
+  let origin: PrivacyPolicy["origin"] = "default";
+  let always: string[] = [];
+  let allow: string[] = [];
+
+  const path = policyPath(opts.env);
+  if (existsSync(path)) {
+    try {
+      const file = JSON.parse(readFileSync(path, "utf8")) as PolicyFile;
+      if (file.mode !== undefined) mode = parseMode(file.mode);
+      always = file.always ?? [];
+      allow = file.allow ?? [];
+      origin = "profile";
+    } catch {
+      // A broken policy file must not silently disable protection — keep the default and say so.
+      opts.warn?.(`warning: could not read ${path}; using the default policy\n`);
+    }
+  }
+
+  if (opts.requested !== undefined && opts.requested !== mode) {
+    const tightening = STRICTNESS[opts.requested] > STRICTNESS[mode];
+    if (tightening || !opts.callerIsAgent) {
+      mode = opts.requested;
+    } else if (opts.acknowledged) {
+      // Loosening under an agent is possible but never quiet (AC-50.4's asymmetry, AC-52.10).
+      opts.warn?.(
+        `warning: pseudonymization loosened to '${opts.requested}' under a detected AI caller\n`,
+      );
+      mode = opts.requested;
+    } else {
+      throw new UsageError(
+        `refusing to loosen pseudonymization to '${opts.requested}' for a detected AI caller`,
+        {
+          hint:
+            "Tightening needs no acknowledgement; loosening does, because the caller asking for\n" +
+            "weaker protection is the caller that wants the data. Pass\n" +
+            "  --i-understand-data-goes-to-a-model\n" +
+            "or run this from a terminal. See `signum help pseudonymization`.",
+        },
+      );
+    }
+  }
+
+  return {
+    mode,
+    always: new Set(always.map((a) => a.toLowerCase())),
+    allow: new Set(allow.map((a) => a.toLowerCase())),
+    // Memoized so repeated surrogates in one run read the file once, and so a command that
+    // pseudonymizes nothing never touches it at all.
+    secret: (() => {
+      let cached: string | undefined;
+      return () => (cached ??= loadSecret(opts.env));
+    })(),
+    origin,
+  };
+}
+
+/**
+ * What the caller must be told after emitting pseudonymized data (AC-52.6, AC-52.9).
+ *
+ * Silent partial protection is worse than none, because it invites false confidence — so this
+ * states what was replaced AND that the coverage is incomplete, and never claims compliance.
+ */
+export function disclosure(policy: PrivacyPolicy, pseudonymizedTokens: readonly string[]): string {
+  if (policy.mode === "off" || pseudonymizedTokens.length === 0) return "";
+  return [
+    `note: pseudonymized (${policy.mode}): ${[...new Set(pseudonymizedTokens)].join(", ")}`,
+    "Surrogates are stable per profile, so the same value reads the same across commands.",
+    "Coverage is INCOMPLETE: free text is not scanned, heuristics are locale-dependent, and",
+    "aggregates can still identify. Pseudonymized data remains personal data (GDPR Art. 4(5));",
+    "this is not a compliance control. See `signum help pseudonymization`.",
+    "",
+  ].join("\n");
+}
+
+/**
+ * Pseudonymize an arbitrary entity document (REQ-057, for `signum get`).
+ *
+ * Query rows are handled inside `resolveResultTable`, where the columns are known. An entity is a
+ * document, so classification walks it by MEMBER NAME instead, recursively. Without this the m2
+ * gate change would be a leak: pseudonymization opens the agent path, and an unpseudonymized `get`
+ * would then walk straight through it.
+ *
+ * Structural keys are never touched — replacing `Type`, `id` or `ticks` would corrupt the document
+ * and break the round-trip invariants REQ-031 depends on. Note that means an entity's own `id`
+ * survives: turning identity into an opaque handle is REQ-058 (#52), not this.
+ */
+const STRUCTURAL_KEYS = new Set(["type", "entitytype", "modeltype", "id", "ticks", "rowid", "ismodified", "modified"]);
+
+export function pseudonymizeDocument(
+  value: unknown,
+  policy: PrivacyPolicy,
+  seen: string[] = [],
+): { value: unknown; pseudonymized: string[] } {
+  if (policy.mode === "off") return { value, pseudonymized: [] };
+
+  const walk = (node: unknown, path: string): unknown => {
+    if (Array.isArray(node)) return node.map((n) => walk(n, path));
+    if (node === null || typeof node !== "object") return node;
+
+    const out: Record<string, unknown> = {};
+    for (const [key, v] of Object.entries(node as Record<string, unknown>)) {
+      if (STRUCTURAL_KEYS.has(key.toLowerCase())) {
+        out[key] = v;
+        continue;
+      }
+      const decision = classify(key, policy);
+      if (decision.pseudonymize && (v === null || typeof v !== "object")) {
+        out[key] = surrogate(v, key, policy);
+        seen.push(key);
+      } else {
+        out[key] = walk(v, path === "" ? key : `${path}.${key}`);
+      }
+    }
+    return out;
+  };
+
+  const result = walk(value, "");
+  return { value: result, pseudonymized: [...new Set(seen)] };
+}
