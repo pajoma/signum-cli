@@ -241,7 +241,7 @@ Resolves [ADR 0002](decisions/0002-mcp-vs-http.md) option C2. Motivated by "AI a
 | REQ-074 | always | **No credential leakage.** No key, token, or password may appear in stdout, stderr, logs, traces, telemetry, crash output, or any file except the credential store. Tested, not merely intended. |
 | REQ-075 | always | **Works against any Signum app.** No server-side module required. The one documented exception is API-key auth (REQ-002), which needs `Signum.Rest` — degrade to REQ-003 with a clear message. |
 | REQ-076 | m3 | **Version and capability detection.** Detect the target app's framework version and available modules; degrade gracefully and say so, rather than failing obscurely, when something is absent. |
-| REQ-077 | always | **Test strategy without a live server.** Contract tests against recorded fixtures for offline CI, plus an opt-in live suite against a real app. **Nothing in `docs/` has been verified against a running server** — the live suite is what converts these documents from hypothesis to fact. |
+| REQ-077 | always | **Test strategy without a live server.** Contract tests against recorded fixtures for offline CI, plus an opt-in live suite against a real app. **Nothing in `docs/` has been verified against a running server** — the live suite is what converts these documents from hypothesis to fact. First live run is scripted in [`reference/live-verification-runbook.md`](reference/live-verification-runbook.md); it is the standing blocker on every other requirement's closure, which is why it is P0. |
 
 ---
 
