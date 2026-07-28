@@ -223,3 +223,72 @@ describe("the data-output boundary (ADR 0007 · policy.ts)", () => {
     expect(chunks).toEqual([]);
   });
 });
+
+/**
+ * Entity-valued columns must be readable — the live-run complaint was a table full of `User;102`.
+ *
+ * The rule differs per column, because their uses differ: the `Entity` column is the row's
+ * identity and its value is that it pastes into `signum get`, while any other entity column is
+ * being read by a human.
+ */
+describe("entity columns render a label, except the identity column", () => {
+  const LITE_WITH_MODEL = resolveResultTable(
+    {
+      columns: ["User", "Level"],
+      rows: [{
+        entity: { EntityType: "UserSkill", id: 6715 },
+        columns: [{ EntityType: "User", id: 102, model: "alice" }, 3],
+      }],
+    },
+    { requestedColumns: ["Entity", "User", "Level"] },
+  );
+
+  it("uses `model` for a non-identity entity column, not the key", () => {
+    const s = sink();
+    renderResultTable(LITE_WITH_MODEL, { format: "csv", write: s.write, warn: s.warn });
+    expect(s.out()).toBe("Entity,User,Level\nUserSkill;6715,alice,3\n");
+  });
+
+  it("keeps the Entity column as a pasteable key even when it has a label", () => {
+    // Otherwise `signum get` loses its input, and `-o name` would disagree with the table.
+    const t = resolveResultTable(
+      {
+        columns: ["Level"],
+        rows: [{ entity: { EntityType: "UserSkill", id: 6715, model: "alice / TypeScript" }, columns: [3] }],
+      },
+      { requestedColumns: ["Entity", "Level"] },
+    );
+    const s = sink();
+    renderResultTable(t, { format: "csv", write: s.write, warn: s.warn });
+    expect(s.out()).toBe("Entity,Level\nUserSkill;6715,3\n");
+  });
+
+  it("prefers a loaded entity's toStr over a model (framework order)", () => {
+    const t = resolveResultTable({
+      columns: ["User"],
+      rows: [{ columns: [{ EntityType: "User", id: 102, model: "stale", entity: { Type: "User", id: 102, toStr: "fresh" } }] }],
+    });
+    const s = sink();
+    renderResultTable(t, { format: "csv", write: s.write, warn: s.warn });
+    expect(s.out()).toBe("User\nfresh\n");
+  });
+
+  it("falls back to the KEY when the wire carries no label at all", () => {
+    // `LiteJsonConverter` omits `model` unless the Lite has one, so this is the common case and
+    // the reason --resolve exists: a key beats a JSON blob, but a label beats both.
+    const t = resolveResultTable({
+      columns: ["User"],
+      rows: [{ columns: [{ EntityType: "User", id: 102 }] }],
+    });
+    const s = sink();
+    renderResultTable(t, { format: "csv", write: s.write, warn: s.warn });
+    expect(s.out()).toBe("User\nUser;102\n");
+  });
+
+  it("json keeps the whole Lite — structured formats lose nothing by staying structured", () => {
+    const s = sink();
+    renderResultTable(LITE_WITH_MODEL, { format: "json", write: s.write, warn: s.warn });
+    const rows = JSON.parse(s.out()) as Array<Record<string, unknown>>;
+    expect(rows[0]?.["User"]).toEqual({ EntityType: "User", id: 102, model: "alice" });
+  });
+});

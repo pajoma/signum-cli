@@ -74,6 +74,13 @@ export interface ResolveOptions {
    * order (`ResultTable.AllColumns()` = `Columns.PreAnd(entityColumn)`).
    */
   requestedColumns?: readonly string[] | undefined;
+  /**
+   * Display name overrides, keyed by the token actually sent. `--resolve` rewrites an entity
+   * column to `User.ToString` so the server returns a label; the reader still asked about `User`
+   * and the header should say so. Only the columns the CLI itself rewrote appear here, so an
+   * explicit `--column User.ToString` keeps its own name and cannot collide with a `User` column.
+   */
+  columnLabels?: Readonly<Record<string, string>> | undefined;
 }
 
 function columnToken(col: NonNullable<RawResultTable["columns"]>[number], index: number): string {
@@ -114,7 +121,8 @@ function entityPosition(serverColumns: readonly string[], requested: readonly st
  * @throws CliError when an interned index is out of range — never silently null (AC-21.4).
  */
 export function resolveResultTable(raw: RawResultTable, options: ResolveOptions = {}): ResolvedTable {
-  const serverColumns = (raw.columns ?? []).map(columnToken);
+  const labels = options.columnLabels ?? {};
+  const serverColumns = (raw.columns ?? []).map(columnToken).map((c) => labels[c] ?? c);
   const uniqueValues = raw.uniqueValues ?? {};
   const rawRows = raw.rows ?? [];
 
