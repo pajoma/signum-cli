@@ -90,8 +90,8 @@ const FLAGS_WITH_VALUE = new Set([
 
 /** Boolean flags — listing one above would make it demand a value. */
 export const BOOLEAN_FLAGS = new Set([
-  "with-token", "exists", "count", "all", "yes", "y", "raw", "group", "privacy",
-  "list", "clear",
+  "with-token", "exists", "count", "all", "yes", "y", "raw", "group",
+  "resolve", "privacy", "list", "clear",
 ]);
 
 /** Invariant: a flag cannot need a value and be boolean-only at once. Checked by test. */

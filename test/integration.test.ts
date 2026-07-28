@@ -79,6 +79,9 @@ const QUERY_DESCRIPTION = {
     Id: { key: "Id", fullKey: "Id", niceName: "Id", type: { name: "number" }, isGroupable: true },
     State: { key: "State", fullKey: "State", niceName: "State", type: { name: "string" }, isGroupable: true },
     Total: { key: "Total", fullKey: "Total", niceName: "Total", type: { name: "decimal" }, isGroupable: true },
+    // Entity-valued, like the reported UserSkill.User — renders as "User;102" without help.
+    Customer: { key: "Customer", fullKey: "Customer", niceName: "Customer",
+      queryTokenType: null, filterType: "Lite", type: { name: "Customer" }, isGroupable: true },
   },
 };
 
@@ -773,7 +776,32 @@ describe("query (STORY-20, STORY-21, STORY-22)", () => {
     const sent = executeQueryRequests.at(-1);
     const tokens = (sent?.columns ?? []).map((c) => c.token);
     // Entity, Count and TimeSeries are all excluded — the framework's own rule (Finder.tsx:383-387).
-    expect(tokens).toEqual(["Id", "State", "Total"]);
+    expect(tokens).toEqual(["Id", "State", "Total", "Customer"]);
+  });
+
+  it("--resolve rewrites entity columns to .ToString, so the SERVER returns labels", async () => {
+    // The reported problem: a table full of `User;102`. EntityToStringToken (Key == "ToString")
+    // resolves the label in the same query — no N+1, no second round trip per row.
+    executeQueryRequests.length = 0;
+    const r = await cli(["query", "Order", "--resolve", "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const tokens = (executeQueryRequests.at(-1)?.columns ?? []).map((c) => c.token);
+    // Only the Lite-typed column changes; scalars are left alone.
+    expect(tokens).toEqual(["Id", "State", "Total", "Customer.ToString"]);
+  });
+
+  it("--resolve leaves the identity column alone — it must stay pasteable", async () => {
+    executeQueryRequests.length = 0;
+    await cli(["query", "Order", "--resolve", "--column", "Entity", "--column", "State", "--json"]);
+    const tokens = (executeQueryRequests.at(-1)?.columns ?? []).map((c) => c.token);
+    expect(tokens).toEqual(["Entity", "State"]);
+  });
+
+  it("--resolve on explicitly named columns asks parseTokens which are entity-valued", async () => {
+    executeQueryRequests.length = 0;
+    await cli(["query", "Order", "--resolve", "--column", "State", "--json"]);
+    // State is a string, so it is untouched — proving the rewrite is type-driven, not name-driven.
+    expect((executeQueryRequests.at(-1)?.columns ?? []).map((c) => c.token)).toEqual(["State"]);
   });
 
   it("named columns REPLACE the defaults rather than adding to them", async () => {
@@ -801,7 +829,7 @@ describe("query (STORY-20, STORY-21, STORY-22)", () => {
     const r = await cli(["query", "Order", "--explain"]);
     expect(r.code).toBe(ExitCode.Ok);
     const doc = JSON.parse(r.out) as { body: { columns: Array<{ token: string }> } };
-    expect(doc.body.columns.map((c) => c.token)).toEqual(["Id", "State", "Total"]);
+    expect(doc.body.columns.map((c) => c.token)).toEqual(["Id", "State", "Total", "Customer"]);
   });
 
   it("--explain degrades with a note when the defaults cannot be resolved, rather than failing", async () => {

@@ -78,9 +78,19 @@ export interface ResolveOptions {
    */
   requestedColumns?: readonly string[] | undefined;
   /**
+   * Display name overrides, keyed by the token actually sent. `--resolve` rewrites an entity
+   * column to `User.ToString` so the server returns a label; the reader still asked about `User`
+   * and the header should say so. Only the columns the CLI itself rewrote appear here, so an
+   * explicit `--column User.ToString` keeps its own name and cannot collide with a `User` column.
+   */
+  columnLabels?: Readonly<Record<string, string>> | undefined;
+  /**
    * Pseudonymization policy (REQ-057). Applied HERE, inside the de-interning boundary, so no
    * renderer can ever hold a real value — the same single-choke-point argument as AC-21.1, for the
    * same reason: a protection applied per output path is a protection one output path will forget.
+   *
+   * Classification runs on the LABELLED column name, so `--resolve`'s rewritten `User.ToString` is
+   * judged as `User` — the token the reader asked about, and therefore the right one to judge.
    */
   privacy?: PrivacyPolicy | undefined;
   /**
@@ -129,7 +139,8 @@ function entityPosition(serverColumns: readonly string[], requested: readonly st
  * @throws CliError when an interned index is out of range — never silently null (AC-21.4).
  */
 export function resolveResultTable(raw: RawResultTable, options: ResolveOptions = {}): ResolvedTable {
-  const serverColumns = (raw.columns ?? []).map(columnToken);
+  const labels = options.columnLabels ?? {};
+  const serverColumns = (raw.columns ?? []).map(columnToken).map((c) => labels[c] ?? c);
   const uniqueValues = raw.uniqueValues ?? {};
   const rawRows = raw.rows ?? [];
 

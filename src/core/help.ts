@@ -180,12 +180,14 @@ export const COMMANDS: CommandSpec[] = [
       { name: "all", summary: "Fetch every row, unbounded — only one of --top/--page/--all at a time" },
       { name: "group", summary: "Set groupResults; required for aggregate tokens (Total.Sum, …)" },
       { name: "count", summary: "Return only the row count" },
+      { name: "resolve", summary: "Show entity columns by name instead of Type;id (adds .ToString)" },
     ],
     examples: [
       'signum query Order --filter "State = Shipped" --top 20',
       'signum query Order --filter "Entity.Customer.Name ~ Acme" -o csv',
       'signum query Order --filter "State in Shipped,Delivered"',
       "signum query Order --count",
+      "signum query Order --resolve --top 20",
     ],
   },
   {

@@ -14,7 +14,7 @@ import { ExitCode, UsageError } from "../core/errors.ts";
 import { renderResultTable, renderDataDocument, renderDocument } from "../core/output.ts";
 import { resolveResultTable, type RawResultTable } from "../core/resulttable.ts";
 import { loadMetadata, resolveQueryKey } from "../core/metadata.ts";
-import { fetchDefaultColumns } from "../core/tokens.ts";
+import { fetchDefaultColumns, resolveLiteColumns, validateTokens } from "../core/tokens.ts";
 import { createRecorder, disclosure, isHandle, resolveHandle } from "../core/privacy.ts";
 import { loadHandles } from "../core/config.ts";
 import { persistHandles } from "./context.ts";
@@ -198,13 +198,31 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
   // ColumnOptionsMode "Add" (`Finder.tsx:362`), but `--column X` on a CLI plainly means "show me
   // X", and AC-20.3 says "selects".
   const requestedColumns = optAll(ctx, "column");
+  const resolveLites = flag(ctx, "resolve");
   let effectiveColumns = requestedColumns;
+  let columnLabels: Record<string, string> = {};
+
+  // --resolve on explicitly named columns: we need each token's filterType to know which are
+  // entity-valued, and parseTokens is what knows. One extra request, under an explicit flag.
+  if (resolveLites && requestedColumns.length > 0 && !wantCount) {
+    const resolved = resolveLiteColumns(await validateTokens(target.http, queryKey, requestedColumns));
+    effectiveColumns = resolved.columns;
+    columnLabels = resolved.labels;
+  }
 
   if (requestedColumns.length === 0 && !groupEnabled && !wantCount) {
     // --group is excluded: a grouped query's columns are the grouping keys plus aggregates, which
     // only the caller can choose. Defaulting them would invent a query nobody asked for.
     try {
-      effectiveColumns = (await fetchDefaultColumns(target.http, queryKey)).map((c) => c.fullKey);
+      const defaults = await fetchDefaultColumns(target.http, queryKey);
+      // The description already carries each column's filterType, so --resolve is free here.
+      if (resolveLites) {
+        const resolved = resolveLiteColumns(defaults);
+        effectiveColumns = resolved.columns;
+        columnLabels = resolved.labels;
+      } else {
+        effectiveColumns = defaults.map((c) => c.fullKey);
+      }
     } catch (err) {
       // --explain must keep working without a credential, and this endpoint needs one
       // (QueryController is not [SignumAllowAnonymous]). Degrade rather than fail, and say so, so
@@ -275,7 +293,9 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
   // column order goes in so the hoisted `Entity` column comes back at the position the user
   // asked for, in every format (AC-21.2).
   const recorder = createRecorder();
-  const table = resolveResultTable(res.body, { requestedColumns, privacy: ctx.privacy, handles: recorder });
+  const table = resolveResultTable(res.body, {
+    requestedColumns, columnLabels, privacy: ctx.privacy, handles: recorder,
+  });
 
   // Persist BEFORE emitting. A handle we have printed but not stored is exactly the unresolvable
   // handle AC-53.5 exists to prevent — and we would have created it ourselves.
