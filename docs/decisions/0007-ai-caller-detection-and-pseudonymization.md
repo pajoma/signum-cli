@@ -117,7 +117,7 @@ piece of the design that is genuinely elegant rather than merely careful.
 
 The surrogate→real mapping is written to a local store with `0600`, is never printed unless explicitly
 asked for, and is never included in `--json` output, MCP tool results, traces, or telemetry. A
-`de-pseudonymize` command lets a **human** resolve surrogates locally.
+`unmask` command lets a **human** resolve surrogates locally. (Named `de-pseudonymize` in this ADR's original text; renamed for typability, with the *concept* still called re-identification — see REQ-058.)
 
 ## Known limits — to be stated in the CLI's own help
 

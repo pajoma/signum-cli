@@ -20,7 +20,7 @@
  */
 
 import { CliError, ExitCode } from "./errors.ts";
-import { classify, surrogate, type PrivacyPolicy } from "./privacy.ts";
+import { classify, surrogate, type HandleRecorder, type PrivacyPolicy } from "./privacy.ts";
 
 /** Raw wire shape of `ResultTable`, exactly as the server sends it. */
 export interface RawResultTable {
@@ -83,6 +83,12 @@ export interface ResolveOptions {
    * same reason: a protection applied per output path is a protection one output path will forget.
    */
   privacy?: PrivacyPolicy | undefined;
+  /**
+   * Collects `ref:` handles minted while pseudonymizing, so the caller can persist them BEFORE
+   * emitting anything (REQ-058). Emitting a handle we have not stored would create the
+   * "unresolvable handle" AC-53.5 exists to prevent, and we would have caused it ourselves.
+   */
+  handles?: HandleRecorder | undefined;
 }
 
 function columnToken(col: NonNullable<RawResultTable["columns"]>[number], index: number): string {
@@ -188,7 +194,11 @@ export function resolveResultTable(raw: RawResultTable, options: ResolveOptions 
     // Pseudonymize AFTER alignment, so a column's policy is decided by the column it actually is.
     const values = privacy === undefined
       ? aligned
-      : aligned.map((v, i) => (pseudoColumns.has(columns[i] as string) ? surrogate(v, columns[i] as string, privacy) : v));
+      : aligned.map((v, i) =>
+          pseudoColumns.has(columns[i] as string)
+            ? surrogate(v, columns[i] as string, privacy, options.handles)
+            : v,
+        );
 
     return { entity, values };
   });

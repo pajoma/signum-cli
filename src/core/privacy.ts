@@ -158,11 +158,26 @@ export function classify(token: string, policy: PrivacyPolicy): Classification {
  * Fabricating a date that looks real risks being mistaken for data, which is worse than being
  * obviously a surrogate. Full type preservation is follow-up work.
  */
-export function surrogate(value: unknown, token: string, policy: PrivacyPolicy): unknown {
+export function surrogate(
+  value: unknown,
+  token: string,
+  policy: PrivacyPolicy,
+  recorder?: HandleRecorder,
+): unknown {
   if (value === null || value === undefined) return value; // absence is not identifying
   if (typeof value === "boolean") return value;            // one bit cannot identify anyone
 
   const digest = createHmac("sha256", policy.secret()).update(canonical(value)).digest("hex");
+
+  // A Lite is an IDENTITY, not a value, so it becomes an opaque handle the caller can act through
+  // rather than a label it can only read (AC-53.1). `ref:` is deliberately not `Type;id`-shaped, so
+  // nothing downstream mistakes it for one.
+  const lite = liteKeyOf(value);
+  if (lite !== undefined) {
+    const handle = `${HANDLE_PREFIX}${digest.slice(0, HANDLE_HEX)}`;
+    recorder?.record(handle, lite);
+    return handle;
+  }
 
   if (typeof value === "number") {
     // Stable, positive, and numeric — so a csv column of numbers stays a column of numbers.
@@ -170,6 +185,64 @@ export function surrogate(value: unknown, token: string, policy: PrivacyPolicy):
   }
 
   return `${labelFor(token)}-${digest.slice(0, 4)}`;
+}
+
+export const HANDLE_PREFIX = "ref:";
+
+/**
+ * 48 bits of digest. ADR 0007 illustrates a handle as `ref:7f3a`, but 16 bits collide at a few
+ * hundred entries by the birthday bound, and a handle collision means two people sharing one
+ * identity — the exact silent mismatch AC-53.6 forbids. 12 hex characters makes that negligible at
+ * any realistic volume, and `saveHandles` still detects a collision rather than trusting the maths.
+ */
+const HANDLE_HEX = 12;
+
+/** Collects handle -> real mappings so the caller can persist them BEFORE anything is emitted. */
+export interface HandleRecorder {
+  record(handle: string, real: string): void;
+}
+
+export function createRecorder(): HandleRecorder & { entries(): Record<string, string> } {
+  const map: Record<string, string> = {};
+  return {
+    record(handle, real) { map[handle] = real; },
+    entries() { return map; },
+  };
+}
+
+/** `{EntityType, id}` -> `"Type;id"`, or undefined when the value is not a Lite. */
+function liteKeyOf(value: unknown): string | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  const o = value as Record<string, unknown>;
+  const type = o["EntityType"] ?? o["Type"];
+  const id = o["id"];
+  if (typeof type === "string" && (typeof id === "string" || typeof id === "number")) {
+    return `${type};${String(id)}`;
+  }
+  return undefined;
+}
+
+export function isHandle(value: string): boolean {
+  return value.startsWith(HANDLE_PREFIX);
+}
+
+/**
+ * Resolve a `ref:` handle to the real Lite key it stands for (AC-53.2).
+ *
+ * Throws when it cannot: an unresolvable handle must never be forwarded to the server as a literal
+ * string, which would either 404 confusingly or — worse — match something (AC-53.5).
+ */
+export function resolveHandle(handle: string, handles: Readonly<Record<string, string>>): string {
+  const real = handles[handle];
+  if (real === undefined) {
+    throw new UsageError(`cannot resolve ${handle}`, {
+      hint:
+        "Handles are local, per profile, and only valid for the surrogate secret that produced\n" +
+        "them — so one from another profile, or from before `unmask --clear`, is gone for\n" +
+        "good. Re-run the query that produced it to mint a fresh handle.",
+    });
+  }
+  return real;
 }
 
 /** Stable string form, so the same logical value always digests identically. */
@@ -345,6 +418,7 @@ const STRUCTURAL_KEYS = new Set(["type", "entitytype", "modeltype", "id", "ticks
 export function pseudonymizeDocument(
   value: unknown,
   policy: PrivacyPolicy,
+  recorder?: HandleRecorder,
   seen: string[] = [],
 ): { value: unknown; pseudonymized: string[] } {
   if (policy.mode === "off") return { value, pseudonymized: [] };
@@ -361,7 +435,7 @@ export function pseudonymizeDocument(
       }
       const decision = classify(key, policy);
       if (decision.pseudonymize && (v === null || typeof v !== "object")) {
-        out[key] = surrogate(v, key, policy);
+        out[key] = surrogate(v, key, policy, recorder);
         seen.push(key);
       } else {
         out[key] = walk(v, path === "" ? key : `${path}.${key}`);

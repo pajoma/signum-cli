@@ -5,9 +5,9 @@
 
 import type { Ctx } from "../cli.ts";
 import { SignumHttp } from "../core/http.ts";
-import { loadCredential, type StoredCredential } from "../core/config.ts";
+import { loadCredential, saveHandles, type StoredCredential } from "../core/config.ts";
 import { normalizeUrl } from "../core/text.ts";
-import { NotAuthenticatedError, UsageError } from "../core/errors.ts";
+import { CliError, ExitCode, NotAuthenticatedError, UsageError } from "../core/errors.ts";
 
 export interface Target {
   url: string;
@@ -100,4 +100,27 @@ export function optAll(ctx: Ctx, name: string): string[] {
 
 export function flag(ctx: Ctx, name: string): boolean {
   return ctx.args.booleans.has(name);
+}
+
+/**
+ * Store freshly minted `ref:` handles (REQ-058), and refuse to continue if any collided.
+ *
+ * A collision means two real identities would share one handle. Reporting it is not pedantry: the
+ * whole point of a handle is that resolving it yields the record the agent actually acted on, and a
+ * silent mismatch there is worse than no handle at all (AC-53.6).
+ */
+export function persistHandles(ctx: Ctx, entries: Readonly<Record<string, string>>): void {
+  if (Object.keys(entries).length === 0) return;
+  const collisions = saveHandles(entries, ctx.io.env);
+  if (collisions.length > 0) {
+    throw new CliError(
+      `handle collision: ${collisions.join(", ")} already stands for a different record`,
+      ExitCode.Unexpected,
+      {
+        hint:
+          "This should be effectively impossible at 48 bits, so treat it as a bug worth reporting.\n" +
+          "Nothing was emitted, and the existing mapping was left untouched.",
+      },
+    );
+  }
 }
