@@ -85,13 +85,13 @@ An agent needs a handle to act (`--lite "Order;42"`). A real `Lite` key is direc
 the app; pseudonymizing it naively would break the ability to act at all.
 
 **Acceptance Criteria:**
-- AC-53.1: In pseudonymizing mode, `Lite` keys are emitted as opaque local handles (`ref:7f3a`) instead of `TypeName;id`.
+- AC-53.1: In pseudonymizing mode, `Lite` keys are emitted as opaque local handles instead of `TypeName;id`. *(Amended: the handle carries **48 bits** — `ref:7f3a1c2b4d5e`, not the illustrative `ref:7f3a`. 16 bits collide at a few hundred entries by the birthday bound, and a handle collision means two people sharing one identity — precisely the silent mismatch AC-53.6 forbids. The store also detects a collision on write rather than trusting the arithmetic.)*
 - AC-53.2: Any argument accepting a `Lite` also accepts `ref:…`, resolving it locally **before** the request is built.
 - AC-53.3: The surrogate→real mapping is stored locally with `0600` permissions and is **never** included in stdout, `--json`, MCP tool results, traces, logs, or telemetry.
-- AC-53.4: A `de-pseudonymize` command lets a **human** resolve surrogates locally, for auditing what an agent acted on.
+- AC-53.4: A `de-pseudonymize` command lets a **human** resolve surrogates locally, for auditing what an agent acted on. It needs a check of its own rather than the shared data gate: since REQ-057 landed, a detected agent passes `openData` whenever pseudonymization is active — correct for pseudonymized rows, and exactly wrong here, because resolving a handle is the act of *removing* the protection. So it refuses an agent unless the human-typed acknowledgement is present.
 - AC-53.5: An unresolvable or expired `ref:` fails clearly rather than being forwarded as a literal string.
-- AC-53.6: Handle scope and lifetime are documented; a stale handle after a scope change is an explicit error, never a silent mismatch.
-- AC-53.7: Mutations performed via a `ref:` handle are recorded in the local audit log (AC-46.6) with the **real** target, so an operator can reconstruct what actually happened.
+- AC-53.6: Handle scope and lifetime are documented; a stale handle after a scope change is an explicit error, never a silent mismatch. **Scope:** per profile, valid only for the surrogate secret that produced it. **Lifetime:** until `de-pseudonymize --clear`, which is total and irreversible. Both are stated in the failure message, so a reader learns them at the moment they need them rather than from a document.
+- AC-53.7: `m2` — Mutations performed via a `ref:` handle are recorded in the local audit log (AC-46.6) with the **real** target, so an operator can reconstruct what actually happened. **Not reachable yet:** this milestone has no write commands, so there is no mutation to log. The handle-resolution half it depends on is in place.
 
 ---
 

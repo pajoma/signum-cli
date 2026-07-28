@@ -12,6 +12,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { run, type Io } from "../src/cli.ts";
+import { saveHandles } from "../src/core/config.ts";
 import { ExitCode } from "../src/core/errors.ts";
 
 const GOOD_TOKEN = "test-token-aaaa";
@@ -1254,6 +1255,114 @@ describe("SIGNUM_TOKEN, for a non-interactive run (AC-09.2)", () => {
     expect(r.code).toBe(ExitCode.NotAuthenticated);
     expect(r.err).toContain("SIGNUM_TOKEN");
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+/**
+ * End-to-end handles — REQ-058 (#52) · STORY-53.
+ *
+ * The point of a handle is that an agent can ACT on a record it cannot identify. So the test that
+ * matters is the round trip: query as an agent, get a ref:, then use that ref: to fetch the record —
+ * with the handle resolved locally and never reaching the server.
+ */
+describe("ref: handles, end to end (REQ-058)", () => {
+  /** A fresh profile with the shared credential, so handles start empty. */
+  function profile(): string {
+    const d = mkdtempSync(join(tmpdir(), "signum-e2e-refs-"));
+    writeFileSync(join(d, "credential.json"), readFileSync(join(configDir, "credential.json")));
+    return d;
+  }
+
+  it("emits ref: for the Entity column under strict, and stores it", async () => {
+    const d = profile();
+    const r = await cli(["query", "Order", "--pseudonymize", "strict", "--json"], {
+      env: { SIGNUM_CONFIG_DIR: d, CLAUDECODE: "1" },
+    });
+    expect(r.code).toBe(ExitCode.Ok);
+    const rows = JSON.parse(r.out) as Array<Record<string, unknown>>;
+    const handle = String(rows[0]?.["Entity"]);
+    expect(handle).toStartWith("ref:");
+
+    // Stored BEFORE emission, so what we printed is always resolvable.
+    const stored = JSON.parse(readFileSync(join(d, "handles.json"), "utf8")) as Record<string, string>;
+    expect(stored[handle]).toBe("Order;42");
+    rmSync(d, { recursive: true, force: true });
+  });
+
+  it("accepts the handle where a Lite key goes, and resolves it LOCALLY (AC-53.2)", async () => {
+    const d = profile();
+    const q = await cli(["query", "Order", "--pseudonymize", "strict", "--json"], {
+      env: { SIGNUM_CONFIG_DIR: d, CLAUDECODE: "1" },
+    });
+    const handle = String((JSON.parse(q.out) as Array<Record<string, unknown>>)[0]?.["Entity"]);
+
+    // The mock only answers /api/entity/Order/42 — so a passing fetch proves the handle was
+    // translated before the request, not forwarded.
+    const g = await cli(["get", handle, "--json", "--pseudonymize", "off", "--i-understand-data-goes-to-a-model"], {
+      env: { SIGNUM_CONFIG_DIR: d, CLAUDECODE: "1" },
+    });
+    expect(g.code).toBe(ExitCode.Ok);
+    expect((JSON.parse(g.out) as Record<string, unknown>)["id"]).toBe(42);
+    rmSync(d, { recursive: true, force: true });
+  });
+
+  it("an unknown handle fails locally and is NEVER sent (AC-53.5)", async () => {
+    const d = profile();
+    const r = await cli(["get", "ref:ffffffffffff", "--i-understand-data-goes-to-a-model"], {
+      env: { SIGNUM_CONFIG_DIR: d, CLAUDECODE: "1" },
+    });
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("cannot resolve ref:ffffffffffff");
+    rmSync(d, { recursive: true, force: true });
+  });
+
+  it("de-pseudonymize resolves a handle for a human", async () => {
+    const d = profile();
+    const q = await cli(["query", "Order", "--pseudonymize", "strict", "--json"], {
+      env: { SIGNUM_CONFIG_DIR: d, CLAUDECODE: "1" },
+    });
+    const handle = String((JSON.parse(q.out) as Array<Record<string, unknown>>)[0]?.["Entity"]);
+
+    const r = await cli(["de-pseudonymize", handle], { tty: true, env: { SIGNUM_CONFIG_DIR: d } });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.out).toContain("Order;42");
+    rmSync(d, { recursive: true, force: true });
+  });
+
+  it("REFUSES an agent, even though pseudonymization opened the data gate (AC-53.4)", async () => {
+    // This is the one command that needs its own check. Since REQ-057, an agent passes openData
+    // whenever pseudonymization is active — correct for pseudonymized rows, and exactly wrong here,
+    // because resolving a handle is the act of removing the protection.
+    const d = profile();
+    saveHandles({ "ref:aaaaaaaaaaaa": "Order;42" }, { SIGNUM_CONFIG_DIR: d } as unknown as NodeJS.ProcessEnv);
+    const r = await cli(["de-pseudonymize", "ref:aaaaaaaaaaaa"], {
+      env: { SIGNUM_CONFIG_DIR: d, CLAUDECODE: "1" },
+    });
+    expect(r.code).toBe(ExitCode.Policy);
+    expect(r.err).toContain("for a human");
+    rmSync(d, { recursive: true, force: true });
+  });
+
+  it("--list counts without revealing, --clear expires everything (AC-53.3, AC-53.6)", async () => {
+    const d = profile();
+    saveHandles({ "ref:aaaaaaaaaaaa": "Order;42" }, { SIGNUM_CONFIG_DIR: d } as unknown as NodeJS.ProcessEnv);
+
+    const list = await cli(["de-pseudonymize", "--list"], { tty: true, env: { SIGNUM_CONFIG_DIR: d } });
+    expect(list.out).toContain("1 handle stored");
+    expect(list.out).not.toContain("Order;42"); // a count is not a disclosure
+
+    const cleared = await cli(["de-pseudonymize", "--clear"], { tty: true, env: { SIGNUM_CONFIG_DIR: d } });
+    expect(cleared.out).toContain("removed");
+    const after = await cli(["de-pseudonymize", "ref:aaaaaaaaaaaa"], { tty: true, env: { SIGNUM_CONFIG_DIR: d } });
+    expect(after.code).toBe(ExitCode.Usage);
+    expect(after.err).toContain("cannot resolve");
+    rmSync(d, { recursive: true, force: true });
+  });
+
+  it("rejects something that is not a handle rather than pretending to resolve it", async () => {
+    const r = await cli(["de-pseudonymize", "Order;42"], { tty: true, env: { SIGNUM_CONFIG_DIR: configDir } });
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("not a handle");
   });
 });
 

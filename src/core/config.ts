@@ -299,3 +299,69 @@ export function clearMetadataCache(url: string | undefined, env?: NodeJS.Process
   }
   return removed;
 }
+
+// ── re-identification handle store (REQ-058) ────────────────────────────────
+
+/**
+ * `ref:…` handle -> the real `TypeName;id` it stands for.
+ *
+ * Stored `0600` and per-profile, matching the surrogate secret's scope (AC-53.3, AC-53.8): a handle
+ * is only meaningful against the secret that produced it, so the two must live and die together.
+ *
+ * **This file is the one place real identities and their surrogates sit side by side.** It is never
+ * emitted — not to stdout, not to `--json`, not to a trace (AC-53.3). `de-pseudonymize` reads it and
+ * prints one answer at a time, for a human.
+ */
+export function handlesPath(env?: NodeJS.ProcessEnv): string {
+  return join(configDir(env), "handles.json");
+}
+
+export function loadHandles(env?: NodeJS.ProcessEnv): Record<string, string> {
+  const path = handlesPath(env);
+  if (!existsSync(path)) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof v === "string") out[k] = v;
+    }
+    return out;
+  } catch {
+    // A corrupt store must not stop the CLI working; it means handles stop resolving, which
+    // `de-pseudonymize` reports honestly rather than guessing (AC-53.5).
+    return {};
+  }
+}
+
+/**
+ * Merge new handles in and persist, atomically at `0600`.
+ *
+ * @returns the handles that COLLIDED — same handle, different real value. Never silently
+ * overwritten: a collision means two identities would share one surrogate, and AC-53.6's rule that a
+ * mismatch is an explicit error rather than a silent one applies at least as strongly here.
+ */
+export function saveHandles(
+  fresh: Readonly<Record<string, string>>,
+  env?: NodeJS.ProcessEnv,
+): string[] {
+  const existing = loadHandles(env);
+  const collisions: string[] = [];
+  for (const [handle, real] of Object.entries(fresh)) {
+    const prior = existing[handle];
+    if (prior !== undefined && prior !== real) {
+      collisions.push(handle);
+      continue;
+    }
+    existing[handle] = real;
+  }
+  writePrivate(handlesPath(env), JSON.stringify(existing, null, 2) + "\n");
+  return collisions;
+}
+
+export function clearHandles(env?: NodeJS.ProcessEnv): boolean {
+  const path = handlesPath(env);
+  if (!existsSync(path)) return false;
+  unlinkSync(path);
+  return true;
+}

@@ -15,7 +15,9 @@ import { renderResultTable, renderDataDocument, renderDocument } from "../core/o
 import { resolveResultTable, type RawResultTable } from "../core/resulttable.ts";
 import { loadMetadata, resolveQueryKey } from "../core/metadata.ts";
 import { fetchDefaultColumns } from "../core/tokens.ts";
-import { disclosure } from "../core/privacy.ts";
+import { createRecorder, disclosure, isHandle, resolveHandle } from "../core/privacy.ts";
+import { loadHandles } from "../core/config.ts";
+import { persistHandles } from "./context.ts";
 import { lowerFilterExpressions, parseFilterExpression, type FilterWire } from "../core/filter.ts";
 import { opt, optAll, flag, resolveTarget } from "./context.ts";
 import { readFileSync } from "node:fs";
@@ -98,6 +100,31 @@ function readFilterJson(source: string): unknown[] {
     });
   }
   return parsed;
+}
+
+/**
+ * Walk lowered filters and replace any `ref:` handle with the real Lite key (AC-53.2).
+ *
+ * Done on the LOWERED wire shape rather than in the parser so it catches values from `--filter` and
+ * `--filter-json` alike — the escape hatch must not be a hole in this.
+ */
+function resolveHandlesInFilters(
+  filters: readonly FilterWire[],
+  handles: Readonly<Record<string, string>>,
+): FilterWire[] {
+  const fixValue = (v: unknown): unknown => {
+    if (typeof v === "string" && isHandle(v)) return resolveHandle(v, handles);
+    if (Array.isArray(v)) return v.map(fixValue);
+    return v;
+  };
+  return filters.map((f) => {
+    const node = f as unknown as Record<string, unknown>;
+    if (Array.isArray(node["filters"])) {
+      return { ...node, filters: resolveHandlesInFilters(node["filters"] as FilterWire[], handles) } as FilterWire;
+    }
+    if ("value" in node) return { ...node, value: fixValue(node["value"]) } as FilterWire;
+    return f;
+  });
 }
 
 /** Names the data in a refusal message, and keeps the two `openData` calls in step. */
@@ -199,7 +226,10 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
   // DSL and --filter-json are combined by concatenation — both are ANDed at the top level,
   // matching the design's "may be combined" rule (design/filter-expression-syntax.md).
   const jsonFilters = filterJsonSource !== undefined ? (readFilterJson(filterJsonSource) as FilterWire[]) : [];
-  const filters: FilterWire[] = [...dslFilters, ...jsonFilters];
+  // AC-53.2 again, for filter values: resolve handles locally before the request is built, so a
+  // `ref:` never crosses the wire.
+  const handles = loadHandles(ctx.io.env);
+  const filters: FilterWire[] = resolveHandlesInFilters([...dslFilters, ...jsonFilters], handles);
 
   const request: Record<string, unknown> = {
     queryKey,
@@ -244,7 +274,12 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
   // The de-interning boundary: nothing downstream sees a raw row (AC-21.1). The requested
   // column order goes in so the hoisted `Entity` column comes back at the position the user
   // asked for, in every format (AC-21.2).
-  const table = resolveResultTable(res.body, { requestedColumns, privacy: ctx.privacy });
+  const recorder = createRecorder();
+  const table = resolveResultTable(res.body, { requestedColumns, privacy: ctx.privacy, handles: recorder });
+
+  // Persist BEFORE emitting. A handle we have printed but not stored is exactly the unresolvable
+  // handle AC-53.5 exists to prevent — and we would have created it ourselves.
+  persistHandles(ctx, recorder.entries());
 
   renderResultTable(table, {
     format: ctx.format,

@@ -8,9 +8,10 @@ import type { Ctx } from "../cli.ts";
 import { ExitCode, NotFoundError, UsageError } from "../core/errors.ts";
 import { renderDataDocument, renderDocument } from "../core/output.ts";
 import { findType, loadMetadata, suggestTypes } from "../core/metadata.ts";
-import { flag, resolveTarget } from "./context.ts";
+import { flag, persistHandles, resolveTarget } from "./context.ts";
+import { loadHandles } from "../core/config.ts";
 import { parseLiteKey } from "../core/text.ts";
-import { disclosure, pseudonymizeDocument } from "../core/privacy.ts";
+import { createRecorder, disclosure, isHandle, pseudonymizeDocument, resolveHandle } from "../core/privacy.ts";
 
 export async function runGet(ctx: Ctx): Promise<ExitCode> {
   const first = ctx.args.positionals[0];
@@ -33,8 +34,13 @@ export async function runGet(ctx: Ctx): Promise<ExitCode> {
     });
   }
 
-  const lite = parseLiteKey(first);
-  const typeName = lite?.type ?? first;
+  // AC-53.2: a `ref:` handle is accepted wherever a Lite is, and resolved LOCALLY — the handle
+  // itself must never reach the server, and an unresolvable one must fail here rather than be
+  // forwarded as a literal string that might 404 confusingly or, worse, match something (AC-53.5).
+  const subject = isHandle(first) ? resolveHandle(first, loadHandles(ctx.io.env)) : first;
+
+  const lite = parseLiteKey(subject);
+  const typeName = lite?.type ?? subject;
   const id = lite?.id ?? second;
 
   if (id === undefined) {
@@ -106,7 +112,9 @@ export async function runGet(ctx: Ctx): Promise<ExitCode> {
   // An entity is a document, not a table, so it renders as JSON in every format — and it is
   // pseudonymized by member name rather than by column (REQ-057). Without this the m2 gate change
   // would be a leak: pseudonymization opens the agent path, and `get` would walk through it raw.
-  const { value, pseudonymized } = pseudonymizeDocument(res.body, ctx.privacy);
+  const recorder = createRecorder();
+  const { value, pseudonymized } = pseudonymizeDocument(res.body, ctx.privacy, recorder);
+  persistHandles(ctx, recorder.entries()); // before emitting — see the note in query.ts
   renderDataDocument(value, {
     format: ctx.format === "table" ? "json" : ctx.format,
     write: ctx.openData(dataKind),

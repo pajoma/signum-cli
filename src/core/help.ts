@@ -197,6 +197,30 @@ export const COMMANDS: CommandSpec[] = [
     examples: ["signum get Order 42", 'signum get "Order;42" --json'],
   },
   {
+    name: "de-pseudonymize",
+    summary: "Resolve local ref: handles back to the records they stand for",
+    usage: "signum de-pseudonymize <ref:...> [<ref:...> ...] | --list | --clear",
+    milestone: "m2",
+    description:
+      "Pseudonymized output emits entity identities as opaque local handles (ref:...) rather than " +
+      "Type;id, so an agent can act on a record it cannot identify. This resolves them back, for a " +
+      "HUMAN auditing what was read or acted on.\n\n" +
+      "Nothing here touches the network: the surrogate-to-real mapping is local by construction and " +
+      "never leaves the machine. It is stored 0600 beside the credential, per profile, and is valid " +
+      "only for the surrogate secret that produced it.\n\n" +
+      "A handle is accepted anywhere a Lite key is, so `signum get ref:7f3a1c2b4d5e` works and is " +
+      "resolved locally before the request is built.",
+    flags: [
+      { name: "list", summary: "How many handles are stored (never what they mean)" },
+      { name: "clear", summary: "Forget them all - every outstanding handle stops resolving" },
+    ],
+    examples: [
+      "signum de-pseudonymize ref:7f3a1c2b4d5e",
+      "signum de-pseudonymize --list",
+      "signum de-pseudonymize --clear",
+    ],
+  },
+  {
     name: "cache",
     summary: "Inspect or clear the cached application metadata",
     usage: "signum cache <show|clear|path>",
@@ -395,8 +419,12 @@ export const TOPICS: Record<string, string> = {
     "  the caller asking for weaker protection is the caller that wants the data.",
     "",
     "  Surrogates are stable per profile, so the same value reads the same across",
-    "  commands. Recovering the original is REQ-058 and does not exist yet; re-run with",
-    "  --pseudonymize off from a terminal to see real values.",
+    "  commands. Entity identities become opaque handles (ref:...) rather than labels,",
+    "  so an agent can act on a record it cannot identify:",
+    "",
+    "    signum get ref:7f3a1c2b4d5e         resolved locally, never sent to the server",
+    "    signum de-pseudonymize ref:7f3a...  what it stands for (human only)",
+    "    signum de-pseudonymize --clear      forget every handle",
     "",
     "  LIMITS, and they are real: free text is never scanned, so a comment field",
     "  containing a name defeats this entirely. Heuristics both miss and misfire.",
