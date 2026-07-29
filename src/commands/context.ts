@@ -5,9 +5,10 @@
 
 import type { Ctx } from "../cli.ts";
 import { SignumHttp } from "../core/http.ts";
-import { loadCredential, type StoredCredential } from "../core/config.ts";
+import { loadCredential, saveHandles, type StoredCredential } from "../core/config.ts";
 import { normalizeUrl } from "../core/text.ts";
-import { NotAuthenticatedError, UsageError } from "../core/errors.ts";
+import { echoCommand } from "../core/commandline.ts";
+import { CliError, ExitCode, NotAuthenticatedError, UsageError } from "../core/errors.ts";
 
 export interface Target {
   url: string;
@@ -100,4 +101,61 @@ export function optAll(ctx: Ctx, name: string): string[] {
 
 export function flag(ctx: Ctx, name: string): boolean {
   return ctx.args.booleans.has(name);
+}
+
+/**
+ * Store freshly minted `ref:` handles (REQ-058), and refuse to continue if any collided.
+ *
+ * A collision means two real identities would share one handle. Reporting it is not pedantry: the
+ * whole point of a handle is that resolving it yields the record the agent actually acted on, and a
+ * silent mismatch there is worse than no handle at all (AC-53.6).
+ */
+export function persistHandles(ctx: Ctx, entries: Readonly<Record<string, string>>): void {
+  if (Object.keys(entries).length === 0) return;
+  const collisions = saveHandles(entries, ctx.io.env);
+  if (collisions.length > 0) {
+    throw new CliError(
+      `handle collision: ${collisions.join(", ")} already stands for a different record`,
+      ExitCode.Unexpected,
+      {
+        hint:
+          "This should be effectively impossible at 48 bits, so treat it as a bug worth reporting.\n" +
+          "Nothing was emitted, and the existing mapping was left untouched.",
+      },
+    );
+  }
+}
+
+/**
+ * Print the caller's own invocation for a human to run, and nothing else (REQ-078, AC-53.9).
+ *
+ * Goes to STDOUT through the ordinary writer, not the gated one: a command line is not data. That is
+ * the whole point — an agent can produce this under any policy, because there is nothing in it to
+ * protect. The credential is never an argument (AC-12.1), and arguments are echoed as GIVEN, so a
+ * `ref:` handle stays a handle for the human's run to resolve locally.
+ */
+export function emitCommandEcho(ctx: Ctx): void {
+  const echo = echoCommand({
+    command: String(ctx.args.command),
+    positionals: ctx.args.positionals,
+    url: ctx.args.flags.url,
+    urlWasImplicit: !ctx.args.rawFlagNames.has("url"),
+    output: ctx.args.flags.output,
+    offline: ctx.args.flags.offline,
+    timeoutMs: ctx.args.flags.timeoutMs,
+    pseudonymize: ctx.args.flags.pseudonymize,
+    verbose: ctx.args.flags.verbose,
+    noColor: ctx.args.flags.noColor,
+    options: ctx.args.options,
+    booleans: ctx.args.booleans,
+  });
+
+  ctx.io.out(echo.command + "\n");
+  if (echo.posixOnly) {
+    // Honesty beats a line that silently breaks in cmd.exe (AC-53.9's "runs verbatim").
+    ctx.io.err(
+      "note: an argument needed POSIX single-quoting, so this line is for a POSIX shell.\n" +
+      "In cmd.exe or PowerShell the quoting will differ.\n",
+    );
+  }
 }

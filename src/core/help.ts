@@ -41,6 +41,7 @@ export const GLOBAL_FLAGS: FlagSpec[] = [
   { name: "timeout", arg: "<seconds>", summary: "Request timeout" },
   { name: "caller-context", arg: "<ctx>", summary: "Override caller detection: interactive|automated|agent" },
   { name: "offline", summary: "Never fetch metadata; use the cache (or SIGNUM_OFFLINE=1)" },
+  { name: "pseudonymize", arg: "<mode>", summary: "off|heuristic|strict — may tighten; loosening needs the ack flag" },
   { name: "help", alias: "h", summary: "Show help for any command" },
 ];
 
@@ -50,7 +51,8 @@ export const COMMANDS: CommandSpec[] = [
     summary: "Show help, or long-form help on a topic",
     usage: "signum help [<topic>]",
     milestone: "m1",
-    description: `Topics: ${["filter", "tokens", "output", "exit-codes", "auth", "contexts", "pseudonymization"].join(", ")}.`,
+    // Derived, not a second hand-maintained list — the drift risk AC-62.2 exists to prevent.
+    get description() { return `Topics: ${topicNames().join(", ")}.`; },
     examples: ["signum help", "signum help exit-codes", "signum help filter"],
   },
   {
@@ -69,23 +71,27 @@ export const COMMANDS: CommandSpec[] = [
     // and being shown only a list of subcommand names is one step short of useful.
     examples: [
       "signum auth status",
-      "signum auth login --url https://app.example --with-token < token.txt",
+      "signum auth login --url https://app.example",
       "signum auth logout",
     ],
     subcommands: [
       {
         name: "login",
         summary: "Store a bearer token handed over from a browser session",
-        usage: "signum auth login --url <url> --with-token",
+        usage: "signum auth login --url <url> [--with-token]",
         milestone: "m1",
         description:
           "The target application uses Entra SSO with no Signum.Rest module, so a browser token " +
           "handoff is the only viable mechanism. Sign in to the web app, then in the browser " +
           "console run:\n\n    sessionStorage.getItem(\"authToken\")\n\n" +
-          "and pipe the value in. The token is read from stdin only — never from an argument, " +
-          "which would leak it into shell history.",
-        flags: [{ name: "with-token", summary: "Read the token from stdin" }],
+          "At a terminal you are prompted for it and it is not echoed. Piping works too. It is " +
+          "never read from an argument, which would leave it in your shell history and the process " +
+          "list — passing one there is refused, not ignored.\n\n" +
+          "--with-token is optional while the handoff is the only mechanism this application " +
+          "supports; it becomes how you choose one when others exist.",
+        flags: [{ name: "with-token", summary: "Browser-handoff token (optional; the only mechanism today)" }],
         examples: [
+          "signum auth login --url https://app.example",
           "signum auth login --url https://app.example --with-token < token.txt",
           'printf %s "$TOKEN" | signum auth login --url https://app.example --with-token',
         ],
@@ -152,8 +158,12 @@ export const COMMANDS: CommandSpec[] = [
       "unlike the reflection endpoint.\n\n" +
       "The first segment is the query key and the rest is the token, which is how Signum reads a " +
       "dotted token: relative to the query, not to a type.",
+    flags: [
+      { name: "privacy", summary: "Show which members would be pseudonymized, and why (REQ-059)" },
+    ],
     examples: [
       "signum explain Order",
+      "signum explain Order --privacy",
       "signum explain Order.Entity.Customer",
       "signum explain Order.Entity --json",
       "signum explain OrderOperation.Ship",
@@ -176,6 +186,7 @@ export const COMMANDS: CommandSpec[] = [
       { name: "group", summary: "Set groupResults; required for aggregate tokens (Total.Sum, …)" },
       { name: "count", summary: "Return only the row count" },
       { name: "resolve", summary: "Show entity columns by name instead of Type;id (adds .ToString)" },
+      { name: "as-command", summary: "Print the command for a human to run; emit no data (REQ-078)" },
     ],
     examples: [
       'signum query Order --filter "State = Shipped" --top 20',
@@ -183,6 +194,7 @@ export const COMMANDS: CommandSpec[] = [
       'signum query Order --filter "State in Shipped,Delivered"',
       "signum query Order --count",
       "signum query Order --resolve --top 20",
+      'signum query Order --filter "State = Shipped" --as-command',
     ],
   },
   {
@@ -190,8 +202,36 @@ export const COMMANDS: CommandSpec[] = [
     summary: "Retrieve one entity by type and id, or by Lite key",
     usage: "signum get <Type> <id> | signum get <Lite>",
     milestone: "m1",
-    flags: [{ name: "exists", summary: "Check presence only; print nothing" }],
+    flags: [
+      { name: "exists", summary: "Check presence only; print nothing" },
+      { name: "as-command", summary: "Print the command for a human to run; emit no data (REQ-078)" },
+    ],
     examples: ["signum get Order 42", 'signum get "Order;42" --json'],
+  },
+  {
+    name: "unmask",
+    summary: "Resolve local ref: handles back to the records they stand for",
+    usage: "signum unmask <ref:...> [<ref:...> ...] | --list | --clear",
+    milestone: "m2",
+    description:
+      "Pseudonymized output emits entity identities as opaque local handles (ref:...) rather than " +
+      "Type;id, so an agent can act on a record it cannot identify. This resolves them back, for a " +
+      "HUMAN auditing what was read or acted on.\n\n" +
+      "Nothing here touches the network: the surrogate-to-real mapping is local by construction and " +
+      "never leaves the machine. It is stored 0600 beside the credential, per profile, and is valid " +
+      "only for the surrogate secret that produced it.\n\n" +
+      "A handle is accepted anywhere a Lite key is, so `signum get ref:7f3a1c2b4d5e` works and is " +
+      "resolved locally before the request is built.",
+    flags: [
+      { name: "list", summary: "How many handles are stored (never what they mean)" },
+      { name: "clear", summary: "Forget them all - every outstanding handle stops resolving" },
+      { name: "yes", summary: "Skip the confirmation for --clear" },
+    ],
+    examples: [
+      "signum unmask ref:7f3a1c2b4d5e",
+      "signum unmask --list",
+      "signum unmask --clear",
+    ],
   },
   {
     name: "cache",
@@ -283,11 +323,15 @@ export function renderOverview(): string {
   out.push(...renderFlags(GLOBAL_FLAGS));
   out.push("");
   out.push("GETTING STARTED");
-  out.push("  signum --url https://app.example types      # explore without logging in");
-  out.push("  signum auth login --url https://app.example --with-token");
-  out.push("  signum auth status");
+  out.push("  signum --url https://app.example types      # explore, no login needed");
+  out.push("  signum auth login --url https://app.example    # prompts for the token");
+  out.push("  signum auth status                          # who am I, against what");
   out.push("");
-  out.push("  signum help <topic>   for filter syntax, exit codes, output formats, and more");
+  out.push("HELP TOPICS");
+  // Listed, not hinted at. They were previously discoverable only by making a mistake — the error
+  // for an unknown topic printed the list, and nothing else did.
+  out.push(`  ${topicNames().join("  ")}`);
+  out.push("  signum help <topic>");
   return out.join("\n") + "\n";
 }
 
@@ -320,6 +364,11 @@ export function renderCommand(spec: CommandSpec, path: readonly string[]): strin
   out.push("");
   out.push("Run `signum help` for global flags.");
   return out.join("\n") + "\n";
+}
+
+/** Topic names, sorted — an arbitrary order in a list a human scans reads as noise. */
+export function topicNames(): string[] {
+  return Object.keys(TOPICS).sort();
 }
 
 export const TOPICS: Record<string, string> = {
@@ -374,14 +423,42 @@ export const TOPICS: Record<string, string> = {
     "  behaviour. Detection is a heuristic, NOT a security boundary: every signal is",
     "  spoofable, so it is used only to choose a stricter default, and it fails closed.",
     "",
-    "  Under a detected agent context, commands that emit row data refuse to run unless",
-    "  you pass --i-understand-data-goes-to-a-model. Metadata and help are unaffected.",
+    "  Under a detected agent, values whose member name looks personal are replaced by",
+    "  STABLE SURROGATES rather than blanked, so an agent can still group and correlate",
+    "  rows without reading them. Modes:",
     "",
-    "  Full pseudonymization — stable surrogates rather than redaction — is not yet",
-    "  implemented. It is tracked as REQ-057.",
+    "    off         no replacement (the default for a human at a terminal)",
+    "    heuristic   member-name heuristics, English and German (default under an agent)",
+    "    strict      allowlist only — everything not permitted is replaced",
     "",
-    "  Note: pseudonymized data remains personal data under GDPR Art. 4(5). This tool",
-    "  reduces exposure; it is not by itself a compliance control.",
+    "  See what WOULD be replaced, and why:   signum explain <Type> --privacy",
+    "  Configure it:                          <config-dir>/privacy.json",
+    "                                         { \"mode\": \"strict\", \"allow\": [\"State\"] }",
+    "",
+    "  The policy is resolved from that file and the caller context — it is NOT a",
+    "  per-call parameter. --pseudonymize may TIGHTEN it freely; loosening it under a",
+    "  detected agent needs --i-understand-data-goes-to-a-model and is logged, because",
+    "  the caller asking for weaker protection is the caller that wants the data.",
+    "",
+    "  Surrogates are stable per profile, so the same value reads the same across",
+    "  commands. Entity identities become opaque handles (ref:...) rather than labels,",
+    "  so an agent can act on a record it cannot identify:",
+    "",
+    "    signum get ref:7f3a1c2b4d5e         resolved locally, never sent to the server",
+    "    signum unmask ref:7f3a...  what it stands for (human only)",
+    "    signum unmask --clear      forget every handle",
+    "",
+    "  LIMITS, and they are real: free text is never scanned, so a comment field",
+    "  containing a name defeats this entirely. Heuristics both miss and misfire.",
+    "  A surrogate over a column with FEW DISTINCT VALUES is reversible by counting:",
+    "  three of one surrogate and one each of two others maps straight back onto the",
+    "  real values for anyone who knows the domain. Stability is what makes grouping",
+    "  work and what makes that possible; it cannot be fixed, only known about.",
+    "  Aggregates leak — \"the only user with Java and COBOL\" identifies a person even",
+    "  when every value is a surrogate. Metadata carries context of its own.",
+    "",
+    "  Pseudonymized data remains personal data under GDPR Art. 4(5). This tool reduces",
+    "  exposure; it is NOT a compliance control, and it never claims to be.",
   ].join("\n"),
   filter: [
     "FILTER SYNTAX",

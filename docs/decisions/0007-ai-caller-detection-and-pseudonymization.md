@@ -94,6 +94,14 @@ not merely unimplemented.
 The user asked for pseudonymization, and the distinction matters:
 
 - **Redaction** destroys the value — output becomes unusable for correlation.
+> **Limit of stability, found by review 2026-07-28.** A stable surrogate over a column with FEW
+> DISTINCT VALUES is reversible by counting. Demonstrated: `strict` over a five-row `State` column
+> yields counts `3 / 1 / 1`, which map straight back onto `Shipped / Delivered / Cancelled` for anyone
+> who knows the domain. This is not a defect to fix — stability is required (AC-52.1) and is exactly
+> what lets an agent group and correlate at all — but it means `strict` protects a low-cardinality
+> column far less than it appears to, and `strict` is the mode someone reaches for when they want a
+> defensible position (AC-52.8). Stated in the AC-52.6 disclosure rather than pretended away.
+
 - **Pseudonymization** replaces it with a **stable surrogate** — `Customer-7f3a` — so an agent can still
   group, join, and reason across rows without seeing the real value.
 - **Anonymization** is irreversible and effectively unachievable on relational business data; we do not
@@ -117,7 +125,7 @@ piece of the design that is genuinely elegant rather than merely careful.
 
 The surrogate→real mapping is written to a local store with `0600`, is never printed unless explicitly
 asked for, and is never included in `--json` output, MCP tool results, traces, or telemetry. A
-`de-pseudonymize` command lets a **human** resolve surrogates locally.
+`unmask` command lets a **human** resolve surrogates locally. (Named `de-pseudonymize` in this ADR's original text; renamed for typability, with the *concept* still called re-identification — see REQ-058.)
 
 ## Known limits — to be stated in the CLI's own help
 

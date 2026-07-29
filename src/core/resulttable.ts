@@ -20,6 +20,7 @@
  */
 
 import { CliError, ExitCode } from "./errors.ts";
+import { createRecorder, sensitivity, surrogate, type PrivacyPolicy } from "./privacy.ts";
 
 /** Raw wire shape of `ResultTable`, exactly as the server sends it. */
 export interface RawResultTable {
@@ -52,6 +53,18 @@ export interface ResolvedTable {
   readonly entityIndex: number | undefined;
   /** Server-reported total, distinct from `rows.length` (AC-21.5). */
   readonly totalElements: number | undefined;
+  /** Columns whose values were replaced by surrogates, for the AC-52.6 disclosure. */
+  readonly pseudonymized: readonly string[];
+  /**
+   * `ref:` handles minted while pseudonymizing, which the caller MUST persist before emitting
+   * (REQ-058, AC-53.5).
+   *
+   * Carried on the result rather than collected through an optional in-parameter. An optional
+   * recorder meant a caller could omit it and silently mint handles that would never resolve —
+   * the same "protection by convention" shape this codebase already rejected for the data-output
+   * boundary. Now the mapping is simply there, and dropping it takes an act rather than an omission.
+   */
+  readonly mintedHandles: Readonly<Record<string, string>>;
 }
 
 export interface ResolvedRow {
@@ -81,6 +94,15 @@ export interface ResolveOptions {
    * explicit `--column User.ToString` keeps its own name and cannot collide with a `User` column.
    */
   columnLabels?: Readonly<Record<string, string>> | undefined;
+  /**
+   * Pseudonymization policy (REQ-057). Applied HERE, inside the de-interning boundary, so no
+   * renderer can ever hold a real value — the same single-choke-point argument as AC-21.1, for the
+   * same reason: a protection applied per output path is a protection one output path will forget.
+   *
+   * Classification runs on the LABELLED column name, so `--resolve`'s rewritten `User.ToString` is
+   * judged as `User` — the token the reader asked about, and therefore the right one to judge.
+   */
+  privacy?: PrivacyPolicy | undefined;
 }
 
 function columnToken(col: NonNullable<RawResultTable["columns"]>[number], index: number): string {
@@ -140,6 +162,23 @@ export function resolveResultTable(raw: RawResultTable, options: ResolveOptions 
     ? serverColumns
     : [...serverColumns.slice(0, entityIndex), ENTITY_TOKEN, ...serverColumns.slice(entityIndex)];
 
+  const privacy = options.privacy?.mode === "off" ? undefined : options.privacy;
+  const recorder = createRecorder();
+
+  /**
+   * Columns whose values are an entity's LABEL because `--resolve` rewrote them to `.ToString`.
+   *
+   * The value arrives as a plain string, so the value-based identity rule below cannot see it — but
+   * we know what it is, because we asked for it. `columnLabels` maps `User.ToString` -> `User`, so
+   * its values are exactly the entity-derived display columns. Without this, `--resolve` under
+   * `heuristic` prints real people's names: the column is called `User`, which matches no
+   * name-based heuristic.
+   */
+  const labelColumns = new Set(Object.values(options.columnLabels ?? {}));
+
+  /** Columns where something was actually replaced, for the AC-52.6 disclosure. */
+  const replaced = new Set<string>();
+
   const rows: ResolvedRow[] = rawRows.map((row, rowIndex) => {
     const cells = row.columns ?? [];
     const resolved = serverColumns.map((token, colIndex) => {
@@ -173,9 +212,26 @@ export function resolveResultTable(raw: RawResultTable, options: ResolveOptions 
     // renderer. `row.entity` is `null` rather than `undefined` when absent, because a hole in
     // a values array must be a value — `undefined` would serialize away in JSON.
     const entity = "entity" in row ? row.entity : null;
-    const values = entityIndex === undefined
+    const aligned = entityIndex === undefined
       ? resolved
       : [...resolved.slice(0, entityIndex), entity, ...resolved.slice(entityIndex)];
+
+    // Pseudonymize AFTER alignment, so a column's policy is decided by the column it actually is.
+    const values = privacy === undefined
+      ? aligned
+      : aligned.map((v, i) => {
+          const token = columns[i] as string;
+          // One decision function for every path (privacy.ts `sensitivity`). Called per cell because
+          // an identity is only visible in the VALUE; the name-based half is memoized on the policy,
+          // so this costs a map lookup and a shape check rather than a re-classification.
+          const decision = sensitivity(
+            { name: token, value: v, isEntityLabel: labelColumns.has(token) },
+            privacy,
+          );
+          if (!decision.pseudonymize) return v;
+          replaced.add(token);
+          return surrogate(v, token, privacy, recorder);
+        });
 
     return { entity, values };
   });
@@ -186,6 +242,9 @@ export function resolveResultTable(raw: RawResultTable, options: ResolveOptions 
     rows,
     entityIndex,
     totalElements: raw.totalElements,
+    // Report what was actually replaced, not what a name-based rule predicted.
+    pseudonymized: [...replaced],
+    mintedHandles: recorder.entries(),
   };
 }
 

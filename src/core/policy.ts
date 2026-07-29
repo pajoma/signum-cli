@@ -67,9 +67,17 @@ export function makeDataOpener(
   caller: CallerDetection,
   allow: boolean,
   write: (chunk: string) => void,
+  /**
+   * True when pseudonymization is active (REQ-057, mode != off). This is the m1 -> m2 evolution
+   * AC-51.4 promised: m1's refusal named pseudonymization as "the intended remedy", and now that
+   * the remedy exists the honest behaviour is to APPLY it rather than to keep refusing. An agent
+   * gets surrogates; nobody gets a blank wall they cannot work around except by disabling the
+   * protection entirely.
+   */
+  pseudonymizing = false,
 ): (what: string) => DataWriter {
   return (what: string): DataWriter => {
-    if (caller.context !== "agent" || allow) return brand(write);
+    if (caller.context !== "agent" || allow || pseudonymizing) return brand(write);
     throw new PolicyError(`refusing to emit ${what} to a detected AI caller`, {
       hint:
         "Signals: " + caller.signals.join("; ") + ".\n" +

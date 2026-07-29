@@ -15,6 +15,9 @@ import { renderResultTable, renderDataDocument, renderDocument } from "../core/o
 import { resolveResultTable, type RawResultTable } from "../core/resulttable.ts";
 import { loadMetadata, resolveQueryKey } from "../core/metadata.ts";
 import { fetchDefaultColumns, resolveLiteColumns, validateTokens } from "../core/tokens.ts";
+import { disclosure, isHandle, resolveHandle } from "../core/privacy.ts";
+import { loadHandles } from "../core/config.ts";
+import { emitCommandEcho, persistHandles } from "./context.ts";
 import { lowerFilterExpressions, parseFilterExpression, type FilterWire } from "../core/filter.ts";
 import { opt, optAll, flag, resolveTarget } from "./context.ts";
 import { readFileSync } from "node:fs";
@@ -99,6 +102,31 @@ function readFilterJson(source: string): unknown[] {
   return parsed;
 }
 
+/**
+ * Walk lowered filters and replace any `ref:` handle with the real Lite key (AC-53.2).
+ *
+ * Done on the LOWERED wire shape rather than in the parser so it catches values from `--filter` and
+ * `--filter-json` alike — the escape hatch must not be a hole in this.
+ */
+function resolveHandlesInFilters(
+  filters: readonly FilterWire[],
+  handles: Readonly<Record<string, string>>,
+): FilterWire[] {
+  const fixValue = (v: unknown): unknown => {
+    if (typeof v === "string" && isHandle(v)) return resolveHandle(v, handles);
+    if (Array.isArray(v)) return v.map(fixValue);
+    return v;
+  };
+  return filters.map((f) => {
+    const node = f as unknown as Record<string, unknown>;
+    if (Array.isArray(node["filters"])) {
+      return { ...node, filters: resolveHandlesInFilters(node["filters"] as FilterWire[], handles) } as FilterWire;
+    }
+    if ("value" in node) return { ...node, value: fixValue(node["value"]) } as FilterWire;
+    return f;
+  });
+}
+
 /** Names the data in a refusal message, and keeps the two `openData` calls in step. */
 const DATA_KIND = "query results";
 
@@ -131,6 +159,13 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
     }),
     { groupEnabled },
   );
+
+  // Pagination is validated HERE, beside the filter, because it is equally local: `--top abc` is
+  // wrong whatever the server says. It used to be parsed while building the request, so an invalid
+  // value was masked first by "no target application" and then by "no credential" — a user had to
+  // fix two unrelated things before being told what was actually wrong with their command. Same
+  // "two round trips of confusion" argument the filter already makes below.
+  const pagination = parsePagination(ctx);
 
   // The gate is unconditional from here on, evaluated before touching credentials or the
   // network: being told to fix auth and *then* refused would be two round trips of confusion.
@@ -216,7 +251,10 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
   // DSL and --filter-json are combined by concatenation — both are ANDed at the top level,
   // matching the design's "may be combined" rule (design/filter-expression-syntax.md).
   const jsonFilters = filterJsonSource !== undefined ? (readFilterJson(filterJsonSource) as FilterWire[]) : [];
-  const filters: FilterWire[] = [...dslFilters, ...jsonFilters];
+  // AC-53.2 again, for filter values: resolve handles locally before the request is built, so a
+  // `ref:` never crosses the wire.
+  const handles = loadHandles(ctx.io.env);
+  const filters: FilterWire[] = resolveHandlesInFilters([...dslFilters, ...jsonFilters], handles);
 
   const request: Record<string, unknown> = {
     queryKey,
@@ -224,8 +262,16 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
     filters,
     orders,
     columns,
-    pagination: parsePagination(ctx),
+    pagination,
   };
+
+  // REQ-078: print the command a HUMAN should run, and send nothing. Sits beside --explain because
+  // it is the same shape of thing — emit a description instead of doing the work — and it lands
+  // AFTER key validation so the command handed over is one that actually resolves.
+  if (flag(ctx, "as-command")) {
+    emitCommandEcho(ctx);
+    return ExitCode.Ok;
+  }
 
   // --explain prints the request and sends nothing (AC-20.6).
   if (ctx.args.flags.explain) {
@@ -261,7 +307,11 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
   // The de-interning boundary: nothing downstream sees a raw row (AC-21.1). The requested
   // column order goes in so the hoisted `Entity` column comes back at the position the user
   // asked for, in every format (AC-21.2).
-  const table = resolveResultTable(res.body, { requestedColumns, columnLabels });
+  const table = resolveResultTable(res.body, { requestedColumns, columnLabels, privacy: ctx.privacy });
+
+  // Persist BEFORE emitting. A handle we have printed but not stored is exactly the unresolvable
+  // handle AC-53.5 exists to prevent — and we would have created it ourselves.
+  persistHandles(ctx, table.mintedHandles);
 
   renderResultTable(table, {
     format: ctx.format,
@@ -271,6 +321,11 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
     // colour output didn't exist. Threaded through here now.
     color: ctx.color,
   });
+
+  // AC-52.6: state what was replaced and that coverage is incomplete. Silent partial protection
+  // invites false confidence, which is worse than none.
+  const note = disclosure(ctx.privacy, table.pseudonymized);
+  if (note !== "") ctx.io.err("\n" + note);
 
   // Total is reported distinctly from rows returned, so a page is never mistaken for all (AC-21.5).
   if (ctx.format === "table" && table.totalElements !== undefined && table.totalElements > table.rows.length) {

@@ -11,16 +11,40 @@ import { ExitCode, NotAuthenticatedError, TransportError, UsageError } from "../
 import { renderDocument } from "../core/output.ts";
 import { deleteCredential, loadCredential, permissionsAreUnenforceable, saveCredential } from "../core/config.ts";
 import { SignumHttp } from "../core/http.ts";
-import { flag, opt, resolveTarget } from "./context.ts";
+import { flag, resolveTarget } from "./context.ts";
 
+/** Generic form, for error hints where no target URL is known (`auth status` on a fresh install). */
 const HANDOFF_INSTRUCTIONS = [
   "To obtain a token:",
   "  1. Sign in to the web application in your browser.",
   '  2. Open the browser console and run:  sessionStorage.getItem("authToken")',
   "  3. Pipe the value in:",
-  "       signum auth login --url <url> --with-token < token.txt",
-  '       printf %s "$TOKEN" | signum auth login --url <url> --with-token',
+  "       signum auth login --url <url> < token.txt",
+  '       printf %s "$TOKEN" | signum auth login --url <url>',
 ].join("\n");
+
+/**
+ * The interactive preamble, shaped after `aws login --remote`.
+ *
+ * Three things that style gets right and a generic instruction block does not:
+ *   • it says the browser will NOT be opened, so nobody waits for one — and here that is a
+ *     standing fact rather than a mode, because `--web` needs an OpenID module the target
+ *     application does not have (ADR 0008)
+ *   • it prints the CONCRETE url, which is clickable in most terminals, instead of `<url>`
+ *   • it prompts inline, so the next thing you do is on the line your cursor is already on
+ */
+function handoffPreamble(url: string): string {
+  return [
+    "Browser will not be opened automatically.",
+    "Please sign in at",
+    `  ${url}`,
+    "",
+    "Then open the browser console and run",
+    '  sessionStorage.getItem("authToken")',
+    "",
+    "",
+  ].join("\n");
+}
 
 async function login(ctx: Ctx): Promise<ExitCode> {
   // L1 (Brooks review): --url always parses into flags.url; it is never in `options`, so the
@@ -32,24 +56,57 @@ async function login(ctx: Ctx): Promise<ExitCode> {
     });
   }
 
-  const withToken = flag(ctx, "with-token") || opt(ctx, "with-token") !== undefined;
-  if (!withToken) {
-    throw new UsageError("--with-token is required", {
+  // A token given as an ARGUMENT is refused, loudly. `--with-token` is boolean, so a value after it
+  // lands in positionals — where login ignored it, prompted anyway, and said nothing. The user's
+  // token was then sitting in their shell history and their process list for no benefit at all,
+  // which is the precise failure AC-12.1 exists to prevent.
+  const stray = ctx.args.positionals[1];
+  if (stray !== undefined) {
+    throw new UsageError("the token must not be passed as an argument", {
       hint:
-        "This application accepts only a browser token handoff — it has no Signum.Rest module,\n" +
-        "and Entra-provisioned users have no local password.\n\n" + HANDOFF_INSTRUCTIONS,
+        "It is now in your shell history and was visible in the process list, so treat it as\n" +
+        "compromised: obtain a fresh one and clear the entry (`history -d`, or your shell's\n" +
+        "equivalent).\n\n" +
+        "Run the command WITHOUT the token and paste it at the prompt, or pipe it:\n" +
+        "  signum auth login --url " + url + "\n" +
+        '  printf %s "$TOKEN" | signum auth login --url ' + url + "\n",
     });
   }
 
-  // Read from stdin ONLY — never an argument, which would leak into shell history (AC-12.1).
+  // `--with-token` is accepted but NOT required. The browser handoff is the only mechanism this
+  // application supports (ADR 0004 Decision 4), so demanding a flag that selects the only option is
+  // ceremony — and it made `signum auth login --url …`, the obvious command, fail with an error
+  // telling the user to add something that changes nothing.
+  //
+  // The flag stays meaningful for later: once REQ-004's `--web` or REQ-002's API keys exist, `auth
+  // login` will have a mechanism to choose and this becomes how you choose it.
+  void flag(ctx, "with-token");
+
+  // Never an argument, which would leak into shell history and the process list (AC-12.1). But
+  // "not an argument" does not have to mean "not typed": a hidden read from the terminal keeps the
+  // token out of both, and refusing to prompt made the CLI's own GETTING STARTED line — the second
+  // thing a new user runs — fail every time with "no token on stdin".
+  //
+  // AC-12.8 asked for exactly this ("terminal echo suppressed while pasting on a TTY"). It was
+  // amended away in #78 on the reasoning that TTY paste is refused — circular, since the refusal was
+  // the problem. Reinstated.
+  let token: string;
   if (ctx.io.stdinIsTty) {
-    // A TTY here means nothing was piped. Refusing beats hanging (STORY-09).
-    throw new UsageError("no token on stdin", {
-      hint: "The token is read from stdin so it never appears in shell history.\n\n" + HANDOFF_INSTRUCTIONS,
-    });
+    if (ctx.io.prompt === undefined) {
+      // No way to ask and nothing piped. Refusing beats hanging (STORY-09).
+      throw new UsageError("no token on stdin", {
+        hint: "The token is read from stdin so it never appears in shell history.\n\n" + HANDOFF_INSTRUCTIONS,
+      });
+    }
+    ctx.io.err(handoffPreamble(url));
+    token = (await ctx.io.prompt("Enter the token displayed in your browser: ", { hidden: true })).trim();
+    // Silence is safe but disorienting for a value this long — you cannot see a truncated paste.
+    // A character count confirms something arrived without putting the token on screen or in
+    // scrollback. The immediate currentUser check is what catches a bad one either way (AC-12.3).
+    if (token !== "") ctx.io.err(`Received ${token.length} characters.\n`);
+  } else {
+    token = (await ctx.io.readStdin()).trim();
   }
-
-  const token = (await ctx.io.readStdin()).trim();
   if (token === "") {
     throw new UsageError("empty token on stdin", { hint: HANDOFF_INSTRUCTIONS });
   }

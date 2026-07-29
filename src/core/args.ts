@@ -29,6 +29,7 @@ export const BUILT_INS = [
   "query",
   "get",
   "cache",
+  "unmask",
 ] as const;
 
 export type BuiltIn = (typeof BUILT_INS)[number];
@@ -51,8 +52,22 @@ export interface GlobalFlags {
   help: boolean;
   timeoutMs: number | undefined;
   callerContext: string | undefined;
+  /**
+   * `--version`, which everyone types first. It resolves to the `version` COMMAND rather than a
+   * separate path, so the two can never drift.
+   *
+   * There is no `-V`: flag names are lowercased before dispatch, so `-V` would collide with `-v`
+   * (verbose). Silently printing help for `--version` — which is what happened before — is worse
+   * than not supporting it, because it looks like it worked.
+   */
+  version: boolean;
   /** STORY-51 acknowledgement (AC-51.2). Deliberately unmissable. */
   allowAgentData: boolean;
+  /**
+   * Requested pseudonymization mode (REQ-057). May TIGHTEN freely; loosening under a detected agent
+   * needs `allowAgentData` and is logged — see privacy.ts `resolvePolicy` (AC-52.10).
+   */
+  pseudonymize: string | undefined;
   /**
    * Never touch the network for metadata; use whatever is cached (AC-24.4). Global rather than
    * per-command because `loadMetadata` is what honours it, and query/get call it too for
@@ -73,10 +88,18 @@ export interface ParsedArgs {
   /** Repeatable/unknown flags, kept for command-specific parsing. */
   options: Map<string, string[]>;
   booleans: Set<string>;
+  /**
+   * Every flag name actually TYPED on the command line, before environment fallbacks are applied.
+   *
+   * Needed to tell an explicit `--url` from one inherited from `SIGNUM_URL` or a stored credential:
+   * REQ-078's echo reproduces what the caller gave, and printing a customer's hostname nobody asked
+   * for would be gratuitous.
+   */
+  rawFlagNames: Set<string>;
 }
 
 const FLAGS_WITH_VALUE = new Set([
-  "url", "output", "o", "timeout", "caller-context",
+  "url", "output", "o", "timeout", "caller-context", "pseudonymize",
   "filter", "filter-json", "column", "order", "top", "page", "page-size",
   "context", "pseudonymize", "arg", "arg-string", "arg-lite", "arg-json",
   "lite", "id", "filename", "f",
@@ -84,7 +107,8 @@ const FLAGS_WITH_VALUE = new Set([
 
 /** Boolean flags — listing one above would make it demand a value. */
 export const BOOLEAN_FLAGS = new Set([
-  "with-token", "exists", "count", "all", "yes", "y", "raw", "group", "resolve",
+  "with-token", "exists", "count", "all", "yes", "y", "raw", "group",
+  "resolve", "privacy", "list", "clear", "as-command",
 ]);
 
 /** Invariant: a flag cannot need a value and be boolean-only at once. Checked by test. */
@@ -102,7 +126,9 @@ function emptyFlags(): GlobalFlags {
     help: false,
     timeoutMs: undefined,
     callerContext: undefined,
+    version: false,
     allowAgentData: false,
+    pseudonymize: undefined,
     offline: false,
   };
 }
@@ -111,6 +137,7 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
   const flags = emptyFlags();
   const options = new Map<string, string[]>();
   const booleans = new Set<string>();
+  const rawFlagNames = new Set<string>();
   const positionals: string[] = [];
 
   const push = (name: string, value: string) => {
@@ -131,6 +158,7 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
       const bare = arg.replace(/^--?/, "");
       const eq = bare.indexOf("=");
       const name = (eq === -1 ? bare : bare.slice(0, eq)).toLowerCase();
+      rawFlagNames.add(name);
       let value = eq === -1 ? undefined : bare.slice(eq + 1);
 
       if (value === undefined && FLAGS_WITH_VALUE.has(name)) {
@@ -153,6 +181,8 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
         case "caller-context": flags.callerContext = value; break;
         case "i-understand-data-goes-to-a-model": flags.allowAgentData = true; break;
         case "offline": flags.offline = true; break;
+        case "version": flags.version = true; break;
+        case "pseudonymize": flags.pseudonymize = value; break;
         case "timeout": {
           const ms = Number(value);
           if (!Number.isFinite(ms) || ms <= 0) throw new UsageError(`--timeout must be a positive number of seconds`);
@@ -182,6 +212,10 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
 
   if (env["SIGNUM_ALLOW_AGENT_DATA"] === "1") flags.allowAgentData = true;
   if (env["SIGNUM_OFFLINE"] === "1") flags.offline = true;
+  if (flags.pseudonymize === undefined) {
+    const fromEnv = env["SIGNUM_PSEUDONYMIZE"];
+    if (fromEnv !== undefined && fromEnv !== "") flags.pseudonymize = fromEnv;
+  }
   if (flags.callerContext === undefined) {
     const fromEnv = env["SIGNUM_CALLER_CONTEXT"];
     if (fromEnv !== undefined && fromEnv !== "") flags.callerContext = fromEnv;
@@ -191,21 +225,27 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
     if (fromEnv !== undefined && fromEnv !== "") flags.url = fromEnv;
   }
 
+  // `--version` with no command IS the version command. Resolving it here rather than in cli.ts
+  // means one implementation, one output shape, and no chance of the two disagreeing.
+  if (flags.version && positionals.length === 0) {
+    return { kind: "builtin", command: "version", positionals: [], flags, options, booleans, rawFlagNames };
+  }
+
   const first = positionals[0];
   if (first === undefined) {
-    return { kind: "none", command: undefined, positionals: [], flags, options, booleans };
+    return { kind: "none", command: undefined, positionals: [], flags, options, booleans, rawFlagNames };
   }
 
   // 1. dot ⇒ canonical operation key
   if (first.includes(".")) {
-    return { kind: "operation-key", command: first, positionals: positionals.slice(1), flags, options, booleans };
+    return { kind: "operation-key", command: first, positionals: positionals.slice(1), flags, options, booleans, rawFlagNames };
   }
   // 2. built-ins always win
   if (isBuiltIn(first)) {
-    return { kind: "builtin", command: first.toLowerCase(), positionals: positionals.slice(1), flags, options, booleans };
+    return { kind: "builtin", command: first.toLowerCase(), positionals: positionals.slice(1), flags, options, booleans, rawFlagNames };
   }
   // 3. verb-noun operation
-  return { kind: "verb-noun", command: first, positionals: positionals.slice(1), flags, options, booleans };
+  return { kind: "verb-noun", command: first, positionals: positionals.slice(1), flags, options, booleans, rawFlagNames };
 }
 
 /**

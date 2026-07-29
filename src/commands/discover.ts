@@ -15,7 +15,8 @@ import { BUILT_INS, isBuiltIn } from "../core/args.ts";
 import {
   findType, loadMetadata, queryableTypes, suggestTypes, type Metadata, type TypeInfo,
 } from "../core/metadata.ts";
-import { resolveTarget } from "./context.ts";
+import { flag, resolveTarget } from "./context.ts";
+import { sensitivity } from "../core/privacy.ts";
 import { fetchSubTokens, validateTokens } from "../core/tokens.ts";
 
 async function metadata(ctx: Ctx): Promise<Metadata> {
@@ -180,6 +181,57 @@ async function explain(ctx: Ctx, md: Metadata, subject: string | undefined): Pro
   const segments = subject.split(".");
   const root = findType(md, segments[0] as string);
   if (root === undefined) throw unknownType(md, segments[0] as string);
+
+  // REQ-059 (#89): report the policy, per member, WITH the reason. Read-only and value-free, so it
+  // is safe under a detected agent for the same reason structured help is (AC-62.5) — and it is the
+  // whole mechanism by which an agent can explain what will be hidden without being able to change
+  // it (ADR 0009 Decision 1).
+  if (segments.length === 1 && flag(ctx, "privacy")) {
+    const rows = root.members.map((m) => {
+      // The same decision function the query path uses, given the one thing only this path has:
+      // a member's declared type, and the metadata to tell whether it denotes an entity. Sharing
+      // the function is what keeps introspection honest — it cannot disagree with behaviour if
+      // there is only one rule (AC-52.11).
+      const c = sensitivity(
+        { name: m.name, memberType: m.type, isEntityType: (t) => findType(md, t) !== undefined },
+        ctx.privacy,
+      );
+
+      return {
+        member: m.name,
+        type: m.type ?? null,
+        pseudonymize: c.pseudonymize,
+        reason: c.reason,
+        matched: c.matched ?? null,
+      };
+    });
+
+    if (ctx.format === "json" || ctx.format === "ndjson") {
+      renderDocument(
+        { kind: "privacy", type: root.name, mode: ctx.privacy.mode, policy: ctx.privacy.origin, members: rows },
+        { format: ctx.format, write: ctx.io.out },
+      );
+      return ExitCode.Ok;
+    }
+
+    ctx.io.out(`${root.name} — pseudonymization: ${ctx.privacy.mode} (policy: ${ctx.privacy.origin})\n`);
+    if (rows.length === 0) {
+      ctx.io.out("\nNo members described for this type.\n");
+    } else {
+      const w = Math.max(...rows.map((r) => r.member.length));
+      ctx.io.out("\nMEMBER" + " ".repeat(Math.max(0, w - 6)) + "  PSEUDONYMIZED  WHY\n");
+      for (const r of rows) {
+        const why = r.matched !== null ? `${r.reason} (${r.matched})` : r.reason;
+        ctx.io.out(`${r.member.padEnd(w)}  ${(r.pseudonymize ? "yes" : "no").padEnd(13)}  ${why}\n`);
+      }
+    }
+    ctx.io.err(
+      "\nClassification is a heuristic over member NAMES plus your configured policy. The framework\n" +
+      "exposes no sensitivity metadata at all, so this cannot be complete — free text is never\n" +
+      "scanned, and a name-based rule both misses and misfires. Adjust it in privacy.json.\n",
+    );
+    return ExitCode.Ok;
+  }
 
   if (segments.length === 1) {
     if (ctx.format === "json" || ctx.format === "ndjson") {
