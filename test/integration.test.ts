@@ -49,7 +49,14 @@ const REFLECTION = {
     kind: "Main",
     niceName: "User",
     queryDefined: true,
-    members: { UserName: { type: { name: "string" } } },
+    members: {
+      UserName: { type: { name: "string" } },
+      // The #98 trap, exactly as reported: reflection describes the ENTITY, so a field contributed
+      // by a mixin is reported with its mixin prefix. The query description names the same field
+      // `FirstName` (see USER_SUB_TOKENS) — reflection members and query tokens are different
+      // namespaces, so this name is one `explain` used to offer and `query --column` rejects.
+      "[UserProjectMixin].FirstName": { type: { name: "string" } },
+    },
     operations: { "UserOperation.Save": { niceName: "Save" } },
   },
   // Exist purely so their query keys pass the metadata-validation step before hitting the
@@ -144,6 +151,34 @@ const SUB_TOKENS: Record<string, unknown[]> = {
   ],
 };
 
+/**
+ * Root tokens for the `UserEntity` query specifically (#98).
+ *
+ * `SUB_TOKENS` above is keyed only by token path, so it answered for every query alike — the mock
+ * ignored `queryKey` entirely. That conflation would hide the one thing #98 is about: the same field
+ * has a mixin-prefixed name in reflection and an unprefixed one as a token. `FirstName` here is
+ * `[UserProjectMixin].FirstName` there, and nothing else in the fixture could show that.
+ */
+const USER_SUB_TOKENS = [
+  { key: "Id", fullKey: "Id", niceName: "Id", type: { name: "number" }, isGroupable: true },
+  { key: "Entity", fullKey: "Entity", niceName: "User", type: { name: "User" }, isGroupable: true },
+  { key: "UserName", fullKey: "UserName", niceName: "User name", type: { name: "string" }, isGroupable: true },
+  { key: "FirstName", fullKey: "FirstName", niceName: "First name", type: { name: "string" }, isGroupable: true },
+];
+
+/**
+ * The root tokens of a query, for BOTH `subTokens` and `parseTokens`.
+ *
+ * The real server resolves both through `QueryUtils.Parse` against one `QueryDescription`, so they
+ * cannot disagree. This fixture could: a per-query override added to only one handler made the mock
+ * offer `FirstName` from `subTokens` and then reject it from `parseTokens` — which failed the very
+ * test asserting that `explain` and `query --column` agree, for a reason that existed only in the
+ * mock. One function for both, so the fixture has the same single source the product does.
+ */
+function rootTokensFor(queryKey: string): unknown[] {
+  return queryKey === "UserEntity" ? USER_SUB_TOKENS : (SUB_TOKENS[""] as unknown[]);
+}
+
 /** Interned: `State` cells are indices, `Total` cells are literals. */
 const RESULT_TABLE = {
   columns: ["State", "Total"],
@@ -224,8 +259,11 @@ beforeAll(() => {
         const known = new Set(
           Object.values(SUB_TOKENS).flatMap((list) => (list as Array<{ fullKey: string }>).map((c) => c.fullKey)),
         );
-        const children = SUB_TOKENS[body.token ?? ""]
-          ?? (body.token !== null && known.has(body.token) ? [] : undefined);
+        // Root tokens are per-query — `UserEntity`'s are not Order's (#98). Deeper paths still come
+        // from the shared table, which is enough for what the tests walk.
+        const children = body.token === null
+          ? rootTokensFor(body.queryKey)
+          : SUB_TOKENS[body.token] ?? (known.has(body.token) ? [] : undefined);
         if (children === undefined) {
           // An unknown token throws FormatException, which the framework's exception filter has
           // no arm for — so it arrives as HTTP 500 (SignumExceptionFilterAttribute.cs:131-146).
@@ -246,7 +284,9 @@ beforeAll(() => {
         for (const t of body.tokens) {
           const parentKey = t.split(".").slice(0, -1).join("");
           const leaf = t.split(".").pop() as string;
-          const siblings = SUB_TOKENS[t.split(".").slice(0, -1).join(".")] as
+          const parentPath = t.split(".").slice(0, -1).join(".");
+          // Same source as subTokens above — see `rootTokensFor`.
+          const siblings = (parentPath === "" ? rootTokensFor(body.queryKey) : SUB_TOKENS[parentPath]) as
             Array<{ key: string; fullKey: string }> | undefined;
           const hit = siblings?.find((c) => c.key === leaf);
           if (hit === undefined) {
@@ -476,6 +516,129 @@ describe("discovery without credentials (STORY-24, STORY-61)", () => {
     // unchanged and must stay credential-free.
     expect((JSON.parse(r.out) as { name: string }).name).toBe("Order");
     rmSync(fresh, { recursive: true, force: true });
+  });
+
+  // ── #98: members are the reflection view, not the token namespace ──────────
+
+  // These pass SIGNUM_TOKEN explicitly rather than leaning on a credential a previous test wrote:
+  // the surrounding block is the credential-free one, and an ordering-dependent test that silently
+  // exercises the degraded path instead of the real one is worse than no test.
+
+  it("`explain <Type>` lists the query's TOKENS beside its reflection members (#98)", async () => {
+    const r = await cli(["explain", "UserEntity", "--url", baseUrl, "--json"], {
+      env: { SIGNUM_TOKEN: GOOD_TOKEN },
+    });
+    expect(r.code).toBe(ExitCode.Ok);
+    const doc = JSON.parse(r.out) as {
+      members: Array<{ name: string }>;
+      queryTokens: Array<{ key: string }> | null;
+      queryTokensUnavailable: string | null;
+    };
+    // Reflection reports the mixin-prefixed name...
+    expect(doc.members.map((m) => m.name)).toContain("[UserProjectMixin].FirstName");
+    // ...and the token list reports the same field unprefixed, which is the usable name.
+    expect(doc.queryTokens?.map((t) => t.key)).toContain("FirstName");
+    expect(doc.queryTokens?.map((t) => t.key)).not.toContain("[UserProjectMixin].FirstName");
+    expect(doc.queryTokensUnavailable).toBeNull();
+  });
+
+  it("the tokens shown are exactly what `query --column` accepts (#98)", async () => {
+    // The third acceptance point: two definitions of "what tokens exist" could disagree, which is
+    // the single-source problem. Both read `subTokens`/`parseTokens`, so a token offered here must
+    // be one the query path accepts — asserted by round-tripping it, not by inspection.
+    const r = await cli(["explain", "UserEntity", "--url", baseUrl, "--json"], {
+      env: { SIGNUM_TOKEN: GOOD_TOKEN },
+    });
+    const offered = (JSON.parse(r.out) as { queryTokens: Array<{ key: string; usableInQuery: boolean }> })
+      .queryTokens.filter((t) => t.usableInQuery).map((t) => t.key);
+    expect(offered.length).toBeGreaterThan(0);
+    for (const token of offered) {
+      const q = await cli(["query", "UserEntity", "--column", token, "--url", baseUrl, "--explain"], {
+        env: { SIGNUM_TOKEN: GOOD_TOKEN },
+      });
+      expect(q.code).toBe(ExitCode.Ok);
+    }
+  });
+
+  it("a mixin-prefixed member offered by `explain` is REJECTED by query (#98, the trap)", async () => {
+    // The defect in one assertion: the CLI used to print this name under a bare "MEMBERS" heading
+    // with no indication it was unusable.
+    const r = await cli(
+      ["query", "UserEntity", "--column", "[UserProjectMixin].FirstName", "--url", baseUrl, "--explain"],
+      { env: { SIGNUM_TOKEN: GOOD_TOKEN } },
+    );
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("invalid query token");
+  });
+
+  it("human output names the two namespaces and warns about mixin members (#98)", async () => {
+    const r = await cli(["explain", "UserEntity", "--url", baseUrl], {
+      tty: true, env: { SIGNUM_TOKEN: GOOD_TOKEN },
+    });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.out).toContain("not all are query tokens");
+    expect(r.out).toContain("QUERY TOKENS");
+    expect(r.err).toContain("mixin prefix");
+    // The next-step line must point into the TOKEN namespace, not the member one — it used to
+    // say `.<member>`, which is the trap given as advice.
+    expect(r.out).toContain(`signum explain UserEntity.<token>`);
+    expect(r.out).not.toContain(".<member>");
+  });
+
+  it("degrades to members with a note when tokens need a credential (AC-61.4, #98)", async () => {
+    // The whole point of the degradation: anonymous `explain <Type>` must keep working, so a
+    // missing credential costs the token list and nothing else.
+    const fresh = mkdtempSync(join(tmpdir(), "signum-anon3-"));
+    const r = await cli(["explain", "UserEntity", "--url", baseUrl], {
+      env: { SIGNUM_CONFIG_DIR: fresh },
+      tty: true,
+    });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.out).toContain("UserName");                    // members still there
+    expect(r.out).not.toContain("QUERY TOKENS");
+    expect(r.err).toContain("could not list this query's tokens");
+    // And it still explains the trap without the token list to show it — option 3 of the issue.
+    expect(r.err).toContain("[SomeMixin].Field");
+    rmSync(fresh, { recursive: true, force: true });
+  });
+
+  it("--offline skips the token call rather than failing (#98)", async () => {
+    const r = await cli(["explain", "UserEntity", "--url", baseUrl, "--offline", "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const doc = JSON.parse(r.out) as { queryTokens: unknown; queryTokensUnavailable: string | null };
+    expect(doc.queryTokens).toBeNull();
+    expect(doc.queryTokensUnavailable).toContain("--offline");
+  });
+
+  it("a type with no query reports that, not a failure (#98)", async () => {
+    const r = await cli(["explain", "Ledger", "--url", baseUrl, "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const doc = JSON.parse(r.out) as { hasQuery: boolean; queryTokensUnavailable: string | null };
+    expect(doc.hasQuery).toBe(false);
+    expect(doc.queryTokensUnavailable).toBe("this type has no query");
+  });
+
+  it("does not suggest `query <Type>` for a type that has no query", async () => {
+    // Found by running the binary: `explain Ledger` closed with `Next: … signum query Ledger`,
+    // which `signum query` then refuses. Same defect class as #98 — offering a dead end.
+    const r = await cli(["explain", "Ledger", "--url", baseUrl], { tty: true });
+    expect(r.out).not.toContain("signum query Ledger --column");
+    expect(r.out).toContain("has no query");
+    // And the claim is true: the query path refuses it, so the two agree.
+    const q = await cli(["query", "Ledger", "--url", baseUrl, "--explain"], {
+      env: { SIGNUM_TOKEN: GOOD_TOKEN },
+    });
+    expect(q.code).not.toBe(ExitCode.Ok);
+  });
+
+  it("under --offline the degraded note blames --offline, not the credential", async () => {
+    // Also found by running it: the closing line said "needs a credential" for an --offline run,
+    // where a credential would change nothing.
+    const r = await cli(["explain", "UserEntity", "--url", baseUrl, "--offline"], {
+      tty: true, env: { SIGNUM_TOKEN: GOOD_TOKEN },
+    });
+    expect(r.err).toContain("Drop --offline");
+    expect(r.err).not.toContain("needs a credential");
   });
 });
 

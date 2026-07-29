@@ -17,7 +17,7 @@ import {
 } from "../core/metadata.ts";
 import { flag, resolveTarget } from "./context.ts";
 import { sensitivity } from "../core/privacy.ts";
-import { fetchSubTokens, validateTokens } from "../core/tokens.ts";
+import { fetchSubTokens, validateTokens, type QueryTokenInfo } from "../core/tokens.ts";
 
 async function metadata(ctx: Ctx): Promise<Metadata> {
   const target = resolveTarget(ctx);
@@ -146,6 +146,50 @@ function unknownType(md: Metadata, name: string): NotFoundError {
   });
 }
 
+/**
+ * A member name that reflection reports with a mixin prefix (#98).
+ *
+ * `api/reflection/types` describes the ENTITY, so a field contributed by a mixin is reported as
+ * `[SomeMixin].Field`. The query description names the same field `Field`, because reflection
+ * members and query tokens are different namespaces. The prefixed form is therefore a name the CLI
+ * offers and the server then rejects — which is why it is worth detecting rather than just
+ * documenting.
+ */
+function looksMixinPrefixed(memberName: string): boolean {
+  return memberName.startsWith("[");
+}
+
+/**
+ * The query's ROOT tokens, for `explain <Type>` (#98) — or a reason it could not get them.
+ *
+ * Source is `subTokens` with a null token, which is the same call `explain <Query>.<token>` walks
+ * with and the same namespace `parseTokens` validates against. That is deliberate and is the third
+ * acceptance point of #98: a second definition of "what tokens exist" could disagree with what
+ * `query --column` accepts, which is exactly the single-source problem the sensitivity rule had.
+ *
+ * NEVER throws. `explain <Type>` is anonymous by contract (AC-61.4) and the reflection view is
+ * useful on its own, so an unreachable or unauthenticated token list degrades to a note. The cost is
+ * one extra round trip on a command that previously made none — skipped entirely under `--offline`,
+ * where token discovery cannot work at all.
+ */
+async function tryFetchQueryTokens(
+  ctx: Ctx,
+  type: TypeInfo,
+): Promise<{ tokens: QueryTokenInfo[] } | { unavailable: string }> {
+  if (!type.hasQuery) return { unavailable: "this type has no query" };
+  if (ctx.args.flags.offline) {
+    return { unavailable: "--offline, and token discovery is a live call (api/query/subTokens)" };
+  }
+  try {
+    const target = resolveTarget(ctx);
+    return { tokens: await fetchSubTokens(target.http, type.name) };
+  } catch (err) {
+    // Deliberately broad: no credential, no reachable server, a query key the reflection document
+    // claims but the server does not expose. None of them should cost the reader the members list.
+    return { unavailable: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 async function explain(ctx: Ctx, md: Metadata, subject: string | undefined): Promise<ExitCode> {
   if (subject === undefined) {
     throw new UsageError("`explain` needs a type, token path, or operation key", {
@@ -234,10 +278,25 @@ async function explain(ctx: Ctx, md: Metadata, subject: string | undefined): Pro
   }
 
   if (segments.length === 1) {
+    // #98: members come from reflection and are NOT the query-token namespace. Fetch the real
+    // tokens where we can, and never let failing to get them cost the reader the members list.
+    const tokenResult = await tryFetchQueryTokens(ctx, root);
+    const tokens = "tokens" in tokenResult ? tokenResult.tokens : undefined;
+    const mixinMembers = root.members.filter((m) => looksMixinPrefixed(m.name));
+
     if (ctx.format === "json" || ctx.format === "ndjson") {
       renderDocument(
         { kind: "type", name: root.name, entityKind: root.kind ?? null, niceName: root.niceName ?? null,
-          hasQuery: root.hasQuery, members: root.members,
+          hasQuery: root.hasQuery,
+          // `members` is the reflection view, `queryTokens` the query view. Both are named for what
+          // they are so a machine consumer cannot mistake one for the other — the whole defect in
+          // #98 was a reader assuming they were the same list.
+          members: root.members,
+          queryTokens: tokens?.map((t) => ({
+            key: t.key, fullKey: t.fullKey, niceName: t.niceName ?? null,
+            type: t.type ?? null, tokenKind: t.kind ?? null, usableInQuery: t.usableInQuery,
+          })) ?? null,
+          queryTokensUnavailable: "unavailable" in tokenResult ? tokenResult.unavailable : null,
           operations: root.operations.map((o) => ({ key: o.key, verb: o.verb })) },
         { format: ctx.format, write: ctx.io.out },
       );
@@ -246,15 +305,68 @@ async function explain(ctx: Ctx, md: Metadata, subject: string | undefined): Pro
     ctx.io.out(`${root.name}${root.kind !== undefined ? `  (${root.kind})` : ""}\n`);
     if (root.niceName !== undefined) ctx.io.out(`  ${root.niceName}\n`);
     if (root.members.length > 0) {
-      ctx.io.out("\nMEMBERS\n");
+      // The header carries the caveat because the header is what a scanning reader reads. Calling
+      // this section plain "MEMBERS" is what let it be mistaken for the list of queryable columns.
+      ctx.io.out("\nMEMBERS  (reflection view of the entity — not all are query tokens)\n");
       const w = Math.max(...root.members.map((m) => m.name.length));
       for (const m of root.members) ctx.io.out(`  ${m.name.padEnd(w)}  ${m.type ?? ""}\n`);
+    }
+    if (tokens !== undefined && tokens.length > 0) {
+      ctx.io.out("\nQUERY TOKENS  (what --column, --order and --filter accept)\n");
+      const w = Math.max(...tokens.map((t) => t.key.length));
+      for (const t of tokens) {
+        const bits = [t.type ?? "", t.kind ?? ""].filter((b) => b !== "").join(", ");
+        const warn = t.usableInQuery ? "" : "   [not usable in a query]";
+        ctx.io.out(`  ${t.key.padEnd(w)}  ${bits}${warn}\n`);
+      }
     }
     if (root.operations.length > 0) {
       ctx.io.out("\nOPERATIONS\n");
       for (const o of root.operations) ctx.io.out(`  ${o.key}\n`);
     }
-    ctx.io.out("\nNext: signum explain " + root.name + ".<member>   ·   signum query " + root.name + "\n");
+
+    // The "next step" must land in the namespace the user is about to type into. It said
+    // `.<member>`, which routes a reflection name into a token path — the trap, spelled out as
+    // advice. Suggest a real token when we have one.
+    //
+    // And it must not suggest a query on a type that has none. Found by running this against a
+    // non-queryable type: `signum explain Ledger` closed with `signum query Ledger`, which
+    // `signum query` then refuses. Same defect class as #98 — offering a name that does not work.
+    if (root.hasQuery) {
+      const sampleToken = tokens?.find((t) => t.usableInQuery)?.key;
+      ctx.io.out(
+        "\nNext: signum explain " + root.name + ".<token>   ·   signum query " + root.name +
+        (sampleToken !== undefined ? ` --column ${sampleToken}` : "") + "\n",
+      );
+    } else {
+      ctx.io.out(
+        `\nThis type has no query, so it has no tokens and \`signum query ${root.name}\` will refuse it.\n` +
+        "Note that `queryDefined` is role-dependent — logging in may reveal one.\n",
+      );
+    }
+
+    if (tokens === undefined && root.hasQuery) {
+      // Option 3 from #98: honest and free. Only reached when the token list is missing, since when
+      // it is present the two sections speak for themselves.
+      const route = ctx.args.flags.offline
+        ? "Drop --offline and re-run to see the token view."
+        : `Run \`signum explain ${root.name}.<token>\` for the token view (needs a credential).`;
+      ctx.io.err(
+        `\nnote: could not list this query's tokens (${"unavailable" in tokenResult ? tokenResult.unavailable : "unknown reason"}),\n` +
+        "so only the reflection members are shown above. Members are NOT always usable as query\n" +
+        "tokens: a mixin field is reported here as '[SomeMixin].Field' but is queryable as 'Field'.\n" +
+        route + "\n",
+      );
+    } else if (mixinMembers.length > 0) {
+      // We showed both lists, so the reader can compare — but name the specific members that do
+      // not carry over, because a mixin prefix is the one case where the two lists differ by more
+      // than presence: the same field appears under a different name.
+      ctx.io.err(
+        `\nnote: ${mixinMembers.length} member${mixinMembers.length === 1 ? " is" : "s are"} reported with a mixin prefix ` +
+        `(${mixinMembers.slice(0, 3).map((m) => m.name).join(", ")}${mixinMembers.length > 3 ? ", …" : ""}).\n` +
+        "Those names are not query tokens — the same fields appear unprefixed under QUERY TOKENS.\n",
+      );
+    }
     return ExitCode.Ok;
   }
 
