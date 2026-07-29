@@ -10,11 +10,13 @@
  */
 
 import type { Ctx } from "../cli.ts";
-import { ExitCode, UsageError } from "../core/errors.ts";
+import { ExitCode, NotAuthenticatedError, UsageError } from "../core/errors.ts";
 import { renderResultTable, renderDataDocument, renderDocument } from "../core/output.ts";
 import { resolveResultTable, type RawResultTable } from "../core/resulttable.ts";
 import { loadMetadata, resolveQueryKey } from "../core/metadata.ts";
-import { fetchDefaultColumns, resolveLiteColumns, validateTokens } from "../core/tokens.ts";
+import {
+  fetchDefaultColumns, resolveLiteColumns, validateTokens, type QueryTokenInfo,
+} from "../core/tokens.ts";
 import { disclosure, isHandle, resolveHandle } from "../core/privacy.ts";
 import { loadHandles } from "../core/config.ts";
 import { emitCommandEcho, persistHandles } from "./context.ts";
@@ -205,14 +207,45 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
   // ColumnOptionsMode "Add" (`Finder.tsx:362`), but `--column X` on a CLI plainly means "show me
   // X", and AC-20.3 says "selects".
   const requestedColumns = optAll(ctx, "column");
+  const orders = parseOrders(optAll(ctx, "order"));
   const resolveLites = flag(ctx, "resolve");
   let effectiveColumns = requestedColumns;
   let columnLabels: Record<string, string> = {};
 
-  // --resolve on explicitly named columns: we need each token's filterType to know which are
-  // entity-valued, and parseTokens is what knows. One extra request, under an explicit flag.
-  if (resolveLites && requestedColumns.length > 0 && !wantCount) {
-    const resolved = resolveLiteColumns(await validateTokens(target.http, queryKey, requestedColumns));
+  // Validate EVERY token the caller named, before the request (AC-20.7, #95).
+  //
+  // This used to live inside the `--resolve` branch, because that path needed each token's
+  // filterType and `parseTokens` supplies both type and validity at once. Validation was therefore
+  // a side effect of an unrelated flag: without `--resolve` an invalid column reached the server and
+  // came back as a generic 500-derived line, while adding `--resolve` produced a precise message
+  // with the valid tokens listed. The same input, two different qualities of answer, decided by a
+  // flag about labels.
+  //
+  // `--order` had no validation on any path — the issue's own guess, and correct.
+  //
+  // One request covers both slots, since parseTokens takes a list. Order tokens are validated
+  // WITHOUT their `-` prefix: the minus is our descending marker, not part of the token.
+  const namedTokens = [...requestedColumns, ...orders.map((o) => o.token)];
+  let namedInfo: QueryTokenInfo[] = [];
+  if (namedTokens.length > 0) {
+    try {
+      namedInfo = await validateTokens(target.http, queryKey, namedTokens);
+    } catch (err) {
+      // `--explain` sends nothing and must work without a credential, but parseTokens needs one
+      // (QueryController is not [SignumAllowAnonymous]). Degrade with a note rather than fail, the
+      // same treatment default-column resolution already gets below — never silently, so a preview
+      // is never quietly weaker than the real thing.
+      if (ctx.args.flags.explain && err instanceof NotAuthenticatedError) {
+        ctx.io.err("note: could not validate the named tokens (no credential); they are checked at execution.\n");
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  // --resolve needs the filterType of the COLUMN tokens, which the validation above already fetched.
+  if (resolveLites && requestedColumns.length > 0 && namedInfo.length > 0) {
+    const resolved = resolveLiteColumns(namedInfo.slice(0, requestedColumns.length));
     effectiveColumns = resolved.columns;
     columnLabels = resolved.labels;
   }
@@ -246,7 +279,6 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
   }
 
   const columns = effectiveColumns.map((token) => ({ token }));
-  const orders = parseOrders(optAll(ctx, "order"));
   const filterJsonSource = opt(ctx, "filter-json");
   // DSL and --filter-json are combined by concatenation — both are ANDed at the top level,
   // matching the design's "may be combined" rule (design/filter-expression-syntax.md).

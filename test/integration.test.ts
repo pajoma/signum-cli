@@ -94,10 +94,16 @@ const executeQueryRequests: Array<{ queryKey: string; columns: Array<{ token: st
  * TypeReferenceTS, and `queryTokenType` is absent for an ordinary column token.
  */
 const SUB_TOKENS: Record<string, unknown[]> = {
+  // The query's own root tokens. Kept in step with QUERY_DESCRIPTION: #95's fix validates every
+  // named --column and --order against parseTokens, so a token this list omits now fails the way a
+  // genuinely invalid one does — which is exactly what caught this fixture being short of `Total`.
   "": [
     { key: "Id", fullKey: "Id", niceName: "Id", type: { name: "number" }, isGroupable: true },
     { key: "Entity", fullKey: "Entity", niceName: "Order", type: { name: "Order" }, isGroupable: true },
     { key: "State", fullKey: "State", niceName: "State", type: { name: "string" }, isGroupable: true },
+    { key: "Total", fullKey: "Total", niceName: "Total", type: { name: "decimal" }, isGroupable: true },
+    { key: "Customer", fullKey: "Customer", niceName: "Customer", filterType: "Lite",
+      type: { name: "Customer" }, isGroupable: true },
   ],
   Entity: [
     { key: "Customer", fullKey: "Entity.Customer", niceName: "Customer", type: { name: "Customer" }, isGroupable: true },
@@ -843,6 +849,45 @@ describe("query (STORY-20, STORY-21, STORY-22)", () => {
     const doc = JSON.parse(r.out) as { body: { columns: unknown[] } };
     expect(doc.body.columns).toEqual([]);
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("validates a named --column WITHOUT --resolve (#95)", async () => {
+    // The whole bug: validation lived inside the --resolve branch, so the same invalid column got a
+    // precise error with --resolve and a generic 500-derived line without it.
+    executeQueryRequests.length = 0;
+    const r = await cli(["query", "Order", "--column", "NoSuchColumn", "--json"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("invalid query token");
+    expect(r.err).toContain("Valid here:");
+    // ...and nothing was sent, which is the point of validating client-side (AC-20.7).
+    expect(executeQueryRequests).toHaveLength(0);
+  });
+
+  it("gives the SAME error with and without --resolve — no flag decides message quality", async () => {
+    const without = await cli(["query", "Order", "--column", "NoSuchColumn", "--json"]);
+    const with_ = await cli(["query", "Order", "--column", "NoSuchColumn", "--resolve", "--json"]);
+    expect(without.code).toBe(with_.code);
+    expect(without.err).toBe(with_.err);
+  });
+
+  it("validates --order too, which had no validation on any path (#95)", async () => {
+    executeQueryRequests.length = 0;
+    const r = await cli(["query", "Order", "--order", "NoSuchColumn", "--json"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("invalid query token");
+    expect(executeQueryRequests).toHaveLength(0);
+  });
+
+  it("strips the descending `-` before validating an order token", async () => {
+    // The minus is our marker, not part of the token; validating `-State` would reject a valid sort.
+    const r = await cli(["query", "Order", "--order", "-State", "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(executeQueryRequests.at(-1)?.columns).toBeDefined();
+  });
+
+  it("accepts valid named columns and orders together, in one round trip", async () => {
+    const r = await cli(["query", "Order", "--column", "State", "--order", "-Total", "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
   });
 
   it("puts the Entity column where it was asked for, end to end (AC-21.2)", async () => {
