@@ -235,6 +235,41 @@ export async function fetchDefaultColumns(
     .filter((t) => t.kind !== "Aggregate" && t.kind !== "TimeSeries");
 }
 
+/**
+ * Why a token that `parseTokens` accepted is still illegal in a FILTER (#97, AC-24.7).
+ *
+ * `parseTokens` resolves with `SubTokensOptions.All` (`QueryController.cs:65`), but a filter is
+ * parsed with a strictly narrower set — `CanElement | CanAnyAll`, plus `CanAggregate` only when
+ * `groupResults` is true and `CanTimeSeries` only for a time-series query
+ * (`FilterJsonConverter.cs:87`, `:133`). So validation is a SUPERSET of what filters allow: passing
+ * it proves the path exists, not that a filter may use it.
+ *
+ * The kinds below are absent from the filter option set unconditionally, so they can be refused
+ * locally with a precise message instead of arriving as the generic 500. `Aggregate` and
+ * `TimeSeries` are deliberately NOT here: both are conditionally legal, and `--group` is already
+ * enforced against aggregates by `filter.ts`'s own `validateToken`.
+ *
+ * This is the same trap AC-24.7 names for `.Nested` — `filter.ts` catches that one by name for the
+ * DSL, but `--filter-json` bypassed it, so the hole was open on exactly the path that gets the
+ * least checking.
+ */
+export function filterUnusableReason(info: QueryTokenInfo): string | undefined {
+  switch (info.kind) {
+    case "Nested":
+      return "'.Nested' is discoverable via metadata but rejected in a query filter";
+    case "ToArray":
+      return "a '.ToArray' token may be used as a column but not in a filter";
+    case "Snippet":
+      return "a snippet token may be used as a column but not in a filter";
+    case "OperationContainer":
+      return "an operation token may be used as a column but not in a filter";
+    case "Manual":
+      return "a manual token may be used as a column but not in a filter";
+    default:
+      return undefined;
+  }
+}
+
 /** The server-side token that renders an entity as its label (`EntityToStringToken.Key`). */
 export const TO_STRING_TOKEN = "ToString";
 
