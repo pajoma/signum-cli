@@ -89,6 +89,13 @@ const QUERY_DESCRIPTION = {
 const executeQueryRequests: Array<{ queryKey: string; columns: Array<{ token: string }> }> = [];
 
 /**
+ * Every parseTokens request, so a test can assert the token lists were validated in ONE round trip
+ * (#97) rather than one call per slot. Counting calls is the only way to see that: a second call
+ * would validate everything just as correctly, so no assertion about the OUTCOME can catch it.
+ */
+const parseTokensRequests: string[][] = [];
+
+/**
  * Token continuations, keyed by the token asked about (`null` = the query's own root columns).
  * Shapes follow `QueryTokenTS` (`QueryController.cs:251-272`): camelCase, `type` is a
  * TypeReferenceTS, and `queryTokenType` is absent for an ordinary column token.
@@ -104,6 +111,21 @@ const SUB_TOKENS: Record<string, unknown[]> = {
     { key: "Total", fullKey: "Total", niceName: "Total", type: { name: "decimal" }, isGroupable: true },
     { key: "Customer", fullKey: "Customer", niceName: "Customer", filterType: "Lite",
       type: { name: "Customer" }, isGroupable: true },
+  ],
+  // Aggregates on a decimal column, transcribed from `QueryUtils.AggregateTokens` (`:292-320`):
+  // Integer/Decimal/Boolean get Average, Sum, Min and Max. Added because #97 validates filter
+  // tokens, so `--filter "Total.Sum > 100" --group` — a case AC-20.7 names explicitly — started
+  // failing as though the token were invalid. The real server resolves it: parseTokens passes
+  // SubTokensOptions.All, which includes CanAggregate.
+  Total: [
+    { key: "Average", fullKey: "Total.Average", niceName: "Average of Total", queryTokenType: "Aggregate",
+      type: { name: "decimal" }, isGroupable: false },
+    { key: "Sum", fullKey: "Total.Sum", niceName: "Sum of Total", queryTokenType: "Aggregate",
+      type: { name: "decimal" }, isGroupable: false },
+    { key: "Min", fullKey: "Total.Min", niceName: "Min of Total", queryTokenType: "Aggregate",
+      type: { name: "decimal" }, isGroupable: false },
+    { key: "Max", fullKey: "Total.Max", niceName: "Max of Total", queryTokenType: "Aggregate",
+      type: { name: "decimal" }, isGroupable: false },
   ],
   Entity: [
     { key: "Customer", fullKey: "Entity.Customer", niceName: "Customer", type: { name: "Customer" }, isGroupable: true },
@@ -219,6 +241,7 @@ beforeAll(() => {
       }
       if (url.pathname === "/api/query/parseTokens") {
         const body = (await req.json()) as { queryKey: string; tokens: string[] };
+        parseTokensRequests.push(body.tokens);
         const out: unknown[] = [];
         for (const t of body.tokens) {
           const parentKey = t.split(".").slice(0, -1).join("");
@@ -888,6 +911,141 @@ describe("query (STORY-20, STORY-21, STORY-22)", () => {
   it("accepts valid named columns and orders together, in one round trip", async () => {
     const r = await cli(["query", "Order", "--column", "State", "--order", "-Total", "--json"]);
     expect(r.code).toBe(ExitCode.Ok);
+  });
+
+  // ── #97: filter tokens ─────────────────────────────────────────────────────
+  //
+  // #95 fixed --column and --order. Filter tokens still reached executeQuery unvalidated, so a typo
+  // in a filter got the generic 500-derived line while the same typo in a column got a precise one.
+
+  it("validates a --filter token before the request (#97)", async () => {
+    executeQueryRequests.length = 0;
+    const r = await cli(["query", "Order", "--filter", "Statee = 'Shipped'", "--json"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("invalid query token 'Statee'");
+    // A near miss gets the suggestion rather than the full list — `explainRejection` prefers
+    // `nearestTokens`, and 'Statee' is one edit from 'State'.
+    expect(r.err).toContain("Did you mean: State?");
+    expect(executeQueryRequests).toHaveLength(0);
+  });
+
+  it("gives a filter typo the SAME quality of error as a column typo (#97)", async () => {
+    // The asymmetry #95 removed for --resolve, removed again for the filter/column split: the same
+    // misspelled token should not be diagnosed better in one slot than the other.
+    const asColumn = await cli(["query", "Order", "--column", "Statee", "--json"]);
+    const asFilter = await cli(["query", "Order", "--filter", "Statee = 'Shipped'", "--json"]);
+    expect(asFilter.code).toBe(asColumn.code);
+    expect(asFilter.err).toBe(asColumn.err);
+  });
+
+  it("validates a token nested inside a filter GROUP, not just top-level ones (#97)", async () => {
+    // `lowerFilterExpressions` flattens only the OUTERMOST and, so the or below stays a real group
+    // with its own `filters` array — the depth a flat walk would miss.
+    executeQueryRequests.length = 0;
+    const r = await cli([
+      "query", "Order", "--filter", "State = 'Shipped' and (Totall > 100 or Id = 2)", "--json",
+    ]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("Totall");
+    expect(executeQueryRequests).toHaveLength(0);
+  });
+
+  it("validates --filter-json tokens, at depth, so the escape hatch is not a hole (#97)", async () => {
+    const path = join(configDir, "bad-filter.json");
+    writeFileSync(path, JSON.stringify([
+      { groupOperation: "Or", filters: [{ token: "NoSuchColumn", operation: "EqualTo", value: 1 }] },
+    ]));
+    executeQueryRequests.length = 0;
+    const r = await cli(["query", "Order", "--filter-json", path, "--json"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("NoSuchColumn");
+    expect(executeQueryRequests).toHaveLength(0);
+  });
+
+  it("validates a GROUP's own token, which is not a condition (#97)", async () => {
+    // `FilterGroupTS.token` (`FilterJsonConverter.cs:128`) — a group carries a token AND children,
+    // so a walk that treats the two as either/or silently skips it. The DSL never emits one;
+    // --filter-json can.
+    const path = join(configDir, "group-token.json");
+    writeFileSync(path, JSON.stringify([
+      { groupOperation: "Or", token: "NoSuchGroupToken", filters: [{ token: "State", operation: "EqualTo", value: "Shipped" }] },
+    ]));
+    executeQueryRequests.length = 0;
+    const r = await cli(["query", "Order", "--filter-json", path, "--json"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("NoSuchGroupToken");
+    expect(executeQueryRequests).toHaveLength(0);
+  });
+
+  it("validates columns, orders and filters in ONE round trip (#97)", async () => {
+    parseTokensRequests.length = 0;
+    const r = await cli([
+      "query", "Order", "--column", "State", "--order", "-Total", "--filter", "Id > 1", "--json",
+    ]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(parseTokensRequests).toHaveLength(1);
+    // Columns first, then orders, then filter tokens — the order the two positional reads rely on.
+    expect(parseTokensRequests[0]).toEqual(["State", "Total", "Id"]);
+  });
+
+  it("sends a token named in several conditions only once (#97)", async () => {
+    parseTokensRequests.length = 0;
+    const r = await cli(["query", "Order", "--filter", "Total > 1 and Total < 500", "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(parseTokensRequests[0]).toEqual(["Total"]);
+  });
+
+  it("validates an aggregate filter token under --group, where it is legal (AC-20.7, #97)", async () => {
+    parseTokensRequests.length = 0;
+    const r = await cli(["query", "Order", "--filter", "Total.Sum > 100", "--group", "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(parseTokensRequests[0]).toEqual(["Total.Sum"]);
+  });
+
+  it("still catches a misspelled aggregate under --group", async () => {
+    const r = await cli(["query", "Order", "--filter", "Total.Sumn > 100", "--group", "--json"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("invalid query token");
+  });
+
+  it("refuses a filter token that parseTokens accepts but a filter cannot use (AC-24.7, #97)", async () => {
+    // `.Nested` is offered by subTokens and accepted by parseTokens (SubTokensOptions.All), but a
+    // filter is parsed without CanNested, so executeQuery would 500. filter.ts catches this by name
+    // for the DSL; --filter-json bypassed that, which left the hole on the least-checked path.
+    const path = join(configDir, "nested-filter.json");
+    writeFileSync(path, JSON.stringify([
+      { token: "Entity.Details.Nested", operation: "EqualTo", value: 1 },
+    ]));
+    executeQueryRequests.length = 0;
+    const r = await cli(["query", "Order", "--filter-json", path, "--json"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("cannot be used in a filter");
+    expect(r.err).toContain("Entity.Details.Nested");
+    expect(executeQueryRequests).toHaveLength(0);
+  });
+
+  it("--explain degrades on a missing credential for filter tokens too (#97)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "signum-nocred-"));
+    const r = await cli(["query", "Order", "--filter", "State = 'Shipped'", "--explain"], {
+      env: { SIGNUM_CONFIG_DIR: dir, SIGNUM_URL: baseUrl },
+    });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.err).toContain("could not validate the query's tokens");
+    // The filter still reaches the previewed request — degraded validation must not drop input.
+    const doc = JSON.parse(r.out) as { body: { filters: Array<{ token: string }> } };
+    expect(doc.body.filters[0]?.token).toBe("State");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("reports an unreadable --filter-json path even under a detected agent caller (#97)", async () => {
+    // Moved beside the DSL parse: a bad path is a diagnostic about the caller's OWN input, so it
+    // must not be masked by the data-gate refusal, exactly as --filter already was not.
+    const r = await cli(["query", "Order", "--filter-json", "/nonexistent/filters.json", "--json"], {
+      env: { CLAUDECODE: "1" },
+    });
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("could not read --filter-json file");
+    expect(r.err).not.toContain("refusing");
   });
 
   it("puts the Entity column where it was asked for, end to end (AC-21.2)", async () => {

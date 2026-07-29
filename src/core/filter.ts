@@ -48,6 +48,13 @@ export interface FilterConditionWire {
 
 export interface FilterGroupWire {
   groupOperation: "And" | "Or";
+  /**
+   * A group may carry its OWN token (`FilterGroupTS.token`, `FilterJsonConverter.cs:128`), which
+   * anchors the group to a collection for `AnyAll` semantics. The DSL never emits one — `lower()`
+   * below produces groups without a token — but `--filter-json` can, so anything walking this
+   * shape must look for it. Missed tokens here are exactly the hole #97 closed.
+   */
+  token?: string;
   filters: FilterWire[];
 }
 
@@ -480,4 +487,35 @@ function lower(node: FilterNode, opts: ValidateOptions): FilterWire {
  */
 export function lowerFilterExpressions(nodes: readonly FilterNode[], opts: ValidateOptions): FilterWire[] {
   return nodes.flatMap(collectAndTerms).map((n) => lower(n, opts));
+}
+
+/**
+ * Every token named anywhere in a lowered filter tree, in document order, deduplicated (#97).
+ *
+ * Walks the WIRE shape rather than the AST, for the same reason `resolveHandlesInFilters` does: only
+ * the lowered form covers `--filter-json` as well as `--filter`, and the escape hatch must not be a
+ * hole in validation. Which means the input is partly untrusted — `--filter-json` is arbitrary JSON
+ * cast to `FilterWire[]` — so this reads defensively and never assumes a node is well-formed.
+ *
+ * A node contributes its own `token` AND is recursed into: a group can have both a token and
+ * children (`FilterGroupWire.token`), so the two cases are not exclusive. Treating them as
+ * either/or is the easy mistake, and it silently skips the group's own token.
+ *
+ * Deduplicated because a filter naming one column in five conditions should not send it five times;
+ * order is preserved so a rejection still points at the first place the caller wrote it.
+ */
+export function collectFilterTokens(filters: readonly FilterWire[]): string[] {
+  const seen = new Set<string>();
+  const walk = (nodes: readonly unknown[]): void => {
+    for (const node of nodes) {
+      if (node === null || typeof node !== "object") continue;
+      const rec = node as Record<string, unknown>;
+      const token = rec["token"];
+      if (typeof token === "string" && token !== "") seen.add(token);
+      const children = rec["filters"];
+      if (Array.isArray(children)) walk(children);
+    }
+  };
+  walk(filters);
+  return [...seen];
 }

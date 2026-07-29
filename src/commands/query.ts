@@ -15,12 +15,15 @@ import { renderResultTable, renderDataDocument, renderDocument } from "../core/o
 import { resolveResultTable, type RawResultTable } from "../core/resulttable.ts";
 import { loadMetadata, resolveQueryKey } from "../core/metadata.ts";
 import {
-  fetchDefaultColumns, resolveLiteColumns, validateTokens, type QueryTokenInfo,
+  fetchDefaultColumns, filterUnusableReason, resolveLiteColumns, validateTokens,
+  type QueryTokenInfo,
 } from "../core/tokens.ts";
 import { disclosure, isHandle, resolveHandle } from "../core/privacy.ts";
 import { loadHandles } from "../core/config.ts";
 import { emitCommandEcho, persistHandles } from "./context.ts";
-import { lowerFilterExpressions, parseFilterExpression, type FilterWire } from "../core/filter.ts";
+import {
+  collectFilterTokens, lowerFilterExpressions, parseFilterExpression, type FilterWire,
+} from "../core/filter.ts";
 import { opt, optAll, flag, resolveTarget } from "./context.ts";
 import { readFileSync } from "node:fs";
 
@@ -162,6 +165,13 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
     { groupEnabled },
   );
 
+  // --filter-json is read HERE, beside the DSL parse, for the reason directly above: an unreadable
+  // path or malformed JSON is a diagnostic about the caller's OWN input, not data, so it must not sit
+  // behind the privacy gate. It also has to happen before token validation below, since #97 folds
+  // the escape hatch's tokens into the same round trip as the DSL's.
+  const filterJsonSource = opt(ctx, "filter-json");
+  const jsonFilters = filterJsonSource !== undefined ? (readFilterJson(filterJsonSource) as FilterWire[]) : [];
+
   // Pagination is validated HERE, beside the filter, because it is equally local: `--top abc` is
   // wrong whatever the server says. It used to be parsed while building the request, so an invalid
   // value was masked first by "no target application" and then by "no credential" — a user had to
@@ -223,9 +233,14 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
   //
   // `--order` had no validation on any path — the issue's own guess, and correct.
   //
-  // One request covers both slots, since parseTokens takes a list. Order tokens are validated
+  // One request covers every slot, since parseTokens takes a list. Order tokens are validated
   // WITHOUT their `-` prefix: the minus is our descending marker, not part of the token.
-  const namedTokens = [...requestedColumns, ...orders.map((o) => o.token)];
+  //
+  // #97 added the third slot: tokens named in `--filter` and `--filter-json`, at every nesting
+  // depth. They go LAST so the two positional reads below stay valid — `--resolve` takes the column
+  // slice off the front, the filter kind check takes its own slice off the back.
+  const filterTokens = collectFilterTokens([...dslFilters, ...jsonFilters]);
+  const namedTokens = [...requestedColumns, ...orders.map((o) => o.token), ...filterTokens];
   let namedInfo: QueryTokenInfo[] = [];
   if (namedTokens.length > 0) {
     try {
@@ -236,11 +251,26 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
       // same treatment default-column resolution already gets below — never silently, so a preview
       // is never quietly weaker than the real thing.
       if (ctx.args.flags.explain && err instanceof NotAuthenticatedError) {
-        ctx.io.err("note: could not validate the named tokens (no credential); they are checked at execution.\n");
+        ctx.io.err("note: could not validate the query's tokens (no credential); they are checked at execution.\n");
       } else {
         throw err;
       }
     }
+  }
+
+  // A token can pass parseTokens and still be illegal in a filter — validation runs with
+  // SubTokensOptions.All, a filter with much less (see `filterUnusableReason`). Refuse those here
+  // rather than let the server do it as a 500. Slice off the BACK, matching how filterTokens were
+  // appended; empty when validation was skipped, which is the right no-op.
+  const filterInfo = namedInfo.slice(requestedColumns.length + orders.length);
+  for (const [idx, info] of filterInfo.entries()) {
+    const reason = filterUnusableReason(info);
+    if (reason === undefined) continue;
+    // Report the token as the CALLER wrote it, not the server's resolved fullKey.
+    const written = filterTokens[idx] ?? info.fullKey;
+    throw new UsageError(`token '${written}' cannot be used in a filter: ${reason}`, {
+      hint: "Restructure the filter to avoid it. Run `signum help filter` for the full syntax.",
+    });
   }
 
   // --resolve needs the filterType of the COLUMN tokens, which the validation above already fetched.
@@ -279,10 +309,9 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
   }
 
   const columns = effectiveColumns.map((token) => ({ token }));
-  const filterJsonSource = opt(ctx, "filter-json");
   // DSL and --filter-json are combined by concatenation — both are ANDed at the top level,
-  // matching the design's "may be combined" rule (design/filter-expression-syntax.md).
-  const jsonFilters = filterJsonSource !== undefined ? (readFilterJson(filterJsonSource) as FilterWire[]) : [];
+  // matching the design's "may be combined" rule (design/filter-expression-syntax.md). Both were
+  // read above, before the gate.
   // AC-53.2 again, for filter values: resolve handles locally before the request is built, so a
   // `ref:` never crosses the wire.
   const handles = loadHandles(ctx.io.env);
