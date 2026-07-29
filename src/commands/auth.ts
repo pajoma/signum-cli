@@ -13,14 +13,38 @@ import { deleteCredential, loadCredential, permissionsAreUnenforceable, saveCred
 import { SignumHttp } from "../core/http.ts";
 import { flag, resolveTarget } from "./context.ts";
 
+/** Generic form, for error hints where no target URL is known (`auth status` on a fresh install). */
 const HANDOFF_INSTRUCTIONS = [
   "To obtain a token:",
   "  1. Sign in to the web application in your browser.",
   '  2. Open the browser console and run:  sessionStorage.getItem("authToken")',
   "  3. Pipe the value in:",
-  "       signum auth login --url <url> --with-token < token.txt",
-  '       printf %s "$TOKEN" | signum auth login --url <url> --with-token',
+  "       signum auth login --url <url> < token.txt",
+  '       printf %s "$TOKEN" | signum auth login --url <url>',
 ].join("\n");
+
+/**
+ * The interactive preamble, shaped after `aws login --remote`.
+ *
+ * Three things that style gets right and a generic instruction block does not:
+ *   • it says the browser will NOT be opened, so nobody waits for one — and here that is a
+ *     standing fact rather than a mode, because `--web` needs an OpenID module the target
+ *     application does not have (ADR 0008)
+ *   • it prints the CONCRETE url, which is clickable in most terminals, instead of `<url>`
+ *   • it prompts inline, so the next thing you do is on the line your cursor is already on
+ */
+function handoffPreamble(url: string): string {
+  return [
+    "Browser will not be opened automatically.",
+    "Please sign in at",
+    `  ${url}`,
+    "",
+    "Then open the browser console and run",
+    '  sessionStorage.getItem("authToken")',
+    "",
+    "",
+  ].join("\n");
+}
 
 async function login(ctx: Ctx): Promise<ExitCode> {
   // L1 (Brooks review): --url always parses into flags.url; it is never in `options`, so the
@@ -74,8 +98,12 @@ async function login(ctx: Ctx): Promise<ExitCode> {
         hint: "The token is read from stdin so it never appears in shell history.\n\n" + HANDOFF_INSTRUCTIONS,
       });
     }
-    ctx.io.err(HANDOFF_INSTRUCTIONS + "\n\n");
-    token = (await ctx.io.prompt("Paste the token (not echoed): ", { hidden: true })).trim();
+    ctx.io.err(handoffPreamble(url));
+    token = (await ctx.io.prompt("Enter the token displayed in your browser: ", { hidden: true })).trim();
+    // Silence is safe but disorienting for a value this long — you cannot see a truncated paste.
+    // A character count confirms something arrived without putting the token on screen or in
+    // scrollback. The immediate currentUser check is what catches a bad one either way (AC-12.3).
+    if (token !== "") ctx.io.err(`Received ${token.length} characters.\n`);
   } else {
     token = (await ctx.io.readStdin()).trim();
   }

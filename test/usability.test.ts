@@ -182,6 +182,33 @@ describe("auth login: --with-token is optional, and a token argument is refused"
   });
 });
 
+describe("the login preamble tells you where to go (aws login --remote shape)", () => {
+  it("names the browser situation, the concrete URL, and the snippet — then prompts inline", async () => {
+    // A generic "sign in to the web application" block left the reader to work out where. The URL is
+    // known, so print it: clickable in most terminals, and unambiguous when several apps exist.
+    const dir = mkdtempSync(join(tmpdir(), "signum-ua-pre-"));
+    const r = await cli(["auth", "login", "--url", "https://app.example"], {
+      env: { SIGNUM_CONFIG_DIR: dir }, answers: ["some-token"],
+    });
+    expect(r.err).toContain("Browser will not be opened automatically");
+    expect(r.err).toContain("https://app.example");
+    expect(r.err).toContain('sessionStorage.getItem("authToken")');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("confirms the character count, since silent input hides a truncated paste", async () => {
+    // The token is a long opaque blob; with no echo there is otherwise no signal that it arrived.
+    // A count is not a disclosure.
+    const dir = mkdtempSync(join(tmpdir(), "signum-ua-pre2-"));
+    const r = await cli(["auth", "login", "--url", "https://app.example"], {
+      env: { SIGNUM_CONFIG_DIR: dir }, answers: ["abcdefghij"],
+    });
+    expect(r.err).toContain("Received 10 characters");
+    expect(r.err).not.toContain("abcdefghij");
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 describe("unmask --clear asks before destroying the mapping", () => {
   /** A profile with one handle stored. */
   async function withHandle(): Promise<string> {
