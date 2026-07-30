@@ -274,7 +274,7 @@ export const HANDLE_PREFIX = "ref_";
  * the token as written and then the same digest under the other prefix, so an old store serves a new
  * document and a new store serves an old one.
  */
-export const LEGACY_HANDLE_PREFIXES = ["ref:"];
+const LEGACY_HANDLE_PREFIXES = ["ref:"];
 
 /** Every accepted prefix, canonical first. */
 const ALL_HANDLE_PREFIXES = [HANDLE_PREFIX, ...LEGACY_HANDLE_PREFIXES];
