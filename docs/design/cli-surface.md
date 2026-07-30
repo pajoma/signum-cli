@@ -38,7 +38,7 @@ signum <tool-noun> <verb> [args]     # tooling   — gh-shaped
 | Command | Milestone | Purpose |
 |---|---|---|
 | `signum query <queryKey>` | **m1** | Run a dynamic query. The workhorse. `--count` returns only the count via `queryValue` (AC-23.6). |
-| `signum get <Type> <id>` · `signum get <Lite>` | **m1** | Retrieve one entity. Accepts `Order;42` or a `ref:` handle. `--exists` checks presence only (`api/exists`). |
+| `signum get <Type> <id>` · `signum get <Lite>` | **m1** | Retrieve one entity. Accepts `Order;42` or a `ref_` handle. `--exists` checks presence only (`api/exists`). |
 | `signum get <Type>` | m2 | No id ⇒ bounded listing (`api/fetchAll`), kubectl-style. Always bounded; warns on a TTY that it is unfiltered. |
 | `signum explain <Type>[.<token>]` | **m1** | Describe a type, its members, and valid next query tokens. |
 | `signum types` · `signum queries` | **m1** | List what the app offers. |
@@ -134,7 +134,7 @@ signum ship order --help          # same, reached the way you would expect
 | `signum auth token` | m2 | Print the stored token (guarded; see §7). |
 | `signum config get-contexts` · `use-context` · `set-context` · `current-context` | m2 | Target selection. |
 | `signum mcp` | m3 | Serve the command set over MCP on stdio. |
-| `signum unmask <ref…>` | m2 | Human-only resolution of `ref:` handles (AC-53.4). Refused under an agent context. |
+| `signum unmask <ref…>` | m2 | Human-only resolution of `ref_` handles (AC-53.4). Refused under an agent context. |
 | `signum auth key create` · `show` | m3 | API-key provisioning. Not applicable to the target app — no `Signum.Rest` ([target profile](../target-application.md)). |
 | `signum completion <shell>` | m3 | Shell completion. |
 | `signum version` | **m1** | Version, and the target app's version when reachable. |
