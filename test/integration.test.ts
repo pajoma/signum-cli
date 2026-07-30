@@ -14,6 +14,9 @@ import { join } from "node:path";
 import { run, type Io } from "../src/cli.ts";
 import { saveHandles } from "../src/core/config.ts";
 import { ExitCode } from "../src/core/errors.ts";
+// Asserted via the constant, not a literal: the prefix changed once (ref: -> ref_) and a literal
+// here would have to be found and edited again next time.
+import { HANDLE_PREFIX } from "../src/core/privacy.ts";
 
 const GOOD_TOKEN = "test-token-aaaa";
 const ROTATED_TOKEN = "test-token-bbbb";
@@ -1675,7 +1678,7 @@ describe("ref: handles, end to end (REQ-058)", () => {
     expect(r.code).toBe(ExitCode.Ok);
     const rows = JSON.parse(r.out) as Array<Record<string, unknown>>;
     const handle = String(rows[0]?.["Entity"]);
-    expect(handle).toStartWith("ref:");
+    expect(handle).toStartWith(HANDLE_PREFIX);
 
     // Stored BEFORE emission, so what we printed is always resolvable.
     const stored = JSON.parse(readFileSync(join(d, "handles.json"), "utf8")) as Record<string, string>;
@@ -1892,7 +1895,7 @@ describe("privacy gate (STORY-50, STORY-51)", () => {
     const rows = JSON.parse(r.out) as Array<Record<string, unknown>>;
     expect(rows[0]?.["State"]).toBe("Shipped");
     expect(rows[0]?.["Total"]).toBe(1200.5);
-    expect(String(rows[0]?.["Entity"])).toStartWith("ref:");
+    expect(String(rows[0]?.["Entity"])).toStartWith(HANDLE_PREFIX);
     expect(r.err).toContain("pseudonymized (heuristic): Entity");
   });
 
@@ -1902,7 +1905,7 @@ describe("privacy gate (STORY-50, STORY-51)", () => {
     // names. Judged by value, the identity is caught regardless.
     const r = await cli(["query", "Order", "-o", "csv"], { env: { SIGNUM_CONFIG_DIR: configDir, CLAUDECODE: "1" } });
     expect(r.out).not.toContain("Order;42");
-    expect(r.out).toContain("ref:");
+    expect(r.out).toContain(HANDLE_PREFIX);
   });
 
   it("strict mode replaces everything not allowlisted, and discloses honestly (AC-52.6, 52.8)", async () => {

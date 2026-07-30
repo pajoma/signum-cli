@@ -210,23 +210,23 @@ export const COMMANDS: CommandSpec[] = [
   },
   {
     name: "unmask",
-    summary: "Resolve local ref: handles back to the records they stand for",
-    usage: "signum unmask <ref:...> [...] | --in <path> | --list | --clear",
+    summary: "Resolve local ref_ handles back to the records they stand for",
+    usage: "signum unmask <ref_...> [...] | --in <path> | --list | --clear",
     milestone: "m2",
     description:
-      "Pseudonymized output emits entity identities as opaque local handles (ref:...) rather than " +
+      "Pseudonymized output emits entity identities as opaque local handles (ref_...) rather than " +
       "Type;id, so an agent can act on a record it cannot identify. This resolves them back, for a " +
       "HUMAN auditing what was read or acted on.\n\n" +
       "Nothing here touches the network: the surrogate-to-real mapping is local by construction and " +
       "never leaves the machine. It is stored 0600 beside the credential, per profile, and is valid " +
       "only for the surrogate secret that produced it.\n\n" +
-      "A handle is accepted anywhere a Lite key is, so `signum get ref:7f3a1c2b4d5e` works and is " +
+      "A handle is accepted anywhere a Lite key is, so `signum get ref_7f3a1c2b4d5e` works and is " +
       "resolved locally before the request is built.\n\n" +
       "--in resolves handles inside FILES, which is the point of the handles: an agent writes a " +
       "report it cannot read, and this turns it into one you can. A folder is walked recursively; " +
       "binaries, symlinks and files over 8 MiB are skipped and reported. Files are read and written " +
       "as UTF-8 whatever the platform codepage is.\n\n" +
-      "Handles in FILE and FOLDER names are resolved too — docs/ref:cccc/report-ref:aaaa.md leaks " +
+      "Handles in FILE and FOLDER names are resolved too — docs/ref_cccc/report-ref_aaaa.md leaks " +
       "two identities in the path alone, whatever the contents say. By default the sibling copy is " +
       "written at the resolved path; --in-place renames the originals instead, deepest first, and " +
       "never over an existing name. A skipped binary is still reported when its NAME carries a " +
@@ -248,7 +248,7 @@ export const COMMANDS: CommandSpec[] = [
       { name: "yes", summary: "Skip the confirmation for --clear" },
     ],
     examples: [
-      "signum unmask ref:7f3a1c2b4d5e",
+      "signum unmask ref_7f3a1c2b4d5e",
       "signum unmask --in report.md --dry-run",
       "signum unmask --in docs --glob '*.md'",
       "signum unmask --list",
@@ -463,11 +463,11 @@ export const TOPICS: Record<string, string> = {
     "  the caller asking for weaker protection is the caller that wants the data.",
     "",
     "  Surrogates are stable per profile, so the same value reads the same across",
-    "  commands. Entity identities become opaque handles (ref:...) rather than labels,",
+    "  commands. Entity identities become opaque handles (ref_...) rather than labels,",
     "  so an agent can act on a record it cannot identify:",
     "",
-    "    signum get ref:7f3a1c2b4d5e         resolved locally, never sent to the server",
-    "    signum unmask ref:7f3a...  what it stands for (human only)",
+    "    signum get ref_7f3a1c2b4d5e         resolved locally, never sent to the server",
+    "    signum unmask ref_7f3a...  what it stands for (human only)",
     "    signum unmask --clear      forget every handle",
     "",
     "  LIMITS, and they are real: free text is never scanned, so a comment field",

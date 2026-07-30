@@ -116,10 +116,17 @@ An agent needs a handle to *act* on a record — `signum operation Order.Ship --
 the id and the agent cannot act; leave it and the agent sees a real database identifier that is directly
 re-identifying against the app.
 
-**Resolution: opaque local handles.** In pseudonymizing mode the CLI emits `ref:7f3a` instead of
-`Order;42`, keeps the mapping **locally**, and accepts `ref:7f3a` wherever a `Lite` is expected, resolving
+**Resolution: opaque local handles.** In pseudonymizing mode the CLI emits `ref_7f3a1c2b4d5e` instead of
+`Order;42`, keeps the mapping **locally**, and accepts it wherever a `Lite` is expected, resolving
 it before the request. The model never sees a real id, and the agent stays fully capable. This is the one
 piece of the design that is genuinely elegant rather than merely careful.
+
+> **Two amendments to the illustration above.** The width is **48 bits**, not the 16 shown here: at
+> `ref:7f3a` handles start colliding at a few hundred entries by the birthday bound, and a collision
+> means two people sharing one identity. And the separator is **`_`, not `:`** — once handles began
+> appearing in file and folder names (AC-53.10), `:` made them unusable there, because it is reserved
+> in Windows filenames. `ref:` is still accepted so that stores and documents written earlier keep
+> resolving; it is simply no longer minted. See AC-53.1.
 
 ### The mapping never leaves the machine
 
@@ -148,7 +155,7 @@ Someone will otherwise assume more than this delivers.
 |---|---|---|
 | REQ-056 | **m1** | Caller-context detection, fail-closed, reported |
 | REQ-057 | **m2** | Pseudonymization engine — heuristics, policy, strict mode |
-| REQ-058 | **m2** | Local re-identification mapping and opaque `ref:` handles |
+| REQ-058 | **m2** | Local re-identification mapping and opaque `ref_` handles |
 
 **Why REQ-056 is m1 while the engine is m2:** agent exposure exists from m1, because Claude Code can
 invoke the binary directly (that is the stated reason MCP itself is m3). So m1 must at minimum *detect*

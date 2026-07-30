@@ -72,11 +72,11 @@ and never see the result. The human runs it in their own terminal, where the cal
 signum types                                        # m1 ✓
 signum explain Skill --privacy                      # REQ-059 — nothing sensitive here
 signum query Skill --filter "Name = Java"           # m1 ✓ — exact Lite, see below
-signum explain User --privacy                       # REQ-059 — Name → surrogate, Id → ref:
+signum explain User --privacy                       # REQ-059 — Name → surrogate, Id → ref_
 signum query UserSkill --filter "Skill = Skill;2440" --resolve
                                                     # pseudonymization applies AUTOMATICALLY
 # …agent analyses surrogates…
-signum de-pseudonymize ref:7f3a                     # REQ-058 — human only
+signum unmask ref_7f3a1c2b4d5e                      # REQ-058 — human only
 ```
 
 Note what is **not** in that list: any flag by which the agent asks for or waives pseudonymization.
@@ -126,6 +126,6 @@ because REQ-057 forbids the CLI from ever claiming compliance.
    agent-mediated flows to work at all — needs deciding before implementation, not during.
 2. **Does REQ-078 emit one command or a script?** A multi-step analysis may need several. One
    command is inspectable at a glance; a script is more useful and less reviewable.
-3. **Is a user id personal data here?** The scenario says pseudonymize it. REQ-058's `ref:` handles
+3. **Is a user id personal data here?** The scenario says pseudonymize it. REQ-058's `ref_` handles
    already do, so the answer is yes by construction — but it is worth stating that this is a
    deliberate choice rather than an accident of the handle design.

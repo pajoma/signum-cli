@@ -250,7 +250,42 @@ export function surrogate(
   return `${labelFor(token)}-${digest.slice(0, 4)}`;
 }
 
-export const HANDLE_PREFIX = "ref:";
+/**
+ * The handle prefix — `ref_`, deliberately NOT `ref:`.
+ *
+ * `:` is reserved in Windows filenames (`< > : " / \ | ? *`), which made a handle unusable in the one
+ * place `unmask --in` most needs it: a file or folder NAME. An agent writing a per-person report
+ * cannot name the file after the handle it was given, so on Windows the path had to leak an identity
+ * or the agent had to invent its own mangling. `_` is legal on every platform, safe unquoted in a
+ * shell, and does not disturb extension parsing the way `.` would (`ref.abc123` makes `extname`
+ * return `.abc123`). It also reads clearly against the kebab-case around it:
+ * `effort-ref_7f3a1c2b4d5e.md`.
+ *
+ * Still deliberately not `Type;id`-shaped, so nothing downstream mistakes a handle for a Lite key.
+ */
+export const HANDLE_PREFIX = "ref_";
+
+/**
+ * Prefixes still ACCEPTED but no longer minted.
+ *
+ * `ref:` was the original form, so it is in every handle store written before this change and in
+ * every document produced from one. Refusing it would silently orphan those — precisely the
+ * unresolvable-handle failure AC-53.5 and AC-53.6 exist to prevent, self-inflicted. Resolution tries
+ * the token as written and then the same digest under the other prefix, so an old store serves a new
+ * document and a new store serves an old one.
+ */
+export const LEGACY_HANDLE_PREFIXES = ["ref:"];
+
+/** Every accepted prefix, canonical first. */
+const ALL_HANDLE_PREFIXES = [HANDLE_PREFIX, ...LEGACY_HANDLE_PREFIXES];
+
+/** The digest part of a handle, whichever accepted prefix it carries. */
+function handleDigest(handle: string): string | undefined {
+  for (const p of ALL_HANDLE_PREFIXES) {
+    if (handle.startsWith(p)) return handle.slice(p.length);
+  }
+  return undefined;
+}
 
 /**
  * 48 bits of digest. ADR 0007 illustrates a handle as `ref:7f3a`, but 16 bits collide at a few
@@ -302,17 +337,39 @@ export function isIdentityValue(value: unknown): boolean {
 }
 
 export function isHandle(value: string): boolean {
-  return value.startsWith(HANDLE_PREFIX);
+  return handleDigest(value) !== undefined;
 }
 
 /**
- * Resolve a `ref:` handle to the real Lite key it stands for (AC-53.2).
+ * Look a handle up, tolerating either prefix in either direction.
+ *
+ * The token as written wins; failing that, the same digest is tried under every other accepted
+ * prefix. That is what lets a store written before the `ref:` -> `ref_` change serve a document
+ * written after it, and vice versa, without rewriting anybody's store.
+ */
+export function lookupHandle(
+  handle: string,
+  handles: Readonly<Record<string, string>>,
+): string | undefined {
+  const direct = handles[handle];
+  if (direct !== undefined) return direct;
+  const digest = handleDigest(handle);
+  if (digest === undefined) return undefined;
+  for (const p of ALL_HANDLE_PREFIXES) {
+    const alt = handles[`${p}${digest}`];
+    if (alt !== undefined) return alt;
+  }
+  return undefined;
+}
+
+/**
+ * Resolve a handle to the real Lite key it stands for (AC-53.2).
  *
  * Throws when it cannot: an unresolvable handle must never be forwarded to the server as a literal
  * string, which would either 404 confusingly or — worse — match something (AC-53.5).
  */
 export function resolveHandle(handle: string, handles: Readonly<Record<string, string>>): string {
-  const real = handles[handle];
+  const real = lookupHandle(handle, handles);
   if (real === undefined) {
     throw new UsageError(`cannot resolve ${handle}`, {
       hint:
@@ -333,7 +390,7 @@ export function resolveHandle(handle: string, handles: Readonly<Record<string, s
  * which is the failure the issue calls out as looking identical to success.
  */
 const HANDLE_IN_TEXT = new RegExp(
-  `${HANDLE_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[0-9a-f]+`,
+  `(?:${ALL_HANDLE_PREFIXES.map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})[0-9a-f]+`,
   "g",
 );
 
@@ -371,7 +428,7 @@ export function resolveHandlesInText(
   let replaced = 0;
   const unresolved: string[] = [];
   const out = text.replace(HANDLE_IN_TEXT, (match) => {
-    const real = handles[match];
+    const real = lookupHandle(match, handles);
     if (real === undefined) {
       if (!unresolved.includes(match)) unresolved.push(match);
       return match;

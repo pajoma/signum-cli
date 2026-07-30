@@ -18,8 +18,11 @@ import { join } from "node:path";
 import { run, type Io } from "../src/cli.ts";
 import { saveHandles } from "../src/core/config.ts";
 import { ExitCode } from "../src/core/errors.ts";
-import { resolveHandlesInText } from "../src/core/privacy.ts";
+import {
+  HANDLE_PREFIX, isHandle, resolveHandlesInText, resolvePolicy, surrogate,
+} from "../src/core/privacy.ts";
 import { matchesGlob, resolveSegment, siblingOutputPath } from "../src/core/textfiles.ts";
+import { basename } from "node:path";
 
 let dir: string;
 let work: string;
@@ -59,6 +62,7 @@ async function cli(argv: string[], extraEnv: Record<string, string> = {}, tty = 
 }
 
 const env = () => ({ SIGNUM_CONFIG_DIR: dir }) as unknown as NodeJS.ProcessEnv;
+const policy = () => resolvePolicy({ callerIsAgent: true, acknowledged: false, env: env() });
 
 function file(name: string, contents: string): string {
   const p = join(work, name);
@@ -312,6 +316,68 @@ describe("unmask --in", () => {
     expect(doc.totals.filesWritten).toBe(1);
     expect(doc.unresolvable).toEqual(["ref:deadbeefdead"]);
     expect(doc.files[0]?.output).toContain("r.local.md");
+  });
+});
+
+describe("the handle format is usable in a filename on every platform", () => {
+  // `ref:` was unusable in the one place `unmask --in` most needs it: a file or folder NAME. `:` is
+  // reserved on Windows, so an agent there could not name a report after the handle it was given —
+  // it had to leak an identity into the path or invent its own mangling.
+
+  it("contains no character Windows reserves in a filename", () => {
+    const handle = String(surrogate({ EntityType: "User", id: 102 }, "User", policy()));
+    for (const bad of ["<", ">", ":", '"', "/", "\\", "|", "?", "*"]) {
+      expect(handle).not.toContain(bad);
+    }
+    // ...and nothing that a shell would interpret unquoted, or that would confuse extension parsing.
+    expect(handle).toMatch(/^[A-Za-z0-9_]+$/);
+  });
+
+  it("is still not Type;id-shaped, so it cannot be mistaken for a Lite key", () => {
+    const handle = String(surrogate({ EntityType: "User", id: 102 }, "User", policy()));
+    expect(handle).not.toContain(";");
+    expect(handle).toStartWith(HANDLE_PREFIX);
+  });
+
+  it("survives a round trip through a real filename", () => {
+    const handle = String(surrogate({ EntityType: "User", id: 102 }, "User", policy()));
+    const p = join(work, `effort-${handle}.md`);
+    writeFileSync(p, "x", "utf8");
+    expect(existsSync(p)).toBe(true);
+    // And the scanner finds it in that name, which is the whole point.
+    const found = resolveSegment(basename(p), { [handle]: "User;102" });
+    expect(found.name).toBe("effort-User;102.md");
+  });
+
+  it("still accepts a legacy ref: handle, so existing stores are not orphaned", async () => {
+    // Refusing them would self-inflict exactly the unresolvable-handle failure AC-53.5 guards against.
+    saveHandles({ "ref:aaaaaaaaaaaa": "User;42" }, env());
+    const p = file("old.md", "owner ref:aaaaaaaaaaaa\n");
+    const r = await cli(["unmask", "--in", p]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(readFileSync(join(work, "old.local.md"), "utf8")).toBe("owner User;42\n");
+  });
+
+  it("resolves a NEW-form token against an OLD-form store, and the reverse", () => {
+    // Both directions, because a document and a store can be written either side of the change.
+    expect(resolveHandlesInText("x ref_aaaaaaaaaaaa", { "ref:aaaaaaaaaaaa": "User;1" }).text)
+      .toBe("x User;1");
+    expect(resolveHandlesInText("x ref:aaaaaaaaaaaa", { "ref_aaaaaaaaaaaa": "User;1" }).text)
+      .toBe("x User;1");
+  });
+
+  it("accepts either form as a command argument", () => {
+    expect(isHandle("ref_aaaaaaaaaaaa")).toBe(true);
+    expect(isHandle("ref:aaaaaaaaaaaa")).toBe(true);
+    expect(isHandle("User;42")).toBe(false);
+  });
+
+  it("a legacy handle in a FILE NAME resolves too, where it could exist at all", async () => {
+    saveHandles({ "ref:aaaaaaaaaaaa": "User;42" }, env());
+    file("report-ref:aaaaaaaaaaaa.md", "clean\n");
+    const r = await cli(["unmask", "--in", work, "--in-place"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(existsSync(join(work, "report-User;42.md"))).toBe(true);
   });
 });
 
