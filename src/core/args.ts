@@ -103,13 +103,13 @@ const FLAGS_WITH_VALUE = new Set([
   "filter", "filter-json", "column", "order", "top", "page", "page-size",
   "context", "pseudonymize", "arg", "arg-string", "arg-lite", "arg-json",
   "lite", "id", "filename", "f",
-  "in", "glob",
+  "in", "glob", "labels",
 ]);
 
 /** Boolean flags — listing one above would make it demand a value. */
 export const BOOLEAN_FLAGS = new Set([
   "with-token", "exists", "count", "all", "yes", "y", "raw", "group",
-  "resolve", "privacy", "list", "clear", "as-command", "dry-run", "in-place",
+  "resolve", "privacy", "list", "clear", "as-command", "dry-run", "in-place", "forget-labels",
 ]);
 
 /** Invariant: a flag cannot need a value and be boolean-only at once. Checked by test. */

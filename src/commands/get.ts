@@ -117,8 +117,8 @@ export async function runGet(ctx: Ctx): Promise<ExitCode> {
   // An entity is a document, not a table, so it renders as JSON in every format — and it is
   // pseudonymized by member name rather than by column (REQ-057). Without this the m2 gate change
   // would be a leak: pseudonymization opens the agent path, and `get` would walk through it raw.
-  const { value, pseudonymized, handles } = pseudonymizeDocument(res.body, ctx.privacy);
-  persistHandles(ctx, handles); // before emitting — see the note in query.ts
+  const { value, pseudonymized, handleDetails } = pseudonymizeDocument(res.body, ctx.privacy);
+  persistHandles(ctx, handleDetails); // before emitting — see the note in query.ts
   renderDataDocument(value, {
     format: ctx.format === "table" ? "json" : ctx.format,
     write: ctx.openData(dataKind),

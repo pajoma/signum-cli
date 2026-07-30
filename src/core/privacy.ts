@@ -90,6 +90,8 @@ export interface PrivacyPolicy {
   secret: () => string;
   /** Where the policy came from, for `--privacy` output. */
   origin: "default" | "profile";
+  /** Whether a captured display string may be written to the handle store (#106). */
+  storeLabels: boolean;
   /** Per-run cache for the name-based half of the decision. Cells are many; names are few. */
   memo: Map<string, Classification>;
 }
@@ -98,6 +100,10 @@ export type ClassificationReason =
   | "mode-off"
   /** An entity reference: identifying by construction, whatever the member is called (AC-52.12). */
   | "identity"
+  /** An entity's DISPLAY STRING — `ToString` / `toStr`. Reported apart from `identity` so the
+   *  introspection view says which rule fired: a reader auditing `Entity.ToString` needs to see
+   *  that it was caught as a label, not guess that a name heuristic happened to match (#105). */
+  | "entity-label"
   | "policy-allow"
   | "policy-always"
   | "heuristic-match"
@@ -157,6 +163,12 @@ export function sensitivity(input: SensitivityInput, policy: PrivacyPolicy): Cla
   if (byName.reason === "policy-allow") return byName;
   if (byName.reason === "policy-always") return byName;
 
+  // A display string is reported as `entity-label`, an entity reference as `identity`. Both are
+  // structural, neither is a heuristic, and the distinction is what makes the introspection view
+  // legible rather than merely correct.
+  if (input.isEntityLabel === true || isEntityLabelName(input.name)) {
+    return { pseudonymize: true, reason: "entity-label" };
+  }
   if (isIdentityInput(input)) return { pseudonymize: true, reason: "identity" };
 
   return byName;
@@ -193,9 +205,47 @@ function nameDecision(token: string, policy: PrivacyPolicy): Classification {
   return result;
 }
 
-/** The three ways we can know a member denotes an entity, none of which is its name. */
+/**
+ * Names that ARE an entity's display string (#105).
+ *
+ * The display string is the one identity-bearing value whose shape reveals nothing: it arrives as a
+ * plain string, so the value-based rule cannot see it, and it is called `ToString` or `toStr`, which
+ * matches no name heuristic. Both halves of the classifier therefore passed it through, and a
+ * person's name — the most sensitive thing this tool handles — came back in the clear under the
+ * DEFAULT policy, needing no flag.
+ *
+ * `--resolve` was already covered, via `isEntityLabel`, because that path rewrites the token and
+ * knows it asked for a label. That is exactly what made the bug hard to see: the obvious vector was
+ * safe while the explicit `--column Entity.ToString` and `get`'s `toStr` were not, and
+ * `explain --privacy` reported `Name` as protected either way.
+ *
+ * Recognised structurally rather than by heuristic, because `ToString` is a framework token
+ * (`EntityToStringToken.Key`) and `toStr` is a wire field — both are exact, not guesses.
+ */
+const ENTITY_LABEL_NAMES = new Set(["tostring", "tostr"]);
+
+/** Does this column token or member name denote an entity's display string? */
+function isEntityLabelName(name: string): boolean {
+  if (ENTITY_LABEL_NAMES.has(name.toLowerCase())) return true;
+  // A dotted query token: only the LAST segment decides, so `Entity.ToString` and
+  // `Entity.Customer.ToString` are labels while a member merely called `ToStringHelper` is not.
+  const last = name.split(TOKEN_PATH_SPLIT).pop();
+  return last !== undefined && ENTITY_LABEL_NAMES.has(last.toLowerCase());
+}
+
+/** Bracket-aware dot split, matching `QueryUtils.cs:370` — a cast segment may contain dots. */
+const TOKEN_PATH_SPLIT = /(?<!\[[^\]]*)\.(?![^[]*\])/;
+
+/**
+ * The ways we can know a member denotes an entity, none of which is its name.
+ *
+ * Display strings are handled by the caller so they can be reported as `entity-label`; this
+ * deliberately keeps the label checks too, so the predicate stays true to its name for any future
+ * caller that only wants a boolean.
+ */
 function isIdentityInput(input: SensitivityInput): boolean {
   if (input.isEntityLabel === true) return true;
+  if (isEntityLabelName(input.name)) return true;
   if (input.value !== undefined && isIdentityValue(input.value)) return true;
   if (input.memberType !== undefined && input.isEntityType?.(input.memberType) === true) return true;
   return false;
@@ -238,7 +288,11 @@ export function surrogate(
   const lite = liteKeyOf(value);
   if (lite !== undefined) {
     const handle = `${HANDLE_PREFIX}${digest.slice(0, HANDLE_HEX)}`;
-    recorder?.record(handle, lite);
+    // The label is captured HERE, at the moment the handle replaces the value, because this is the
+    // last point at which the CLI holds both. It is dropped from the output either way — the agent
+    // still only sees the handle — but keeping it locally is what lets `unmask` later produce a
+    // document a human can read rather than one full of `Project;20` (#106).
+    recorder?.record(handle, lite, liteLabelOf(value));
     return handle;
   }
 
@@ -297,15 +351,47 @@ const HANDLE_HEX = 12;
 
 /** Collects handle -> real mappings so the caller can persist them BEFORE anything is emitted. */
 export interface HandleRecorder {
-  record(handle: string, real: string): void;
+  record(handle: string, real: string, label?: string): void;
 }
 
-export function createRecorder(): HandleRecorder & { entries(): Record<string, string> } {
-  const map: Record<string, string> = {};
+export function createRecorder(): HandleRecorder & {
+  entries(): Record<string, string>;
+  detailed(): Record<string, { lite: string; label?: string }>;
+} {
+  const map: Record<string, { lite: string; label?: string }> = {};
   return {
-    record(handle, real) { map[handle] = real; },
-    entries() { return map; },
+    record(handle, real, label) {
+      const prior = map[handle];
+      map[handle] = {
+        lite: real,
+        // Never unset a label we already captured for this handle in the same run: one row may carry
+        // the display string and the next may not, and the answer should not depend on row order.
+        ...(label !== undefined ? { label } : prior?.label !== undefined ? { label: prior.label } : {}),
+      };
+    },
+    entries() {
+      const out: Record<string, string> = {};
+      for (const [k, v] of Object.entries(map)) out[k] = v.lite;
+      return out;
+    },
+    detailed() { return map; },
   };
+}
+
+/**
+ * The display string carried by a `Lite`, when it carried one (#106).
+ *
+ * It is `model`, NOT `toStr`. Verified against `LiteJsonConverter.cs:42-45`: a `Lite` on the wire has
+ * `EntityType`, `id`, and optionally `ModelType`, `partitionId`, `model` and `entity` — there is no
+ * `toStr` field on a Lite at all (that is on a full entity document). `Lite.Model` is the display
+ * string when the model type is the default, in which case the converter writes it as a bare string;
+ * a custom `ModelEntity` is written as an OBJECT instead, and is deliberately not treated as a label
+ * here — it is structured data, and flattening it to a name would be a guess.
+ */
+function liteLabelOf(value: unknown): string | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  const model = (value as Record<string, unknown>)["model"];
+  return typeof model === "string" && model !== "" ? model : undefined;
 }
 
 /** `{EntityType, id}` -> `"Type;id"`, or undefined when the value is not a Lite. */
@@ -400,6 +486,8 @@ export interface TextResolution {
   replaced: number;
   /** Distinct handles found but not in the store, in order of first appearance. */
   unresolved: string[];
+  /** Resolved, but no label was known, so the identity was substituted instead (#106). */
+  labelless: string[];
 }
 
 /**
@@ -424,9 +512,20 @@ export interface TextResolution {
 export function resolveHandlesInText(
   text: string,
   handles: Readonly<Record<string, string>>,
+  options: ResolveTextOptions = {},
 ): TextResolution {
   let replaced = 0;
   const unresolved: string[] = [];
+  const labelless: string[] = [];
+  // Canonicalized ONCE, so a label is found whichever prefix spelling the store and the document
+  // happen to use. Looking up the raw token and then its canonical form only covered one direction:
+  // a new-form `ref_…` in a document could not find a label filed under a legacy `ref:…` key, so an
+  // old store reported every label missing while resolving every identity. Identity lookup already
+  // compared by digest; this now uses the same rule instead of a second, weaker one.
+  const byCanonical = new Map<string, string>();
+  for (const [h, label] of Object.entries(options.labels ?? {})) {
+    byCanonical.set(canonicalHandle(h) ?? h, label);
+  }
   const out = text.replace(HANDLE_IN_TEXT, (match) => {
     const real = lookupHandle(match, handles);
     if (real === undefined) {
@@ -434,9 +533,40 @@ export function resolveHandlesInText(
       return match;
     }
     replaced++;
-    return real;
+    if (options.preferLabel !== true) return real;
+    const label = byCanonical.get(canonicalHandle(match) ?? match);
+    if (label === undefined) {
+      // Falls back to the identity and SAYS SO, rather than quietly emitting `Project;20` where the
+      // caller asked for a name — indistinguishable, otherwise, from a label that happens to look
+      // like a Lite key (#106).
+      if (!labelless.includes(match)) labelless.push(match);
+      return real;
+    }
+    return options.escape === undefined ? label : options.escape(label);
   });
-  return { text: out, replaced, unresolved };
+  return { text: out, replaced, unresolved, labelless };
+}
+
+export interface ResolveTextOptions {
+  /** handle -> display string, where one is known. */
+  labels?: Readonly<Record<string, string>> | undefined;
+  /** Substitute the label rather than the identity. */
+  preferLabel?: boolean;
+  /**
+   * How to make a label safe for the FORMAT being written into, chosen by the caller.
+   *
+   * Deliberately a function rather than a boolean. It was `escapeMarkdownPipes` and it was applied to
+   * every text file, so a label containing `|` was written into JSON as `A\|B` — an invalid escape
+   * that makes the document unparseable. This module cannot know what it is editing; the caller does,
+   * and now has to say. No escaper means literal substitution.
+   */
+  escape?: ((label: string) => string) | undefined;
+}
+
+/** The canonical spelling of a handle, so a legacy `ref:` token finds a `ref_` label key. */
+export function canonicalHandle(handle: string): string | undefined {
+  const digest = handleDigest(handle);
+  return digest === undefined ? undefined : `${HANDLE_PREFIX}${digest}`;
 }
 
 /** Stable string form, so the same logical value always digests identically. */
@@ -473,6 +603,16 @@ interface PolicyFile {
   mode?: string;
   always?: string[];
   allow?: string[];
+  /**
+   * Keep the display string alongside the identity in the handle store (#106). Default true.
+   *
+   * Set false if you would rather not have real names at rest: the store then holds identities only,
+   * `unmask` falls back to `Type;id`, and `--labels fetch` can still fill them in per run without
+   * writing them down. This is offered because storing labels is a genuine change in WHAT the file is
+   * — a store of identities becomes a store of names — and that should be a decision, not a default
+   * nobody was told about.
+   */
+  storeLabels?: boolean;
 }
 
 function policyPath(env?: NodeJS.ProcessEnv): string {
@@ -524,6 +664,7 @@ export function resolvePolicy(opts: ResolvePolicyOptions): PrivacyPolicy {
   let origin: PrivacyPolicy["origin"] = "default";
   let always: string[] = [];
   let allow: string[] = [];
+  let storeLabels = true;
 
   const path = policyPath(opts.env);
   if (existsSync(path)) {
@@ -532,6 +673,7 @@ export function resolvePolicy(opts: ResolvePolicyOptions): PrivacyPolicy {
       if (file.mode !== undefined) mode = parseMode(file.mode);
       always = file.always ?? [];
       allow = file.allow ?? [];
+      if (file.storeLabels === false) storeLabels = false;
       origin = "profile";
     } catch {
       // A broken policy file must not silently disable protection — keep the default and say so.
@@ -574,6 +716,7 @@ export function resolvePolicy(opts: ResolvePolicyOptions): PrivacyPolicy {
       return () => (cached ??= loadSecret(opts.env));
     })(),
     origin,
+    storeLabels,
     memo: new Map(),
   };
 }
@@ -615,8 +758,8 @@ const STRUCTURAL_KEYS = new Set(["type", "entitytype", "modeltype", "id", "ticks
 export function pseudonymizeDocument(
   value: unknown,
   policy: PrivacyPolicy,
-): { value: unknown; pseudonymized: string[]; handles: Readonly<Record<string, string>> } {
-  if (policy.mode === "off") return { value, pseudonymized: [], handles: {} };
+): { value: unknown; pseudonymized: string[]; handles: Readonly<Record<string, string>>; handleDetails: Readonly<Record<string, { lite: string; label?: string }>> } {
+  if (policy.mode === "off") return { value, pseudonymized: [], handles: {}, handleDetails: {} };
 
   const recorder = createRecorder();
   const seen: string[] = [];
@@ -649,5 +792,5 @@ export function pseudonymizeDocument(
   };
 
   const result = walk(value, "");
-  return { value: result, pseudonymized: [...new Set(seen)], handles: recorder.entries() };
+  return { value: result, pseudonymized: [...new Set(seen)], handles: recorder.entries(), handleDetails: recorder.detailed() };
 }

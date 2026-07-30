@@ -226,6 +226,15 @@ export const COMMANDS: CommandSpec[] = [
       "report it cannot read, and this turns it into one you can. A folder is walked recursively; " +
       "binaries, symlinks and files over 8 MiB are skipped and reported. Files are read and written " +
       "as UTF-8 whatever the platform codepage is.\n\n" +
+      "By default a handle becomes the entity's DISPLAY STRING where one is known, and falls back to " +
+      "the Type;id identity where it is not - saying so, per handle, rather than quietly emitting a " +
+      "key where you asked for a name. --labels identity always substitutes the key; --labels fetch " +
+      "asks the server for the labels that are missing, one round trip per entity type, and caches " +
+      "them. Everything else here touches no network.\n\n" +
+      "What the store holds: handles.json maps a handle to its identity AND, by default, to the " +
+      "display string captured when the handle was minted. That makes it a store of NAMES - real " +
+      "personal data at rest, 0600 beside the credential, removable with --clear. Set " +
+      "\"storeLabels\": false in privacy.json to keep identities only.\n\n" +
       "Handles in FILE and FOLDER names are resolved too — docs/ref_cccc/report-ref_aaaa.md leaks " +
       "two identities in the path alone, whatever the contents say. By default the sibling copy is " +
       "written at the resolved path; --in-place renames the originals instead, deepest first, and " +
@@ -240,10 +249,12 @@ export const COMMANDS: CommandSpec[] = [
       "commit full of real names in a repository that deliberately contained none.",
     flags: [
       { name: "in", summary: "Resolve handles in this file, or every text file under this folder", arg: "path" },
+      { name: "labels", summary: "identity | stored (default) | fetch - what to substitute", arg: "mode" },
       { name: "glob", summary: "Only files whose name matches, e.g. '*.md' (* and ? only)", arg: "pattern" },
       { name: "dry-run", summary: "Report what would change and write nothing" },
       { name: "in-place", summary: "Rewrite and rename the originals instead of writing .local. siblings" },
       { name: "list", summary: "How many handles are stored (never what they mean)" },
+      { name: "forget-labels", summary: "Drop every stored display string, keeping the identities" },
       { name: "clear", summary: "Forget them all - every outstanding handle stops resolving" },
       { name: "yes", summary: "Skip the confirmation for --clear" },
     ],
@@ -468,7 +479,23 @@ export const TOPICS: Record<string, string> = {
     "",
     "    signum get ref_7f3a1c2b4d5e         resolved locally, never sent to the server",
     "    signum unmask ref_7f3a...  what it stands for (human only)",
+    "    signum unmask --in docs    resolve handles inside files (human only)",
+    "    signum unmask --forget-labels   drop the names, keep the identities",
     "    signum unmask --clear      forget every handle",
+    "",
+    "  WHAT THE HANDLE STORE HOLDS. <config-dir>/handles.json maps each handle to the",
+    "  identity it stands for AND, by default, to the entity's display string, captured",
+    "  when the handle was minted. That second part makes it a store of NAMES — real",
+    "  personal data at rest — which is what lets `unmask --in` turn an agent's report",
+    "  into one a human can read instead of a page of Type;id. It is 0600 beside the",
+    "  credential and `unmask --clear` forgets all of it. To keep identities only:",
+    "",
+    "    privacy.json   { \"storeLabels\": false }",
+    "",
+    "  With that set, `unmask` falls back to Type;id and says which handles it could",
+    "  not name; `--labels fetch` can still resolve them per run without writing them",
+    "  down. Nothing about labels changes what an AGENT sees — a label is masked in",
+    "  agent-facing output either way, and the store is never emitted.",
     "",
     "  LIMITS, and they are real: free text is never scanned, so a comment field",
     "  containing a name defeats this entirely. Heuristics both miss and misfire.",

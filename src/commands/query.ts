@@ -372,7 +372,7 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
 
   // Persist BEFORE emitting. A handle we have printed but not stored is exactly the unresolvable
   // handle AC-53.5 exists to prevent — and we would have created it ourselves.
-  persistHandles(ctx, table.mintedHandles);
+  persistHandles(ctx, table.mintedHandleDetails);
 
   renderResultTable(table, {
     format: ctx.format,

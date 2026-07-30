@@ -65,6 +65,12 @@ export interface ResolvedTable {
    * boundary. Now the mapping is simply there, and dropping it takes an act rather than an omission.
    */
   readonly mintedHandles: Readonly<Record<string, string>>;
+  /**
+   * The same handles WITH any display string captured at mint time (#106). Separate from
+   * `mintedHandles` so a caller that only needs identities cannot pick up a label by accident —
+   * a label is for reading, never for addressing.
+   */
+  readonly mintedHandleDetails: Readonly<Record<string, { lite: string; label?: string }>>;
 }
 
 export interface ResolvedRow {
@@ -245,6 +251,7 @@ export function resolveResultTable(raw: RawResultTable, options: ResolveOptions 
     // Report what was actually replaced, not what a name-based rule predicted.
     pseudonymized: [...replaced],
     mintedHandles: recorder.entries(),
+    mintedHandleDetails: recorder.detailed(),
   };
 }
 
