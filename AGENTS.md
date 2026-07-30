@@ -240,6 +240,19 @@ See [ADR 0007](docs/decisions/0007-ai-caller-detection-and-pseudonymization.md) 
   PR, with human review.
 - Never run publishing commands (`gh release`, `npm publish`, `dotnet nuget push`).
 - The sibling framework checkout is a fork; never push to its `upstream`.
+- If an HTTPS push fails because the active PAT cannot write repository contents, use the separate
+  SSH-over-443 remote (port 22 is blocked in this environment). Preserve the HTTPS `origin`:
+
+  ```bash
+  git remote add ssh-origin ssh://git@ssh.github.com:443/pajoma/signum-cli.git
+  git push ssh-origin refs/tags/<exact-tag>
+  ```
+
+  If `ssh-origin` already exists, verify it with `git remote get-url ssh-origin` instead of adding it
+  again. `ssh.github.com:443` must be present in a known-hosts file; obtain its key with
+  `ssh-keyscan -p 443 ssh.github.com` and verify the fingerprint against GitHub's published SSH host
+  keys before trusting it. A task-local known-hosts file is acceptable. Never bypass verification
+  with `StrictHostKeyChecking=no`.
 
 ## Upstream security findings
 
