@@ -517,6 +517,15 @@ export function resolveHandlesInText(
   let replaced = 0;
   const unresolved: string[] = [];
   const labelless: string[] = [];
+  // Canonicalized ONCE, so a label is found whichever prefix spelling the store and the document
+  // happen to use. Looking up the raw token and then its canonical form only covered one direction:
+  // a new-form `ref_…` in a document could not find a label filed under a legacy `ref:…` key, so an
+  // old store reported every label missing while resolving every identity. Identity lookup already
+  // compared by digest; this now uses the same rule instead of a second, weaker one.
+  const byCanonical = new Map<string, string>();
+  for (const [h, label] of Object.entries(options.labels ?? {})) {
+    byCanonical.set(canonicalHandle(h) ?? h, label);
+  }
   const out = text.replace(HANDLE_IN_TEXT, (match) => {
     const real = lookupHandle(match, handles);
     if (real === undefined) {
@@ -524,8 +533,8 @@ export function resolveHandlesInText(
       return match;
     }
     replaced++;
-    const label = options.labels?.[match] ?? options.labels?.[canonicalHandle(match) ?? match];
     if (options.preferLabel !== true) return real;
+    const label = byCanonical.get(canonicalHandle(match) ?? match);
     if (label === undefined) {
       // Falls back to the identity and SAYS SO, rather than quietly emitting `Project;20` where the
       // caller asked for a name — indistinguishable, otherwise, from a label that happens to look
@@ -533,7 +542,7 @@ export function resolveHandlesInText(
       if (!labelless.includes(match)) labelless.push(match);
       return real;
     }
-    return options.escapeMarkdownPipes === true ? escapeTablePipes(label) : label;
+    return options.escape === undefined ? label : options.escape(label);
   });
   return { text: out, replaced, unresolved, labelless };
 }
@@ -544,17 +553,14 @@ export interface ResolveTextOptions {
   /** Substitute the label rather than the identity. */
   preferLabel?: boolean;
   /**
-   * Escape `|` so a label cannot destroy a markdown table row.
+   * How to make a label safe for the FORMAT being written into, chosen by the caller.
    *
-   * Report-shaped output is mostly tables, and a single unescaped pipe in a name silently shifts every
-   * cell after it — the corruption is invisible until someone reads the rendered table. Escaping is
-   * cheap and does not require the substituter to parse markdown, which it has no business doing.
+   * Deliberately a function rather than a boolean. It was `escapeMarkdownPipes` and it was applied to
+   * every text file, so a label containing `|` was written into JSON as `A\|B` — an invalid escape
+   * that makes the document unparseable. This module cannot know what it is editing; the caller does,
+   * and now has to say. No escaper means literal substitution.
    */
-  escapeMarkdownPipes?: boolean;
-}
-
-function escapeTablePipes(label: string): string {
-  return label.replace(/\|/g, "\\|");
+  escape?: ((label: string) => string) | undefined;
 }
 
 /** The canonical spelling of a handle, so a legacy `ref:` token finds a `ref_` label key. */

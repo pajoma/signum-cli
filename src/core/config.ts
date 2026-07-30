@@ -399,6 +399,16 @@ export function saveHandles(
   const collisions: string[] = [];
   const storeLabels = options.storeLabels ?? true;
 
+  // The opt-out is about what is AT REST, so it applies to the whole file, not only to what is being
+  // written now. Applying it per-incoming-handle meant a user who set `storeLabels: false` kept every
+  // name captured before that moment, indefinitely, while reasonably believing the store was
+  // identity-only — the setting appeared to work because the handles they then touched lost theirs.
+  if (!storeLabels) {
+    for (const [handle, entry] of Object.entries(existing)) {
+      if (entry.label !== undefined) existing[handle] = { lite: entry.lite };
+    }
+  }
+
   for (const [handle, incoming] of Object.entries(fresh)) {
     const entry: HandleEntry = typeof incoming === "string" ? { lite: incoming } : incoming;
     const prior = existing[handle];

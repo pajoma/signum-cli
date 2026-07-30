@@ -177,6 +177,77 @@ export function siblingOutputPath(path: string): string {
  * expected case — but the failure it prevents is writing outside the tree the caller named, which is
  * severe enough to check rather than reason about.
  */
+// ── format policy ───────────────────────────────────────────────────────────
+//
+// This is where "what kind of document is this, and what must a substituted value be made safe
+// against" lives. It has a home of its own because the alternative was demonstrated: the markdown
+// pipe-escaper was applied to every text file from inside the command, so a label containing `|` was
+// written into JSON as an invalid `\|` escape. A format rule with no boundary ends up applied
+// everywhere.
+
+export type TextFormat = "markdown" | "literal";
+
+const MARKDOWN_EXTENSIONS = new Set([".md", ".markdown", ".mdown", ".mkd"]);
+
+/** The format of a file, by extension. Anything unrecognized is treated as literal text. */
+export function formatOf(path: string): TextFormat {
+  return MARKDOWN_EXTENSIONS.has(extname(path).toLowerCase()) ? "markdown" : "literal";
+}
+
+/**
+ * How to make a substituted value safe for `format`, or undefined for literal substitution.
+ *
+ * Only markdown gets an escaper, and only for `|`. That is not laziness about other formats — it is
+ * the only case with a well-defined in-place escape. A label containing a comma or a quote can still
+ * disturb a CSV row, and there is no correct fix that does not involve re-quoting the field, which
+ * means parsing the CSV; guessing would be worse than the honest limitation, which is documented in
+ * `signum help pseudonymization` instead of papered over here.
+ */
+export function escaperFor(format: TextFormat): ((value: string) => string) | undefined {
+  // A pipe inside a table cell shifts every cell after it, and the corruption is invisible until
+  // someone reads the rendered table. `\|` is the documented escape and renders as a literal pipe.
+  return format === "markdown" ? (v: string): string => v.replace(/\|/g, "\\|") : undefined;
+}
+
+/**
+ * Names Windows reserves as DEVICES, at any casing and with or in front of any extension.
+ *
+ * `CON`, `NUL.txt` and `COM1.doc` are all refused by Windows, so a sanitizer that only strips
+ * reserved CHARACTERS still hands back a name the filesystem will not accept — and the caller would
+ * then report the failure as a collision, which is a different and misleading thing.
+ */
+const WINDOWS_DEVICE_NAMES = new Set([
+  "con", "prn", "aux", "nul",
+  "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
+  "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+]);
+
+function isWindowsDeviceName(segment: string): boolean {
+  // The stem before the FIRST dot is what Windows matches on: `NUL.txt` is still NUL.
+  const stem = segment.split(".")[0] ?? "";
+  return WINDOWS_DEVICE_NAMES.has(stem.toLowerCase());
+}
+
+/**
+ * Longest path segment most filesystems accept, in BYTES — ext4 and APFS both cap at 255, and a
+ * label with umlauts costs two bytes per character, so counting UTF-16 code units would let a name
+ * through that the filesystem then refuses.
+ */
+const MAX_SEGMENT_BYTES = 255;
+
+/**
+ * Is the COMPOSED segment usable as a filename?
+ *
+ * Checked after substitution, not on the label alone: `sanitizeSegment` caps the label at 80, but the
+ * caller wraps it (`report-<label>.md`), so a legal original near the limit can still compose into an
+ * oversized name. And a device name can only be recognized once the whole segment exists.
+ */
+export function segmentIsUsable(segment: string): boolean {
+  if (segment === "" || segment === "." || segment === "..") return false;
+  if (isWindowsDeviceName(segment)) return false;
+  return Buffer.byteLength(segment, "utf8") <= MAX_SEGMENT_BYTES;
+}
+
 /**
  * Make a display string safe to use as ONE path segment (#106).
  *
@@ -207,6 +278,10 @@ export function sanitizeSegment(label: string, max = 80): string {
   const short = cleaned.length > max ? cleaned.slice(0, max).replace(/[. ]+$/, "") : cleaned;
   // Never empty, and never a name that means something else to the filesystem.
   if (short === "" || short === "." || short === "..") return "_";
+  // A label that IS a Windows device name is prefixed rather than rejected: the label is the useful
+  // part, and `_CON` is both legal and recognizable. The composed segment is validated separately by
+  // `segmentIsUsable`, which is what catches a device name assembled from parts.
+  if (isWindowsDeviceName(short)) return `_${short}`;
   return short;
 }
 
@@ -224,8 +299,14 @@ export function resolveSegment(
     ...(options.preferLabel === true ? { preferLabel: true } : {}),
   });
   if (r.replaced === 0) return { name, changed: false, unresolved: r.unresolved, unsafe: false };
-  const unsafe = r.text.includes("/") || r.text.includes("\\") || r.text === "." || r.text === "..";
-  if (unsafe) return { name, changed: false, unresolved: r.unresolved, unsafe: true };
+  // Two distinct hazards, both reported as `unsafe` so nothing is renamed on a guess: a substituted
+  // value that gained a path separator (which would write outside the named tree), and a COMPOSED
+  // segment the filesystem will not accept — a device name, or too many bytes once the caller's own
+  // text is wrapped around the label.
+  const gainedSeparator = r.text.includes("/") || r.text.includes("\\");
+  if (gainedSeparator || !segmentIsUsable(r.text)) {
+    return { name, changed: false, unresolved: r.unresolved, unsafe: true };
+  }
   return { name: r.text, changed: true, unresolved: r.unresolved, unsafe: false };
 }
 

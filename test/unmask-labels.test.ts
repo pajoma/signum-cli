@@ -21,7 +21,9 @@ import { ExitCode } from "../src/core/errors.ts";
 import {
   createRecorder, resolveHandlesInText, resolvePolicy, surrogate,
 } from "../src/core/privacy.ts";
-import { sanitizeSegment } from "../src/core/textfiles.ts";
+import {
+  escaperFor, formatOf, sanitizeSegment, segmentIsUsable,
+} from "../src/core/textfiles.ts";
 
 let dir: string;
 let work: string;
@@ -161,7 +163,7 @@ describe("substitution prefers the label", () => {
     const r = resolveHandlesInText(
       "| ref_aaaaaaaaaaaa | 12 |",
       handles,
-      { labels: { ref_aaaaaaaaaaaa: "A|B" }, preferLabel: true, escapeMarkdownPipes: true },
+      { labels: { ref_aaaaaaaaaaaa: "A|B" }, preferLabel: true, escape: escaperFor("markdown") },
     );
     expect(r.text).toBe("| A\\|B | 12 |");
     // The cell count is what actually matters — an unescaped pipe shifts every cell after it.
@@ -372,5 +374,121 @@ describe("--labels fetch fills the gaps", () => {
     expect(sent).toContain("20");
     // The mapping is what must never leave the machine; the handle itself must not be on the wire.
     expect(sent).not.toContain("ref_");
+  });
+});
+
+describe("review findings — PR #108 (all four reproduced before fixing)", () => {
+  const H = { ref_aaaaaaaaaaaa: "User;42" };
+
+  // F1 (critical): escaping was applied to EVERY text file, so a label containing `|` was written
+  // into JSON as an invalid `\|` escape and made the document unparseable.
+  it("does not escape into non-markdown formats", () => {
+    const json = resolveHandlesInText('{"o":"ref_aaaaaaaaaaaa"}', H, {
+      labels: { ref_aaaaaaaaaaaa: "A|B" }, preferLabel: true, escape: escaperFor(formatOf("x.json")),
+    });
+    expect(json.text).toBe('{"o":"A|B"}');
+    expect(() => JSON.parse(json.text) as unknown).not.toThrow();
+  });
+
+  it("still escapes into markdown", () => {
+    const md = resolveHandlesInText("| ref_aaaaaaaaaaaa |", H, {
+      labels: { ref_aaaaaaaaaaaa: "A|B" }, preferLabel: true, escape: escaperFor(formatOf("x.md")),
+    });
+    expect(md.text).toBe("| A\\|B |");
+  });
+
+  it("picks the format per file, end to end", async () => {
+    saveHandles({ ref_aaaaaaaaaaaa: { lite: "User;42", label: "A|B" } }, env());
+    file("a.md", "| ref_aaaaaaaaaaaa |");
+    file("b.json", '{"o":"ref_aaaaaaaaaaaa"}');
+    const r = await cli(["unmask", "--in", work]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(readFileSync(join(work, "a.local.md"), "utf8")).toBe("| A\\|B |");
+    const written = readFileSync(join(work, "b.local.json"), "utf8");
+    expect(written).toBe('{"o":"A|B"}');
+    expect(() => JSON.parse(written) as unknown).not.toThrow();
+  });
+
+  it("treats an unknown extension as literal, not markdown", () => {
+    expect(formatOf("notes.txt")).toBe("literal");
+    expect(formatOf("data.csv")).toBe("literal");
+    expect(formatOf("README.md")).toBe("markdown");
+    expect(formatOf("README.MARKDOWN")).toBe("markdown");
+    expect(escaperFor("literal")).toBeUndefined();
+  });
+
+  // F3: the opt-out only applied to incoming handles, so names captured earlier stayed on disk while
+  // the user reasonably believed the store was identity-only.
+  it("storeLabels:false clears labels already on disk, not just incoming ones", () => {
+    saveHandles({ ref_a: { lite: "User;1", label: "Alice" }, ref_b: { lite: "User;2", label: "Bob" } }, env());
+    saveHandles({ ref_c: { lite: "User;3", label: "Carol" } }, env(), { storeLabels: false });
+    const e = loadHandleEntries(env());
+    expect(e["ref_a"]?.label).toBeUndefined();
+    expect(e["ref_b"]?.label).toBeUndefined();
+    expect(e["ref_c"]?.label).toBeUndefined();
+    // Identities survive — the opt-out is about names, not about breaking every handle.
+    expect(e["ref_a"]?.lite).toBe("User;1");
+  });
+
+  it("--forget-labels is an immediate migration, and gives stripStoredLabels a real caller", async () => {
+    saveHandles({ ref_a: { lite: "User;1", label: "Alice" } }, env());
+    const r = await cli(["unmask", "--forget-labels"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.out).toContain("Forgot 1 stored label");
+    expect(loadHandleEntries(env())["ref_a"]?.label).toBeUndefined();
+    expect(loadHandleEntries(env())["ref_a"]?.lite).toBe("User;1");
+  });
+
+  // F4: label compatibility ran one way only. Identity lookup compared digests; labels compared
+  // strings, so a new-form token could not find a label filed under a legacy key.
+  it("resolves labels across BOTH prefix directions", () => {
+    // new text, legacy store — the direction that was broken
+    expect(resolveHandlesInText("ref_aaaaaaaaaaaa", { "ref:aaaaaaaaaaaa": "User;42" }, {
+      labels: { "ref:aaaaaaaaaaaa": "Alexandra" }, preferLabel: true,
+    }).text).toBe("Alexandra");
+    // legacy text, new store — the direction that already worked
+    expect(resolveHandlesInText("ref:aaaaaaaaaaaa", { ref_aaaaaaaaaaaa: "User;42" }, {
+      labels: { ref_aaaaaaaaaaaa: "Alexandra" }, preferLabel: true,
+    }).text).toBe("Alexandra");
+  });
+
+  it("does not report a label as missing when it is filed under the other prefix", () => {
+    const r = resolveHandlesInText("ref_aaaaaaaaaaaa", { "ref:aaaaaaaaaaaa": "User;42" }, {
+      labels: { "ref:aaaaaaaaaaaa": "Alexandra" }, preferLabel: true,
+    });
+    expect(r.labelless).toEqual([]);
+  });
+
+  // F5: reserved CHARACTERS were handled; reserved NAMES were not, and only the label was
+  // length-checked rather than the segment the caller composes around it.
+  it("neutralises Windows device names, at any casing and with any extension", () => {
+    for (const n of ["CON", "con", "NUL", "COM1", "LPT9", "aux", "PRN"]) {
+      expect(sanitizeSegment(n)).toBe(`_${n}`);
+    }
+    expect(segmentIsUsable("NUL.txt")).toBe(false);
+    expect(segmentIsUsable("COM1.doc")).toBe(false);
+    expect(segmentIsUsable("console.md")).toBe(true); // not a device name
+  });
+
+  it("rejects a COMPOSED segment over the filesystem byte limit", () => {
+    // The label is capped at 80, but the caller wraps it, so a legal original can still compose into
+    // an oversized name. Counted in BYTES: an umlaut costs two, so code units would let it through.
+    expect(segmentIsUsable("a".repeat(255))).toBe(true);
+    expect(segmentIsUsable("a".repeat(256))).toBe(false);
+    expect(segmentIsUsable("ü".repeat(128))).toBe(false);
+  });
+
+  it("refuses the rename rather than producing an illegal name, and says which", async () => {
+    saveHandles({ ref_aaaaaaaaaaaa: { lite: "User;42", label: "x".repeat(300) } }, env());
+    // A long original plus an 80-char label composes past the limit.
+    writeFileSync(join(work, `${"p".repeat(200)}-ref_aaaaaaaaaaaa.md`), "x", "utf8");
+    const r = await cli(["unmask", "--in", work, "--in-place"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    // Reported as an unsafe NAME, distinctly from a destination collision — and NOT as
+    // "no handles found", which is what it said before this test was written.
+    expect(r.out).toContain("not a legal path segment");
+    expect(r.out).not.toContain("destination exists");
+    expect(r.out).not.toContain("No handles found");
+    expect(existsSync(join(work, `${"p".repeat(200)}-ref_aaaaaaaaaaaa.md`))).toBe(true);
   });
 });
