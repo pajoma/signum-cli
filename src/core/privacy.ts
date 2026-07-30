@@ -90,6 +90,8 @@ export interface PrivacyPolicy {
   secret: () => string;
   /** Where the policy came from, for `--privacy` output. */
   origin: "default" | "profile";
+  /** Whether a captured display string may be written to the handle store (#106). */
+  storeLabels: boolean;
   /** Per-run cache for the name-based half of the decision. Cells are many; names are few. */
   memo: Map<string, Classification>;
 }
@@ -286,7 +288,11 @@ export function surrogate(
   const lite = liteKeyOf(value);
   if (lite !== undefined) {
     const handle = `${HANDLE_PREFIX}${digest.slice(0, HANDLE_HEX)}`;
-    recorder?.record(handle, lite);
+    // The label is captured HERE, at the moment the handle replaces the value, because this is the
+    // last point at which the CLI holds both. It is dropped from the output either way — the agent
+    // still only sees the handle — but keeping it locally is what lets `unmask` later produce a
+    // document a human can read rather than one full of `Project;20` (#106).
+    recorder?.record(handle, lite, liteLabelOf(value));
     return handle;
   }
 
@@ -345,15 +351,47 @@ const HANDLE_HEX = 12;
 
 /** Collects handle -> real mappings so the caller can persist them BEFORE anything is emitted. */
 export interface HandleRecorder {
-  record(handle: string, real: string): void;
+  record(handle: string, real: string, label?: string): void;
 }
 
-export function createRecorder(): HandleRecorder & { entries(): Record<string, string> } {
-  const map: Record<string, string> = {};
+export function createRecorder(): HandleRecorder & {
+  entries(): Record<string, string>;
+  detailed(): Record<string, { lite: string; label?: string }>;
+} {
+  const map: Record<string, { lite: string; label?: string }> = {};
   return {
-    record(handle, real) { map[handle] = real; },
-    entries() { return map; },
+    record(handle, real, label) {
+      const prior = map[handle];
+      map[handle] = {
+        lite: real,
+        // Never unset a label we already captured for this handle in the same run: one row may carry
+        // the display string and the next may not, and the answer should not depend on row order.
+        ...(label !== undefined ? { label } : prior?.label !== undefined ? { label: prior.label } : {}),
+      };
+    },
+    entries() {
+      const out: Record<string, string> = {};
+      for (const [k, v] of Object.entries(map)) out[k] = v.lite;
+      return out;
+    },
+    detailed() { return map; },
   };
+}
+
+/**
+ * The display string carried by a `Lite`, when it carried one (#106).
+ *
+ * It is `model`, NOT `toStr`. Verified against `LiteJsonConverter.cs:42-45`: a `Lite` on the wire has
+ * `EntityType`, `id`, and optionally `ModelType`, `partitionId`, `model` and `entity` — there is no
+ * `toStr` field on a Lite at all (that is on a full entity document). `Lite.Model` is the display
+ * string when the model type is the default, in which case the converter writes it as a bare string;
+ * a custom `ModelEntity` is written as an OBJECT instead, and is deliberately not treated as a label
+ * here — it is structured data, and flattening it to a name would be a guess.
+ */
+function liteLabelOf(value: unknown): string | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  const model = (value as Record<string, unknown>)["model"];
+  return typeof model === "string" && model !== "" ? model : undefined;
 }
 
 /** `{EntityType, id}` -> `"Type;id"`, or undefined when the value is not a Lite. */
@@ -448,6 +486,8 @@ export interface TextResolution {
   replaced: number;
   /** Distinct handles found but not in the store, in order of first appearance. */
   unresolved: string[];
+  /** Resolved, but no label was known, so the identity was substituted instead (#106). */
+  labelless: string[];
 }
 
 /**
@@ -472,9 +512,11 @@ export interface TextResolution {
 export function resolveHandlesInText(
   text: string,
   handles: Readonly<Record<string, string>>,
+  options: ResolveTextOptions = {},
 ): TextResolution {
   let replaced = 0;
   const unresolved: string[] = [];
+  const labelless: string[] = [];
   const out = text.replace(HANDLE_IN_TEXT, (match) => {
     const real = lookupHandle(match, handles);
     if (real === undefined) {
@@ -482,9 +524,43 @@ export function resolveHandlesInText(
       return match;
     }
     replaced++;
-    return real;
+    const label = options.labels?.[match] ?? options.labels?.[canonicalHandle(match) ?? match];
+    if (options.preferLabel !== true) return real;
+    if (label === undefined) {
+      // Falls back to the identity and SAYS SO, rather than quietly emitting `Project;20` where the
+      // caller asked for a name — indistinguishable, otherwise, from a label that happens to look
+      // like a Lite key (#106).
+      if (!labelless.includes(match)) labelless.push(match);
+      return real;
+    }
+    return options.escapeMarkdownPipes === true ? escapeTablePipes(label) : label;
   });
-  return { text: out, replaced, unresolved };
+  return { text: out, replaced, unresolved, labelless };
+}
+
+export interface ResolveTextOptions {
+  /** handle -> display string, where one is known. */
+  labels?: Readonly<Record<string, string>> | undefined;
+  /** Substitute the label rather than the identity. */
+  preferLabel?: boolean;
+  /**
+   * Escape `|` so a label cannot destroy a markdown table row.
+   *
+   * Report-shaped output is mostly tables, and a single unescaped pipe in a name silently shifts every
+   * cell after it — the corruption is invisible until someone reads the rendered table. Escaping is
+   * cheap and does not require the substituter to parse markdown, which it has no business doing.
+   */
+  escapeMarkdownPipes?: boolean;
+}
+
+function escapeTablePipes(label: string): string {
+  return label.replace(/\|/g, "\\|");
+}
+
+/** The canonical spelling of a handle, so a legacy `ref:` token finds a `ref_` label key. */
+export function canonicalHandle(handle: string): string | undefined {
+  const digest = handleDigest(handle);
+  return digest === undefined ? undefined : `${HANDLE_PREFIX}${digest}`;
 }
 
 /** Stable string form, so the same logical value always digests identically. */
@@ -521,6 +597,16 @@ interface PolicyFile {
   mode?: string;
   always?: string[];
   allow?: string[];
+  /**
+   * Keep the display string alongside the identity in the handle store (#106). Default true.
+   *
+   * Set false if you would rather not have real names at rest: the store then holds identities only,
+   * `unmask` falls back to `Type;id`, and `--labels fetch` can still fill them in per run without
+   * writing them down. This is offered because storing labels is a genuine change in WHAT the file is
+   * — a store of identities becomes a store of names — and that should be a decision, not a default
+   * nobody was told about.
+   */
+  storeLabels?: boolean;
 }
 
 function policyPath(env?: NodeJS.ProcessEnv): string {
@@ -572,6 +658,7 @@ export function resolvePolicy(opts: ResolvePolicyOptions): PrivacyPolicy {
   let origin: PrivacyPolicy["origin"] = "default";
   let always: string[] = [];
   let allow: string[] = [];
+  let storeLabels = true;
 
   const path = policyPath(opts.env);
   if (existsSync(path)) {
@@ -580,6 +667,7 @@ export function resolvePolicy(opts: ResolvePolicyOptions): PrivacyPolicy {
       if (file.mode !== undefined) mode = parseMode(file.mode);
       always = file.always ?? [];
       allow = file.allow ?? [];
+      if (file.storeLabels === false) storeLabels = false;
       origin = "profile";
     } catch {
       // A broken policy file must not silently disable protection — keep the default and say so.
@@ -622,6 +710,7 @@ export function resolvePolicy(opts: ResolvePolicyOptions): PrivacyPolicy {
       return () => (cached ??= loadSecret(opts.env));
     })(),
     origin,
+    storeLabels,
     memo: new Map(),
   };
 }
@@ -663,8 +752,8 @@ const STRUCTURAL_KEYS = new Set(["type", "entitytype", "modeltype", "id", "ticks
 export function pseudonymizeDocument(
   value: unknown,
   policy: PrivacyPolicy,
-): { value: unknown; pseudonymized: string[]; handles: Readonly<Record<string, string>> } {
-  if (policy.mode === "off") return { value, pseudonymized: [], handles: {} };
+): { value: unknown; pseudonymized: string[]; handles: Readonly<Record<string, string>>; handleDetails: Readonly<Record<string, { lite: string; label?: string }>> } {
+  if (policy.mode === "off") return { value, pseudonymized: [], handles: {}, handleDetails: {} };
 
   const recorder = createRecorder();
   const seen: string[] = [];
@@ -697,5 +786,5 @@ export function pseudonymizeDocument(
   };
 
   const result = walk(value, "");
-  return { value: result, pseudonymized: [...new Set(seen)], handles: recorder.entries() };
+  return { value: result, pseudonymized: [...new Set(seen)], handles: recorder.entries(), handleDetails: recorder.detailed() };
 }

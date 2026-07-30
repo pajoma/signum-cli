@@ -19,13 +19,19 @@
 import type { Ctx } from "../cli.ts";
 import { ExitCode, PolicyError, UsageError } from "../core/errors.ts";
 import { renderDataDocument } from "../core/output.ts";
-import { clearHandles, handlesPath, loadHandles } from "../core/config.ts";
-import { HANDLE_PREFIX, isHandle, resolveHandle, resolveHandlesInText } from "../core/privacy.ts";
+import {
+  clearHandles, handlesPath, loadHandleEntries, loadHandles, saveHandles, type HandleEntry,
+} from "../core/config.ts";
+import {
+  canonicalHandle, HANDLE_PREFIX, isHandle, resolveHandle, resolveHandlesInText,
+} from "../core/privacy.ts";
 import {
   checkIgnored, decodeUtf8, discover, gitRootOf, renameNoClobber, resolvePathBelow, resolveSegment,
   siblingOutputPath, writeUtf8, type Candidate, type IgnoreStatus, type SkipReason,
 } from "../core/textfiles.ts";
-import { flag, opt, optAll } from "./context.ts";
+import { flag, opt, optAll, resolveTarget } from "./context.ts";
+import { resolveResultTable, type RawResultTable } from "../core/resulttable.ts";
+import { TO_STRING_TOKEN } from "../core/tokens.ts";
 import { existsSync } from "node:fs";
 import { basename, dirname, join, relative, resolve as resolvePath, sep } from "node:path";
 
@@ -63,6 +69,96 @@ interface DirResult {
   blocked?: "exists" | "unsafe";
 }
 
+/** What `--in` and `unmask <ref_…>` should substitute (#106). */
+export type LabelMode = "identity" | "stored" | "fetch";
+
+function parseLabelMode(value: string | undefined): LabelMode {
+  if (value === undefined) return "stored";
+  const v = value.trim().toLowerCase();
+  if (v === "identity" || v === "stored" || v === "fetch") return v;
+  throw new UsageError(`unknown --labels mode '${value}'`, {
+    hint:
+      "identity  substitute the Lite key, never a name (what #102 did)\n" +
+      "stored    substitute a stored display string, falling back to the Lite key (default)\n" +
+      "fetch     ask the server for the labels that are missing, then cache them",
+  });
+}
+
+/**
+ * Fill in missing labels from the server, one round trip per entity type (#106).
+ *
+ * `unmask` otherwise touches no network at all, and that promise is worth being precise about rather
+ * than quietly breaking: what must never leave the machine is the surrogate↔identity MAPPING. A
+ * request saying `Id in (20,143,593)` for one type carries no surrogate and tells the server nothing
+ * it does not already know about its own rows — so this is honest about going online without eroding
+ * the guarantee. It is opt-in for exactly that reason.
+ */
+async function fetchMissingLabels(
+  ctx: Ctx,
+  entries: Readonly<Record<string, HandleEntry>>,
+): Promise<Record<string, string>> {
+  const byType = new Map<string, Array<{ handle: string; id: string }>>();
+  for (const [handle, entry] of Object.entries(entries)) {
+    if (entry.label !== undefined) continue;
+    const split = entry.lite.lastIndexOf(";");
+    if (split <= 0) continue;
+    const type = entry.lite.slice(0, split);
+    const id = entry.lite.slice(split + 1);
+    if (id === "") continue;
+    byType.set(type, [...(byType.get(type) ?? []), { handle, id }]);
+  }
+  if (byType.size === 0) return {};
+
+  const target = resolveTarget(ctx, { requireAuth: true });
+  const found: Record<string, string> = {};
+
+  for (const [type, wanted] of byType) {
+    try {
+      const res = await target.http.request<RawResultTable>({
+        method: "POST",
+        path: `api/query/executeQuery/${encodeURIComponent(type)}`,
+        body: {
+          queryKey: type,
+          groupResults: false,
+          filters: [{ token: "Id", operation: "IsIn", value: wanted.map((w) => idValue(w.id)) }],
+          orders: [],
+          columns: [{ token: "Id" }, { token: `Entity.${TO_STRING_TOKEN}` }],
+          pagination: { mode: "All" },
+        },
+      });
+      // Resolved with NO privacy policy: this is the human-gated command, and masking the labels we
+      // came here to collect would be theatre.
+      const table = resolveResultTable(res.body, { requestedColumns: ["Id", `Entity.${TO_STRING_TOKEN}`] });
+      const idCol = table.columns.indexOf("Id");
+      const labelCol = table.columns.indexOf(`Entity.${TO_STRING_TOKEN}`);
+      if (idCol === -1 || labelCol === -1) continue;
+      const labelById = new Map<string, string>();
+      for (const row of table.rows) {
+        const id = row.values[idCol];
+        const label = row.values[labelCol];
+        if (id !== null && id !== undefined && typeof label === "string" && label !== "") {
+          labelById.set(String(id), label);
+        }
+      }
+      for (const w of wanted) {
+        const label = labelById.get(w.id);
+        if (label !== undefined) found[w.handle] = label;
+      }
+    } catch (err) {
+      // One unreadable type must not lose the labels of every other type. Named, never swallowed.
+      ctx.io.err(
+        `warning: could not fetch labels for ${type} (${err instanceof Error ? err.message : String(err)})\n`,
+      );
+    }
+  }
+  return found;
+}
+
+/** An id is numeric far more often than not, and the wire cares about the difference. */
+function idValue(id: string): string | number {
+  return /^\d+$/.test(id) ? Number(id) : id;
+}
+
 /**
  * `unmask --in <path>` — resolve handles inside files (#102).
  *
@@ -84,7 +180,32 @@ async function unmaskFiles(ctx: Ctx, inputs: readonly string[]): Promise<ExitCod
   const dryRun = flag(ctx, "dry-run");
   const inPlace = flag(ctx, "in-place");
   const glob = opt(ctx, "glob");
-  const handles = loadHandles(ctx.io.env);
+  const labelMode = parseLabelMode(opt(ctx, "labels"));
+  let entries = loadHandleEntries(ctx.io.env);
+  const handles = Object.fromEntries(Object.entries(entries).map(([k, v]) => [k, v.lite]));
+
+  // `fetch` fills the gaps BEFORE any file is read, so one round trip per type serves the whole run
+  // and a partial failure is reported once rather than per file.
+  if (labelMode === "fetch") {
+    const fetched = await fetchMissingLabels(ctx, entries);
+    if (Object.keys(fetched).length > 0) {
+      const merged: Record<string, HandleEntry> = {};
+      for (const [h, label] of Object.entries(fetched)) {
+        const prior = entries[h];
+        if (prior !== undefined) merged[h] = { lite: prior.lite, label };
+      }
+      // Cached, so the next run needs no round trip — unless the profile said not to store labels,
+      // in which case they are used for this run and deliberately not written down.
+      saveHandles(merged, ctx.io.env, { storeLabels: ctx.privacy.storeLabels });
+      entries = { ...entries, ...merged };
+      ctx.io.err(`note: fetched ${Object.keys(fetched).length} label(s) from the server.\n`);
+    }
+  }
+
+  const labels: Record<string, string> = {};
+  if (labelMode !== "identity") {
+    for (const [h, v] of Object.entries(entries)) if (v.label !== undefined) labels[h] = v.label;
+  }
 
   if (Object.keys(handles).length === 0) {
     // Distinguishable from "no handles in the files". Both leave the text untouched, and conflating
@@ -124,12 +245,18 @@ async function unmaskFiles(ctx: Ctx, inputs: readonly string[]): Promise<ExitCod
     });
   }
 
+  // One options object for every path-resolving call, so a name and its content cannot disagree
+  // about what a handle means.
+  const pathOpts = { labels, ...(labelMode !== "identity" ? { preferLabel: true } : {}) };
+
   const results: FileResult[] = [];
+  /** Handles that resolved but had no label, so the identity went in instead (#106, AC 3). */
+  const lacksLabel: string[] = [];
   for (const c of candidates) {
     const root = rootOf.get(c.path) ?? c.path;
     // The PATH is resolved regardless of what the contents hold: a handle in a file or folder name
     // leaks an identity even when every byte inside is clean.
-    const asPath = resolvePathBelow(root, c.path, handles);
+    const asPath = resolvePathBelow(root, c.path, handles, pathOpts);
 
     if (c.skip !== undefined) {
       // A glob miss is not interesting enough to report per file — it is the flag doing its job.
@@ -146,7 +273,14 @@ async function unmaskFiles(ctx: Ctx, inputs: readonly string[]): Promise<ExitCod
     }
 
     const original = decodeUtf8(c.bytes as Uint8Array);
-    const { text, replaced, unresolved } = resolveHandlesInText(original, handles);
+    const { text, replaced, unresolved, labelless } = resolveHandlesInText(original, handles, {
+      labels,
+      preferLabel: labelMode !== "identity",
+      // Report-shaped output is mostly markdown tables, and one unescaped `|` in a name silently
+      // shifts every cell after it — invisible until a human reads the rendered table.
+      escapeMarkdownPipes: true,
+    });
+    for (const h of labelless) if (!lacksLabel.includes(h)) lacksLabel.push(h);
 
     // Nothing to do at all: contents clean AND path clean. Do not write. Rewriting an identical file
     // churns mtimes and makes every walked file look touched, which matters under version control.
@@ -182,7 +316,7 @@ async function unmaskFiles(ctx: Ctx, inputs: readonly string[]): Promise<ExitCod
     // would point into a directory that does not exist yet — and `mkdir -p` would then split the
     // tree in two instead of moving anything.
     const renameLeaf = (path: string): { to: string; unsafe: boolean } => {
-      const r = resolveSegment(basename(path), handles);
+      const r = resolveSegment(basename(path), handles, pathOpts);
       return { to: join(dirname(path), r.name), unsafe: r.unsafe };
     };
     const deepestFirst = (a: string, b: string): number => b.split(sep).length - a.split(sep).length;
@@ -221,7 +355,7 @@ async function unmaskFiles(ctx: Ctx, inputs: readonly string[]): Promise<ExitCod
      * intermediate value rather than an optimistic one.
      */
     const settle = (root: string, path: string): string => {
-      const resolved = resolvePathBelow(root, path, handles).path;
+      const resolved = resolvePathBelow(root, path, handles, pathOpts).path;
       if (resolved === path) return path;
       if (dryRun) return resolved; // nothing moved, so this is the truthful prediction
       return existsSync(resolved) ? resolved : path;
@@ -297,6 +431,9 @@ async function unmaskFiles(ctx: Ctx, inputs: readonly string[]): Promise<ExitCod
             + dirResults.filter((d) => d.blocked === undefined).length,
         },
         unresolvable,
+        labelMode,
+        /** Resolved, but no label was known — the identity was substituted (#106). */
+        labelless: lacksLabel,
         // Machine-readable form of the warning below, so a wrapper can gate a commit on it.
         unignoredOutputs: risky.map((d) => ({ path: d.path, gitRoot: d.root, ignoreStatus: d.status })),
       },
@@ -364,6 +501,18 @@ async function unmaskFiles(ctx: Ctx, inputs: readonly string[]): Promise<ExitCod
     `${dryRun ? " (dry run — nothing written)" : ""}.\n`,
   );
 
+  if (lacksLabel.length > 0 && labelMode !== "identity") {
+    // Never silent: substituting `Project;20` where the caller asked for a name is indistinguishable
+    // from a label that merely looks like a Lite key (#106, third acceptance point).
+    ctx.io.err(
+      `\n${lacksLabel.length} handle(s) resolved but had no stored label, so the identity was used:\n` +
+      `  ${lacksLabel.slice(0, 10).join(", ")}${lacksLabel.length > 10 ? ", …" : ""}\n` +
+      (labelMode === "fetch"
+        ? "The server returned no display string for these.\n"
+        : "Run again with `--labels fetch` to ask the server for them.\n"),
+    );
+  }
+
   if (unresolvable.length > 0) {
     // Named, not just counted: which handles failed is what tells you whether you are on the wrong
     // profile or simply ran --clear. The tokens themselves reveal nothing.
@@ -390,6 +539,23 @@ async function unmaskFiles(ctx: Ctx, inputs: readonly string[]): Promise<ExitCod
   }
 
   return ExitCode.Ok;
+}
+
+/**
+ * A stored label for a handle, tolerating either prefix spelling.
+ *
+ * Compared by CANONICAL form rather than by string, so a legacy `ref:` argument finds a `ref_` entry
+ * and vice versa — the same two-way tolerance resolution already has.
+ */
+function labelFor(ref: string, entries: Readonly<Record<string, HandleEntry>>): string | undefined {
+  const direct = entries[ref]?.label;
+  if (direct !== undefined) return direct;
+  const wanted = canonicalHandle(ref);
+  if (wanted === undefined) return undefined;
+  for (const [k, v] of Object.entries(entries)) {
+    if (v.label !== undefined && canonicalHandle(k) === wanted) return v.label;
+  }
+  return undefined;
 }
 
 /** Paths relative to cwd where that is shorter — absolute paths bury the interesting part. */
@@ -478,14 +644,27 @@ export async function runUnmask(ctx: Ctx): Promise<ExitCode> {
   }
 
   // Resolve all of them before emitting anything, so a partial answer never looks complete.
-  const resolved = refs.map((ref) => ({ ref, entity: resolveHandle(ref, handles) }));
+  const argEntries = loadHandleEntries(ctx.io.env);
+  const resolved = refs.map((ref) => ({
+    ref,
+    entity: resolveHandle(ref, handles),
+    // The label is what makes the answer legible; the identity is what makes it actionable. Both,
+    // rather than choosing (#106).
+    label: labelFor(ref, argEntries) ?? null,
+  }));
 
   const out = ctx.openData("re-identified records");
   if (ctx.format === "json" || ctx.format === "ndjson") {
     renderDataDocument(resolved, { format: ctx.format, write: out });
   } else {
     const w = Math.max(...resolved.map((r) => r.ref.length));
-    for (const r of resolved) out(`${r.ref.padEnd(w)}  ${r.entity}\n`);
+    const e = Math.max(...resolved.map((r) => r.entity.length));
+    for (const r of resolved) {
+      out(`${r.ref.padEnd(w)}  ${r.entity.padEnd(e)}${r.label === null ? "" : `  ${r.label}`}\n`);
+    }
+    if (resolved.some((r) => r.label === null)) {
+      ctx.io.err("note: no stored label for some of these; `unmask --in … --labels fetch` can fill them in.\n");
+    }
   }
   return ExitCode.Ok;
 }

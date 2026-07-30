@@ -103,7 +103,7 @@ const FLAGS_WITH_VALUE = new Set([
   "filter", "filter-json", "column", "order", "top", "page", "page-size",
   "context", "pseudonymize", "arg", "arg-string", "arg-lite", "arg-json",
   "lite", "id", "filename", "f",
-  "in", "glob",
+  "in", "glob", "labels",
 ]);
 
 /** Boolean flags — listing one above would make it demand a value. */

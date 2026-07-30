@@ -110,9 +110,15 @@ export function flag(ctx: Ctx, name: string): boolean {
  * whole point of a handle is that resolving it yields the record the agent actually acted on, and a
  * silent mismatch there is worse than no handle at all (AC-53.6).
  */
-export function persistHandles(ctx: Ctx, entries: Readonly<Record<string, string>>): void {
+export function persistHandles(
+  ctx: Ctx,
+  entries: Readonly<Record<string, string | { lite: string; label?: string }>>,
+): void {
   if (Object.keys(entries).length === 0) return;
-  const collisions = saveHandles(entries, ctx.io.env);
+  // `storeLabels` is a deliberate opt-OUT (#106): storing labels turns this file from a store of
+  // identities into a store of names, which is a real change in what is at rest on disk. Default on,
+  // because a store of `Project;20` does not deliver the readable report the handles exist for.
+  const collisions = saveHandles(entries, ctx.io.env, { storeLabels: ctx.privacy.storeLabels });
   if (collisions.length > 0) {
     throw new CliError(
       `handle collision: ${collisions.join(", ")} already stands for a different record`,

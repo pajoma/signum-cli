@@ -12,7 +12,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { run, type Io } from "../src/cli.ts";
-import { saveHandles } from "../src/core/config.ts";
+import { loadHandles, saveHandles } from "../src/core/config.ts";
 import { ExitCode } from "../src/core/errors.ts";
 // Asserted via the constant, not a literal: the prefix changed once (ref: -> ref_) and a literal
 // here would have to be found and edited again next time.
@@ -1680,9 +1680,14 @@ describe("ref: handles, end to end (REQ-058)", () => {
     const handle = String(rows[0]?.["Entity"]);
     expect(handle).toStartWith(HANDLE_PREFIX);
 
-    // Stored BEFORE emission, so what we printed is always resolvable.
-    const stored = JSON.parse(readFileSync(join(d, "handles.json"), "utf8")) as Record<string, string>;
-    expect(stored[handle]).toBe("Order;42");
+    // Stored BEFORE emission, so what we printed is always resolvable. Asserted through the
+    // accessor rather than the raw file: the on-disk shape gained a label field (#106), and a test
+    // that pins the serialization instead of the meaning has to be edited on every format change.
+    expect(loadHandles({ SIGNUM_CONFIG_DIR: d } as unknown as NodeJS.ProcessEnv)[handle]).toBe("Order;42");
+
+    // The on-disk shape IS worth one explicit assertion, separately and for its own reason.
+    const raw = JSON.parse(readFileSync(join(d, "handles.json"), "utf8")) as Record<string, unknown>;
+    expect(raw[handle]).toEqual({ lite: "Order;42" });
     rmSync(d, { recursive: true, force: true });
   });
 

@@ -177,11 +177,52 @@ export function siblingOutputPath(path: string): string {
  * expected case — but the failure it prevents is writing outside the tree the caller named, which is
  * severe enough to check rather than reason about.
  */
+/**
+ * Make a display string safe to use as ONE path segment (#106).
+ *
+ * A label is free text from a database and a path segment is not. `Projekt: A/B (2026)` contains two
+ * characters Windows reserves and one that would create a directory; a long label breaks the path
+ * limit; and a trailing dot or space is silently stripped by Windows, which turns two distinct names
+ * into one.
+ *
+ * Truncation is the part that needs care: cutting two labels to the same prefix makes them collide,
+ * and `unmask` must never overwrite. So the caller keeps its never-clobber rule — this function only
+ * guarantees the segment is *legal*, never that it is unique.
+ */
+export function sanitizeSegment(label: string, max = 80): string {
+  const cleaned = label
+    // Windows-reserved characters plus both path separators. Spaces are deliberately KEPT: they are
+    // legal everywhere and a name reads far better with them.
+    .replace(/[<>:"/\\|?*]/g, "-")
+    // Whitespace collapses to a single space BEFORE control bytes are stripped, or a tab would be
+    // deleted rather than folded and `a\tb` would become `ab`, losing the word break.
+    .replace(/\s+/g, " ")
+    // Remaining control bytes: written as escapes, never as literal bytes in this source.
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+    // A trailing dot or space is silently dropped by Windows, which would turn two distinct names
+    // into one. Removed deliberately, so the result is a name we chose rather than one the
+    // filesystem edited behind us.
+    .replace(/[. ]+$/, "");
+  const short = cleaned.length > max ? cleaned.slice(0, max).replace(/[. ]+$/, "") : cleaned;
+  // Never empty, and never a name that means something else to the filesystem.
+  if (short === "" || short === "." || short === "..") return "_";
+  return short;
+}
+
 export function resolveSegment(
   name: string,
   handles: Readonly<Record<string, string>>,
+  options: { labels?: Readonly<Record<string, string>> | undefined; preferLabel?: boolean } = {},
 ): { name: string; changed: boolean; unresolved: string[]; unsafe: boolean } {
-  const r = resolveHandlesInText(name, handles);
+  // A label substituted into a NAME is sanitised per handle, before it reaches the segment: doing it
+  // afterwards would also mangle the parts of the name the caller wrote (#106).
+  const safeLabels: Record<string, string> = {};
+  for (const [h, label] of Object.entries(options.labels ?? {})) safeLabels[h] = sanitizeSegment(label);
+  const r = resolveHandlesInText(name, handles, {
+    labels: safeLabels,
+    ...(options.preferLabel === true ? { preferLabel: true } : {}),
+  });
   if (r.replaced === 0) return { name, changed: false, unresolved: r.unresolved, unsafe: false };
   const unsafe = r.text.includes("/") || r.text.includes("\\") || r.text === "." || r.text === "..";
   if (unsafe) return { name, changed: false, unresolved: r.unresolved, unsafe: true };
@@ -196,13 +237,14 @@ export function resolvePathBelow(
   root: string,
   path: string,
   handles: Readonly<Record<string, string>>,
+  options: { labels?: Readonly<Record<string, string>> | undefined; preferLabel?: boolean } = {},
 ): { path: string; changed: boolean; unsafe: boolean } {
   const rel = relative(resolve(root), resolve(path));
   if (rel === "" || rel.startsWith("..")) return { path, changed: false, unsafe: false };
   let changed = false;
   let unsafe = false;
   const parts = rel.split(sep).map((seg) => {
-    const r = resolveSegment(seg, handles);
+    const r = resolveSegment(seg, handles, options);
     if (r.changed) changed = true;
     if (r.unsafe) unsafe = true;
     return r.name;
