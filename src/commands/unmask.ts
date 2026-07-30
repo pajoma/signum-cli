@@ -22,12 +22,12 @@ import { renderDataDocument } from "../core/output.ts";
 import { clearHandles, handlesPath, loadHandles } from "../core/config.ts";
 import { HANDLE_PREFIX, isHandle, resolveHandle, resolveHandlesInText } from "../core/privacy.ts";
 import {
-  checkIgnored, decodeUtf8, discover, gitRootOf, siblingOutputPath, writeUtf8,
-  type Candidate, type SkipReason,
+  checkIgnored, decodeUtf8, discover, gitRootOf, renameNoClobber, resolvePathBelow, resolveSegment,
+  siblingOutputPath, writeUtf8, type Candidate, type SkipReason,
 } from "../core/textfiles.ts";
 import { flag, opt, optAll } from "./context.ts";
 import { existsSync } from "node:fs";
-import { relative } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
 /** AC-53.4: a human resolves handles, not the agent whose protection they are. */
 function assertHuman(ctx: Ctx): void {
@@ -50,6 +50,17 @@ interface FileResult {
   /** Where the rewritten text went, or null when nothing was written. */
   output: string | null;
   skip?: SkipReason;
+  /** True when the output path differs from the input path because a handle was in the NAME. */
+  renamed?: boolean;
+  /** A rename that could not be done: the destination already existed, or the name was unsafe. */
+  renameBlocked?: "exists" | "unsafe";
+}
+
+/** A directory whose own name carries a handle. Its path leaks even when every file is clean. */
+interface DirResult {
+  path: string;
+  output: string;
+  blocked?: "exists" | "unsafe";
 }
 
 /**
@@ -93,7 +104,12 @@ async function unmaskFiles(ctx: Ctx, inputs: readonly string[]): Promise<ExitCod
     });
   }
 
-  const candidates: Candidate[] = inputs.flatMap((input) => discover(input, glob));
+  // Each input is kept beside its own walk, because a resolved output path is computed RELATIVE to
+  // the root the caller named — that root is never renamed, so `--in docs` cannot move `docs`.
+  const walks = inputs.map((input) => ({ root: resolve(input), ...discover(input, glob) }));
+  const candidates: Candidate[] = walks.flatMap((w) => w.files);
+  const rootOf = new Map<string, string>();
+  for (const w of walks) for (const f of w.files) rootOf.set(f.path, w.root);
   if (candidates.length === 0) {
     throw new UsageError(`--in matched no files: ${inputs.join(", ")}`, {
       hint: "The folder is empty, or contains only entries that cannot be walked.",
@@ -110,24 +126,115 @@ async function unmaskFiles(ctx: Ctx, inputs: readonly string[]): Promise<ExitCod
 
   const results: FileResult[] = [];
   for (const c of candidates) {
+    const root = rootOf.get(c.path) ?? c.path;
+    // The PATH is resolved regardless of what the contents hold: a handle in a file or folder name
+    // leaks an identity even when every byte inside is clean.
+    const asPath = resolvePathBelow(root, c.path, handles);
+
     if (c.skip !== undefined) {
       // A glob miss is not interesting enough to report per file — it is the flag doing its job.
-      if (c.skip !== "glob") results.push({ path: c.path, resolved: 0, unresolvable: [], output: null, skip: c.skip });
+      if (c.skip === "glob") continue;
+      // A skipped file is never copied or rewritten, but its NAME is still reported when it carries
+      // a handle — otherwise `--in` would silently leave an identity in the tree it was asked to
+      // clean. Renaming one is possible without reading it, so --in-place still does it below.
+      results.push({
+        path: c.path, resolved: 0, unresolvable: [], output: null, skip: c.skip,
+        ...(asPath.changed ? { renamed: true } : {}),
+        ...(asPath.unsafe ? { renameBlocked: "unsafe" as const } : {}),
+      });
       continue;
     }
+
     const original = decodeUtf8(c.bytes as Uint8Array);
     const { text, replaced, unresolved } = resolveHandlesInText(original, handles);
 
-    // Nothing changed: do not write. Rewriting an identical file churns mtimes and makes every
-    // walked file look touched, which matters when the tree is under version control.
-    if (replaced === 0) {
+    // Nothing to do at all: contents clean AND path clean. Do not write. Rewriting an identical file
+    // churns mtimes and makes every walked file look touched, which matters under version control.
+    if (replaced === 0 && !asPath.changed) {
       results.push({ path: c.path, resolved: 0, unresolvable: unresolved, output: null });
       continue;
     }
 
-    const output = inPlace ? c.path : siblingOutputPath(c.path);
-    if (!dryRun) writeUtf8(output, text);
-    results.push({ path: c.path, resolved: replaced, unresolvable: unresolved, output });
+    // In place, the file keeps its path here and is renamed in the pass below — renaming now would
+    // invalidate the directory renames that follow. Otherwise the sibling goes at the RESOLVED path,
+    // so the copy carries no handle in its own name or in any folder above it.
+    const output = inPlace ? c.path : siblingOutputPath(asPath.path);
+    if (!dryRun) writeUtf8(output, replaced > 0 ? text : original);
+    results.push({
+      path: c.path, resolved: replaced, unresolvable: unresolved, output,
+      ...(asPath.changed ? { renamed: true } : {}),
+      ...(asPath.unsafe ? { renameBlocked: "unsafe" as const } : {}),
+    });
+  }
+
+  /**
+   * `--in-place` renames, deepest path first.
+   *
+   * Order is the whole difficulty: renaming `a/ref:x/` before `a/ref:x/ref:y.md` invalidates the
+   * child's path and the second rename fails on a path that no longer exists. Sorting by depth
+   * descending means every child is moved while its parent still has the name it was discovered
+   * under.
+   */
+  const dirResults: DirResult[] = [];
+  if (inPlace) {
+    // Only the LAST segment is renamed at each step, never the fully-resolved path: with
+    // deepest-first ordering the parent still has its original name, so a fully-resolved target
+    // would point into a directory that does not exist yet — and `mkdir -p` would then split the
+    // tree in two instead of moving anything.
+    const renameLeaf = (path: string): { to: string; unsafe: boolean } => {
+      const r = resolveSegment(basename(path), handles);
+      return { to: join(dirname(path), r.name), unsafe: r.unsafe };
+    };
+    const deepestFirst = (a: string, b: string): number => b.split(sep).length - a.split(sep).length;
+
+    // Files before directories, for the same reason: a file is moved while its parent is still
+    // discoverable under the name it was found with.
+    for (const r of [...results].sort((x, y) => deepestFirst(x.path, y.path))) {
+      if (r.renamed !== true || r.renameBlocked !== undefined) continue;
+      const { to } = renameLeaf(r.path);
+      if (dryRun) { r.output = to; continue; }
+      if (renameNoClobber(r.path, to)) r.output = to;
+      else r.renameBlocked = "exists";
+    }
+
+    const dirs = walks.flatMap((w) => w.dirs.map((d) => ({ root: w.root, path: d })));
+    for (const d of [...dirs].sort((x, y) => deepestFirst(x.path, y.path))) {
+      const { to, unsafe } = renameLeaf(d.path);
+      if (unsafe) { dirResults.push({ path: d.path, output: d.path, blocked: "unsafe" }); continue; }
+      if (to === d.path) continue; // no handle in this folder's name
+      if (dryRun) { dirResults.push({ path: d.path, output: to }); continue; }
+      if (renameNoClobber(d.path, to)) dirResults.push({ path: d.path, output: to });
+      else dirResults.push({ path: d.path, output: to, blocked: "exists" });
+    }
+
+    /**
+     * Reconcile every reported path against where things ACTUALLY ended up.
+     *
+     * Renaming leaf-by-leaf deepest-first is correct on disk but leaves the recorded paths stale: a
+     * file was moved while its parent still had a handle in its name, and the parent moved
+     * afterwards. Reporting the intermediate path names a location that no longer exists — caught by
+     * running the binary, where the summary and the git warning both pointed at paths `find` could
+     * not see.
+     *
+     * The fully-resolved path is the answer, but it is only claimed when it is TRUE: `existsSync`
+     * decides, so a blocked rename anywhere in the chain leaves the report at the honest
+     * intermediate value rather than an optimistic one.
+     */
+    const settle = (root: string, path: string): string => {
+      const resolved = resolvePathBelow(root, path, handles).path;
+      if (resolved === path) return path;
+      if (dryRun) return resolved; // nothing moved, so this is the truthful prediction
+      return existsSync(resolved) ? resolved : path;
+    };
+    for (const r of results) {
+      if (r.output === null) continue;
+      r.output = settle(rootOf.get(r.path) ?? r.path, r.output);
+    }
+    for (const d of dirResults) {
+      if (d.blocked !== undefined) continue;
+      const root = walks.find((w) => d.path.startsWith(w.root))?.root ?? d.path;
+      d.output = settle(root, d.output);
+    }
   }
 
   const written = results.filter((r) => r.output !== null);
@@ -135,7 +242,12 @@ async function unmaskFiles(ctx: Ctx, inputs: readonly string[]): Promise<ExitCod
   const unresolvable = [...new Set(results.flatMap((r) => r.unresolvable))];
 
   // Where the names went — an acceptance point in its own right, and the thing a reader needs most.
-  const destinations = [...new Set(written.map((r) => r.output as string))];
+  // Renamed directories are included: a folder called `Project;7` publishes an identity in the path
+  // whatever its contents say, and `*.local.*` does not cover a directory name.
+  const destinations = [...new Set([
+    ...written.map((r) => r.output as string),
+    ...dirResults.filter((d) => d.blocked === undefined).map((d) => d.output),
+  ])];
   const risky = dryRun ? [] : destinations.map((p) => {
     const root = gitRootOf(p);
     return { path: p, root, status: root === undefined ? "ignored" as const : checkIgnored(root, p) };
@@ -153,12 +265,20 @@ async function unmaskFiles(ctx: Ctx, inputs: readonly string[]): Promise<ExitCod
           unresolvable: r.unresolvable,
           output: r.output,
           skipped: r.skip ?? null,
+          // A handle was in the file's own NAME, not only its contents.
+          renamed: r.renamed === true,
+          renameBlocked: r.renameBlocked ?? null,
+        })),
+        directories: dirResults.map((d) => ({
+          path: d.path, output: d.output, blocked: d.blocked ?? null,
         })),
         totals: {
           filesMatched: results.length,
           filesWritten: written.length,
           resolved: totalResolved,
           unresolvable: unresolvable.length,
+          pathsRenamed: results.filter((r) => r.renamed === true && r.renameBlocked === undefined).length
+            + dirResults.filter((d) => d.blocked === undefined).length,
         },
         unresolvable,
         // Machine-readable form of the warning below, so a wrapper can gate a commit on it.
@@ -169,19 +289,59 @@ async function unmaskFiles(ctx: Ctx, inputs: readonly string[]): Promise<ExitCod
     return ExitCode.Ok;
   }
 
-  const shown = results.filter((r) => r.skip !== undefined || r.resolved > 0 || r.unresolvable.length > 0);
+  const shown = results.filter(
+    (r) => r.skip !== undefined || r.resolved > 0 || r.unresolvable.length > 0 || r.renamed === true,
+  );
   const w = shown.length === 0 ? 0 : Math.max(...shown.map((r) => rel(r.path).length));
   for (const r of shown) {
     if (r.skip !== undefined) {
-      ctx.io.out(`${rel(r.path).padEnd(w)}  skipped (${r.skip})\n`);
+      // A skipped file whose NAME carries a handle still has to be surfaced, or `--in` would leave an
+      // identity in a tree it reported as handled.
+      const nameNote = r.renamed === true
+        ? r.output !== null
+          ? `, name resolved — ${dryRun ? "would rename to" : "renamed to"} ${rel(r.output)}`
+          : r.renameBlocked === "exists"
+            ? ", name carries a handle — NOT renamed, destination exists"
+            : ", name carries a handle — run with --in-place to rename it"
+        : "";
+      ctx.io.out(`${rel(r.path).padEnd(w)}  skipped (${r.skip})${nameNote}\n`);
       continue;
     }
     const bits = [`${r.resolved} resolved`];
     if (r.unresolvable.length > 0) bits.push(`${r.unresolvable.length} unresolvable`);
+    if (r.renamed === true) bits.push("name resolved");
+    if (r.renameBlocked === "exists") bits.push("NOT renamed: destination exists");
     const dest = r.output === null ? "nothing written" : `${dryRun ? "would write" : "wrote"} ${rel(r.output)}`;
     ctx.io.out(`${rel(r.path).padEnd(w)}  ${bits.join(", ")}  —  ${dest}\n`);
   }
   if (shown.length === 0) ctx.io.out(`No handles found in ${results.length} file(s).\n`);
+
+  if (dirResults.length > 0) {
+    ctx.io.out("\nFOLDERS\n");
+    for (const d of dirResults) {
+      if (d.blocked === "exists") {
+        ctx.io.out(`  ${rel(d.path)}  NOT renamed: ${rel(d.output)} already exists\n`);
+      } else if (d.blocked === "unsafe") {
+        ctx.io.out(`  ${rel(d.path)}  NOT renamed: the resolved name is not a safe path segment\n`);
+      } else {
+        ctx.io.out(`  ${rel(d.path)}  ${dryRun ? "would become" : "became"} ${rel(d.output)}\n`);
+      }
+    }
+  }
+
+  // A handle in a name that only --in-place can fix has to be said in the summary too. Reporting it
+  // per file is not enough when the run touched many: the whole point of --in is not having to audit
+  // the tree by hand afterwards.
+  // Counted over files that actually got a copy. A skipped file with a handle in its name has no
+  // copy at all, so folding it into this number would claim a resolved name that does not exist —
+  // its own line already says --in-place is what would fix it.
+  const nameOnly = results.filter((r) => r.renamed === true && !inPlace && r.output !== null);
+  if (nameOnly.length > 0) {
+    ctx.io.err(
+      `\nnote: ${nameOnly.length} path(s) carried a handle in the NAME. The copies written above have ` +
+      "resolved names,\nbut the originals keep theirs — `--in-place` renames them instead.\n",
+    );
+  }
 
   ctx.io.err(
     `\n${totalResolved} handle occurrence(s) resolved across ${written.length} of ${results.length} file(s)` +

@@ -9,8 +9,9 @@
  * the substitution. Keeping that split is what lets the substitution be a pure function.
  */
 
-import { lstatSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { basename, dirname, extname, join, resolve } from "node:path";
+import { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
+import { resolveHandlesInText } from "./privacy.ts";
 
 /**
  * Above this, assume the file is not a document someone wants names in. Handle-bearing output is
@@ -43,6 +44,17 @@ export interface Candidate {
   bytes?: Uint8Array;
 }
 
+export interface Discovery {
+  files: Candidate[];
+  /**
+   * Every directory walked, deepest last. Needed because a handle can be in a FOLDER name, and
+   * renaming those requires knowing about directories the file walk otherwise passes straight
+   * through. Excludes the root itself: the caller named it, so renaming it out from under them
+   * would change the meaning of the argument they passed.
+   */
+  dirs: string[];
+}
+
 /**
  * Basename glob supporting `*` and `?` only.
  *
@@ -65,8 +77,9 @@ export function matchesGlob(name: string, pattern: string): boolean {
  * outside the tree the caller named, and this command's whole risk is writing identities somewhere
  * unexpected. `lstatSync` throughout, so a link is never silently traversed.
  */
-export function discover(root: string, glob: string | undefined): Candidate[] {
+export function discover(root: string, glob: string | undefined): Discovery {
   const out: Candidate[] = [];
+  const dirs: string[] = [];
 
   const visit = (path: string, isRoot: boolean): void => {
     let st;
@@ -83,6 +96,7 @@ export function discover(root: string, glob: string | undefined): Candidate[] {
     }
 
     if (st.isDirectory()) {
+      if (!isRoot) dirs.push(path);
       let entries: string[];
       try {
         entries = readdirSync(path).sort();
@@ -128,7 +142,7 @@ export function discover(root: string, glob: string | undefined): Candidate[] {
   };
 
   visit(resolve(root), true);
-  return out;
+  return { files: out, dirs };
 }
 
 /**
@@ -142,6 +156,52 @@ export function siblingOutputPath(path: string): string {
   const ext = extname(path);
   const stem = ext === "" ? basename(path) : basename(path, ext);
   return join(dirname(path), `${stem}.local${ext}`);
+}
+
+/**
+ * Resolve handles in a single path SEGMENT — a file or folder name.
+ *
+ * A handle can name a file or a folder (`docs/ref:cccccccccccc/report-ref:aaaaaaaaaaaa.md`), where
+ * the path leaks identities even after the contents are clean. Worth knowing: this is effectively
+ * POSIX-only. A handle contains `:`, which is reserved in Windows filenames, so such a name cannot
+ * exist there in the first place — whereas the replacement `Type;id` is legal on both.
+ *
+ * Applied per segment, never to a whole path, and the result is REFUSED if it gained a separator.
+ * A `Type;id` cannot contain one, so this is defence against a corrupted store rather than an
+ * expected case — but the failure it prevents is writing outside the tree the caller named, which is
+ * severe enough to check rather than reason about.
+ */
+export function resolveSegment(
+  name: string,
+  handles: Readonly<Record<string, string>>,
+): { name: string; changed: boolean; unresolved: string[]; unsafe: boolean } {
+  const r = resolveHandlesInText(name, handles);
+  if (r.replaced === 0) return { name, changed: false, unresolved: r.unresolved, unsafe: false };
+  const unsafe = r.text.includes("/") || r.text.includes("\\") || r.text === "." || r.text === "..";
+  if (unsafe) return { name, changed: false, unresolved: r.unresolved, unsafe: true };
+  return { name: r.text, changed: true, unresolved: r.unresolved, unsafe: false };
+}
+
+/**
+ * Rewrite `path` with every segment BELOW `root` handle-resolved. `root` is left alone: the caller
+ * named it, and renaming it would change the meaning of the argument they passed.
+ */
+export function resolvePathBelow(
+  root: string,
+  path: string,
+  handles: Readonly<Record<string, string>>,
+): { path: string; changed: boolean; unsafe: boolean } {
+  const rel = relative(resolve(root), resolve(path));
+  if (rel === "" || rel.startsWith("..")) return { path, changed: false, unsafe: false };
+  let changed = false;
+  let unsafe = false;
+  const parts = rel.split(sep).map((seg) => {
+    const r = resolveSegment(seg, handles);
+    if (r.changed) changed = true;
+    if (r.unsafe) unsafe = true;
+    return r.name;
+  });
+  return { path: join(resolve(root), ...parts), changed, unsafe };
 }
 
 /** Read the bytes a `Candidate` already loaded as UTF-8, explicitly and regardless of platform. */
@@ -158,7 +218,31 @@ export function decodeUtf8(bytes: Uint8Array): string {
  * class of bug entirely rather than working around it.
  */
 export function writeUtf8(path: string, text: string): void {
+  mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, text, { encoding: "utf8" });
+}
+
+/**
+ * Rename, refusing to clobber.
+ *
+ * `renameSync` overwrites an existing destination silently, and here the destination is derived from
+ * a handle — so two different handles resolving to one identity, or a name that already exists, would
+ * destroy a file. Returns false rather than throwing so one collision does not abandon the rest of
+ * the run; the caller reports it.
+ */
+export function renameNoClobber(from: string, to: string): boolean {
+  if (from === to) return true;
+  try {
+    lstatSync(to);
+    return false; // destination exists — never overwrite
+  } catch { /* does not exist, which is what we want */ }
+  try {
+    mkdirSync(dirname(to), { recursive: true });
+    renameSync(from, to);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** The nearest ancestor containing `.git`, or undefined. `.git` may be a file (worktrees). */

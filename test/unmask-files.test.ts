@@ -19,7 +19,7 @@ import { run, type Io } from "../src/cli.ts";
 import { saveHandles } from "../src/core/config.ts";
 import { ExitCode } from "../src/core/errors.ts";
 import { resolveHandlesInText } from "../src/core/privacy.ts";
-import { matchesGlob, siblingOutputPath } from "../src/core/textfiles.ts";
+import { matchesGlob, resolveSegment, siblingOutputPath } from "../src/core/textfiles.ts";
 
 let dir: string;
 let work: string;
@@ -312,6 +312,203 @@ describe("unmask --in", () => {
     expect(doc.totals.filesWritten).toBe(1);
     expect(doc.unresolvable).toEqual(["ref:deadbeefdead"]);
     expect(doc.files[0]?.output).toContain("r.local.md");
+  });
+});
+
+describe("handles in file and folder NAMES", () => {
+  // A path leaks an identity even when every byte inside it is clean:
+  //   docs/ref:cccccccccccc/report-ref:aaaaaaaaaaaa.md
+  // Note this is effectively POSIX-only — a handle contains ':', which is reserved in Windows
+  // filenames, so such a name cannot exist there. The replacement `Type;id` is legal on both.
+
+  const H = { "ref:aaaaaaaaaaaa": "User;42", "ref:cccccccccccc": "Project;7" };
+
+  it("resolves a handle in a file name (pure)", () => {
+    const r = resolveSegment("report-ref:aaaaaaaaaaaa.md", H);
+    expect(r.name).toBe("report-User;42.md");
+    expect(r.changed).toBe(true);
+  });
+
+  it("refuses a resolved segment that would gain a path separator (pure)", () => {
+    // Defence against a corrupted store, not an expected case — but the failure it prevents is
+    // writing outside the tree the caller named.
+    const r = resolveSegment("ref:aaaaaaaaaaaa", { "ref:aaaaaaaaaaaa": "../../etc/passwd" });
+    expect(r.unsafe).toBe(true);
+    expect(r.changed).toBe(false);
+    expect(r.name).toBe("ref:aaaaaaaaaaaa");
+  });
+
+  it("--in-place renames a file whose name carries a handle", async () => {
+    saveHandles(H, env());
+    const p = file("report-ref:aaaaaaaaaaaa.md", "clean contents\n");
+    const r = await cli(["unmask", "--in", work, "--in-place"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(existsSync(join(work, "report-User;42.md"))).toBe(true);
+    expect(existsSync(p)).toBe(false);
+    expect(readFileSync(join(work, "report-User;42.md"), "utf8")).toBe("clean contents\n");
+  });
+
+  it("--in-place renames a FOLDER whose name carries a handle", async () => {
+    saveHandles(H, env());
+    file("ref:cccccccccccc/notes.md", "clean\n");
+    const r = await cli(["unmask", "--in", work, "--in-place"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(existsSync(join(work, "Project;7/notes.md"))).toBe(true);
+    expect(existsSync(join(work, "ref:cccccccccccc"))).toBe(false);
+    expect(r.out).toContain("FOLDERS");
+  });
+
+  it("renames a nested file AND its folder — deepest first, so neither is orphaned", async () => {
+    // The ordering trap: renaming the folder first invalidates the child's discovered path, and the
+    // file rename then fails against a path that no longer exists.
+    saveHandles(H, env());
+    file("ref:cccccccccccc/report-ref:aaaaaaaaaaaa.md", "owner ref:aaaaaaaaaaaa\n");
+    const r = await cli(["unmask", "--in", work, "--in-place"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const dest = join(work, "Project;7/report-User;42.md");
+    expect(existsSync(dest)).toBe(true);
+    // Contents resolved too, in the same run.
+    expect(readFileSync(dest, "utf8")).toBe("owner User;42\n");
+  });
+
+  it("renames TWO nested handle-bearing folders — the case that actually pins the ordering", async () => {
+    // A single nested level does not discriminate: ascending and descending order behave the same,
+    // and a file rename cannot be affected because no file contains another. Two nested folders is
+    // the smallest case where renaming the OUTER one first invalidates the inner path and the second
+    // rename silently does nothing. Verified by flipping the comparator and watching this fail.
+    saveHandles({ ...H, "ref:bbbbbbbbbbbb": "Team;3" }, env());
+    file("ref:cccccccccccc/ref:bbbbbbbbbbbb/report-ref:aaaaaaaaaaaa.md", "owner ref:aaaaaaaaaaaa\n");
+    const r = await cli(["unmask", "--in", work, "--in-place"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const dest = join(work, "Project;7/Team;3/report-User;42.md");
+    expect(existsSync(dest)).toBe(true);
+    expect(readFileSync(dest, "utf8")).toBe("owner User;42\n");
+    // Nothing left behind under either original name.
+    expect(existsSync(join(work, "ref:cccccccccccc"))).toBe(false);
+  });
+
+  it("reports the path each file ACTUALLY ended up at, not an intermediate one", async () => {
+    // Found by running the binary: renaming leaf-by-leaf deepest-first is correct on disk but left
+    // the reported paths stale — a file was moved while its parent still had a handle in its name,
+    // and the parent moved afterwards. The summary and the git warning both named locations that
+    // `find` could not see. Every reported path must exist.
+    saveHandles({ ...H, "ref:bbbbbbbbbbbb": "Team;3" }, env());
+    file("ref:cccccccccccc/ref:bbbbbbbbbbbb/effort-ref:aaaaaaaaaaaa.md", "owner ref:aaaaaaaaaaaa\n");
+    const r = await cli(["unmask", "--in", work, "--in-place", "--json"], {}, false);
+    const doc = JSON.parse(r.out) as {
+      files: Array<{ output: string | null }>;
+      directories: Array<{ output: string; blocked: string | null }>;
+    };
+    for (const f of doc.files) {
+      if (f.output !== null) expect(existsSync(f.output)).toBe(true);
+    }
+    for (const d of doc.directories) {
+      if (d.blocked === null) expect(existsSync(d.output)).toBe(true);
+    }
+    expect(doc.files.some((f) => f.output?.includes("Project;7/Team;3/effort-User;42.md"))).toBe(true);
+  });
+
+  it("a dry run predicts the same final paths the real run produces", async () => {
+    saveHandles({ ...H, "ref:bbbbbbbbbbbb": "Team;3" }, env());
+    file("ref:cccccccccccc/ref:bbbbbbbbbbbb/effort-ref:aaaaaaaaaaaa.md", "owner ref:aaaaaaaaaaaa\n");
+    const dry = await cli(["unmask", "--in", work, "--in-place", "--dry-run", "--json"], {}, false);
+    const real = await cli(["unmask", "--in", work, "--in-place", "--json"], {}, false);
+    const outputs = (s: string): unknown =>
+      (JSON.parse(s) as { files: Array<{ output: string | null }> }).files.map((f) => f.output);
+    expect(outputs(dry.out)).toEqual(outputs(real.out));
+  });
+
+  it("resolves names in the sibling copy without touching the originals", async () => {
+    saveHandles(H, env());
+    file("ref:cccccccccccc/report-ref:aaaaaaaaaaaa.md", "owner ref:aaaaaaaaaaaa\n");
+    const r = await cli(["unmask", "--in", work]);
+    expect(r.code).toBe(ExitCode.Ok);
+    // The copy carries no handle in its own name nor in any folder above it.
+    expect(readFileSync(join(work, "Project;7/report-User;42.local.md"), "utf8")).toBe("owner User;42\n");
+    // Originals are exactly as they were — the default must not mutate.
+    expect(existsSync(join(work, "ref:cccccccccccc/report-ref:aaaaaaaaaaaa.md"))).toBe(true);
+    expect(r.err).toContain("carried a handle in the NAME");
+  });
+
+  it("copies a file whose NAME has a handle even when its contents are clean", async () => {
+    // Otherwise the request is only half met: the path still publishes an identity.
+    saveHandles(H, env());
+    file("report-ref:aaaaaaaaaaaa.md", "nothing to resolve\n");
+    const r = await cli(["unmask", "--in", work]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(readFileSync(join(work, "report-User;42.local.md"), "utf8")).toBe("nothing to resolve\n");
+  });
+
+  it("never renames the root the caller named", async () => {
+    // `--in <dir>` must not move <dir>: that would change the meaning of the argument passed.
+    saveHandles(H, env());
+    const root = join(work, "ref:cccccccccccc");
+    file("ref:cccccccccccc/notes.md", "clean\n");
+    const r = await cli(["unmask", "--in", root, "--in-place"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(existsSync(root)).toBe(true);
+  });
+
+  it("reports a handle-bearing name on a SKIPPED file rather than leaving it silently", async () => {
+    saveHandles(H, env());
+    writeFileSync(join(work, "blob-ref:aaaaaaaaaaaa.bin"), Buffer.from([0x00, 0x01]));
+    const r = await cli(["unmask", "--in", work]);
+    expect(r.out).toContain("skipped (binary)");
+    expect(r.out).toContain("--in-place to rename it");
+  });
+
+  it("renames a skipped binary under --in-place without reading it", async () => {
+    saveHandles(H, env());
+    writeFileSync(join(work, "blob-ref:aaaaaaaaaaaa.bin"), Buffer.from([0x00, 0x01]));
+    const r = await cli(["unmask", "--in", work, "--in-place"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(existsSync(join(work, "blob-User;42.bin"))).toBe(true);
+    expect(readFileSync(join(work, "blob-User;42.bin"))).toEqual(Buffer.from([0x00, 0x01]));
+  });
+
+  it("refuses to clobber an existing destination, and says so", async () => {
+    saveHandles(H, env());
+    file("report-ref:aaaaaaaaaaaa.md", "a\n");
+    file("report-User;42.md", "PRE-EXISTING\n");
+    const r = await cli(["unmask", "--in", work, "--in-place"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.out).toContain("NOT renamed");
+    // The file that was already there is untouched — a rename must never destroy data.
+    expect(readFileSync(join(work, "report-User;42.md"), "utf8")).toBe("PRE-EXISTING\n");
+    expect(existsSync(join(work, "report-ref:aaaaaaaaaaaa.md"))).toBe(true);
+  });
+
+  it("--dry-run reports renames and performs none", async () => {
+    saveHandles(H, env());
+    file("ref:cccccccccccc/report-ref:aaaaaaaaaaaa.md", "clean\n");
+    const r = await cli(["unmask", "--in", work, "--in-place", "--dry-run"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.out).toContain("would become");
+    expect(existsSync(join(work, "ref:cccccccccccc/report-ref:aaaaaaaaaaaa.md"))).toBe(true);
+    expect(existsSync(join(work, "Project;7"))).toBe(false);
+  });
+
+  it("counts renamed paths in --json", async () => {
+    saveHandles(H, env());
+    file("ref:cccccccccccc/report-ref:aaaaaaaaaaaa.md", "clean\n");
+    const r = await cli(["unmask", "--in", work, "--in-place", "--json"], {}, false);
+    const doc = JSON.parse(r.out) as {
+      directories: Array<{ path: string; output: string }>;
+      totals: { pathsRenamed: number };
+    };
+    expect(doc.totals.pathsRenamed).toBe(2); // one file, one folder
+    expect(doc.directories[0]?.output).toContain("Project;7");
+  });
+
+  it("warns that a renamed FOLDER publishes an identity git will not ignore", async () => {
+    // `*.local.*` covers the file copies but not a directory called `Project;7`.
+    Bun.spawnSync({ cmd: ["git", "init", "--quiet"], cwd: work, stdout: "ignore", stderr: "ignore" });
+    writeFileSync(join(work, ".gitignore"), "*.local.*\n", "utf8");
+    saveHandles(H, env());
+    file("ref:cccccccccccc/notes.md", "clean\n");
+    const r = await cli(["unmask", "--in", work, "--in-place"]);
+    expect(r.err).toContain("NOT ignored by git");
+    expect(r.err).toContain("Project;7");
   });
 });
 

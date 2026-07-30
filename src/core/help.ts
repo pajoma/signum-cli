@@ -226,6 +226,11 @@ export const COMMANDS: CommandSpec[] = [
       "report it cannot read, and this turns it into one you can. A folder is walked recursively; " +
       "binaries, symlinks and files over 8 MiB are skipped and reported. Files are read and written " +
       "as UTF-8 whatever the platform codepage is.\n\n" +
+      "Handles in FILE and FOLDER names are resolved too — docs/ref:cccc/report-ref:aaaa.md leaks " +
+      "two identities in the path alone, whatever the contents say. By default the sibling copy is " +
+      "written at the resolved path; --in-place renames the originals instead, deepest first, and " +
+      "never over an existing name. A skipped binary is still reported when its NAME carries a " +
+      "handle, since renaming it needs no reading.\n\n" +
       "By default the input is left alone and a sibling copy is written (report.md -> " +
       "report.local.md), because the input is usually generated, tracked, and deliberately free of " +
       "identities. --in-place overrides that. Handles that cannot resolve are left exactly as they " +
@@ -237,7 +242,7 @@ export const COMMANDS: CommandSpec[] = [
       { name: "in", summary: "Resolve handles in this file, or every text file under this folder", arg: "path" },
       { name: "glob", summary: "Only files whose name matches, e.g. '*.md' (* and ? only)", arg: "pattern" },
       { name: "dry-run", summary: "Report what would change and write nothing" },
-      { name: "in-place", summary: "Rewrite the input instead of writing a .local. sibling" },
+      { name: "in-place", summary: "Rewrite and rename the originals instead of writing .local. siblings" },
       { name: "list", summary: "How many handles are stored (never what they mean)" },
       { name: "clear", summary: "Forget them all - every outstanding handle stops resolving" },
       { name: "yes", summary: "Skip the confirmation for --clear" },
