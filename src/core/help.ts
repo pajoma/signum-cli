@@ -211,7 +211,7 @@ export const COMMANDS: CommandSpec[] = [
   {
     name: "unmask",
     summary: "Resolve local ref: handles back to the records they stand for",
-    usage: "signum unmask <ref:...> [<ref:...> ...] | --list | --clear",
+    usage: "signum unmask <ref:...> [...] | --in <path> | --list | --clear",
     milestone: "m2",
     description:
       "Pseudonymized output emits entity identities as opaque local handles (ref:...) rather than " +
@@ -221,14 +221,31 @@ export const COMMANDS: CommandSpec[] = [
       "never leaves the machine. It is stored 0600 beside the credential, per profile, and is valid " +
       "only for the surrogate secret that produced it.\n\n" +
       "A handle is accepted anywhere a Lite key is, so `signum get ref:7f3a1c2b4d5e` works and is " +
-      "resolved locally before the request is built.",
+      "resolved locally before the request is built.\n\n" +
+      "--in resolves handles inside FILES, which is the point of the handles: an agent writes a " +
+      "report it cannot read, and this turns it into one you can. A folder is walked recursively; " +
+      "binaries, symlinks and files over 8 MiB are skipped and reported. Files are read and written " +
+      "as UTF-8 whatever the platform codepage is.\n\n" +
+      "By default the input is left alone and a sibling copy is written (report.md -> " +
+      "report.local.md), because the input is usually generated, tracked, and deliberately free of " +
+      "identities. --in-place overrides that. Handles that cannot resolve are left exactly as they " +
+      "are and named in the report, never passed over quietly.\n\n" +
+      "Writing a name into a file is durable in a way that printing one is not, so --in warns when " +
+      "an output file is inside a git work tree and not ignored. That is the actual footgun: a " +
+      "commit full of real names in a repository that deliberately contained none.",
     flags: [
+      { name: "in", summary: "Resolve handles in this file, or every text file under this folder", arg: "path" },
+      { name: "glob", summary: "Only files whose name matches, e.g. '*.md' (* and ? only)", arg: "pattern" },
+      { name: "dry-run", summary: "Report what would change and write nothing" },
+      { name: "in-place", summary: "Rewrite the input instead of writing a .local. sibling" },
       { name: "list", summary: "How many handles are stored (never what they mean)" },
       { name: "clear", summary: "Forget them all - every outstanding handle stops resolving" },
       { name: "yes", summary: "Skip the confirmation for --clear" },
     ],
     examples: [
       "signum unmask ref:7f3a1c2b4d5e",
+      "signum unmask --in report.md --dry-run",
+      "signum unmask --in docs --glob '*.md'",
       "signum unmask --list",
       "signum unmask --clear",
     ],

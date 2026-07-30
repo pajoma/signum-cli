@@ -324,6 +324,64 @@ export function resolveHandle(handle: string, handles: Readonly<Record<string, s
   return real;
 }
 
+/**
+ * Every handle-shaped token in free text, built from `HANDLE_PREFIX` so the two cannot drift.
+ *
+ * Deliberately permissive about length (`+`, not `{12}`) even though minted handles are exactly
+ * `HANDLE_HEX` characters. A malformed or truncated token then still gets FOUND and reported as
+ * unresolvable, rather than not matching at all and being indistinguishable from "there were none" —
+ * which is the failure the issue calls out as looking identical to success.
+ */
+const HANDLE_IN_TEXT = new RegExp(
+  `${HANDLE_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[0-9a-f]+`,
+  "g",
+);
+
+export interface TextResolution {
+  text: string;
+  /** How many handle occurrences were replaced — occurrences, not distinct handles. */
+  replaced: number;
+  /** Distinct handles found but not in the store, in order of first appearance. */
+  unresolved: string[];
+}
+
+/**
+ * Replace every resolvable `ref:` handle in `text` with the record it stands for (#102).
+ *
+ * Two properties that the hand-rolled scripts this replaces got wrong, and that are structural here
+ * rather than maintained by care:
+ *
+ * 1. **Length collisions are impossible**, because this is ONE left-to-right pass over the text and
+ *    each match is replaced exactly once. The scripted version collected handles into a list and
+ *    substituted them one after another, where `ref:abc` clobbers the prefix of `ref:abcdef` unless
+ *    the list is sorted longest-first — a silent corruption when you forget. There is no list here,
+ *    so there is no ordering to get wrong.
+ *
+ * 2. **Idempotent**, because a replacement is a `Type;id` key, which does not match the handle
+ *    pattern. Running twice finds nothing the second time.
+ *
+ * A token that is handle-shaped but absent from the store is left EXACTLY as it was and reported.
+ * The bias is deliberate: never substitute something we are unsure of, and never stay quiet about
+ * having skipped it.
+ */
+export function resolveHandlesInText(
+  text: string,
+  handles: Readonly<Record<string, string>>,
+): TextResolution {
+  let replaced = 0;
+  const unresolved: string[] = [];
+  const out = text.replace(HANDLE_IN_TEXT, (match) => {
+    const real = handles[match];
+    if (real === undefined) {
+      if (!unresolved.includes(match)) unresolved.push(match);
+      return match;
+    }
+    replaced++;
+    return real;
+  });
+  return { text: out, replaced, unresolved };
+}
+
 /** Stable string form, so the same logical value always digests identically. */
 function canonical(value: unknown): string {
   if (typeof value === "object") {
