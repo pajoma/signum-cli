@@ -23,11 +23,11 @@ import { clearHandles, handlesPath, loadHandles } from "../core/config.ts";
 import { HANDLE_PREFIX, isHandle, resolveHandle, resolveHandlesInText } from "../core/privacy.ts";
 import {
   checkIgnored, decodeUtf8, discover, gitRootOf, renameNoClobber, resolvePathBelow, resolveSegment,
-  siblingOutputPath, writeUtf8, type Candidate, type SkipReason,
+  siblingOutputPath, writeUtf8, type Candidate, type IgnoreStatus, type SkipReason,
 } from "../core/textfiles.ts";
 import { flag, opt, optAll } from "./context.ts";
 import { existsSync } from "node:fs";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve as resolvePath, sep } from "node:path";
 
 /** AC-53.4: a human resolves handles, not the agent whose protection they are. */
 function assertHuman(ctx: Ctx): void {
@@ -106,7 +106,7 @@ async function unmaskFiles(ctx: Ctx, inputs: readonly string[]): Promise<ExitCod
 
   // Each input is kept beside its own walk, because a resolved output path is computed RELATIVE to
   // the root the caller named — that root is never renamed, so `--in docs` cannot move `docs`.
-  const walks = inputs.map((input) => ({ root: resolve(input), ...discover(input, glob) }));
+  const walks = inputs.map((input) => ({ root: resolvePath(input), ...discover(input, glob) }));
   const candidates: Candidate[] = walks.flatMap((w) => w.files);
   const rootOf = new Map<string, string>();
   for (const w of walks) for (const f of w.files) rootOf.set(f.path, w.root);
@@ -232,7 +232,9 @@ async function unmaskFiles(ctx: Ctx, inputs: readonly string[]): Promise<ExitCod
     }
     for (const d of dirResults) {
       if (d.blocked !== undefined) continue;
-      const root = walks.find((w) => d.path.startsWith(w.root))?.root ?? d.path;
+      // Separator-aware, NOT a bare string prefix: `--in /x/docs --in /x/docs2` would otherwise
+      // match a path under `docs2` against the `docs` root and settle it relative to the wrong one.
+      const root = walks.find((w) => d.path === w.root || d.path.startsWith(w.root + sep))?.root ?? d.path;
       d.output = settle(root, d.output);
     }
   }
@@ -248,10 +250,24 @@ async function unmaskFiles(ctx: Ctx, inputs: readonly string[]): Promise<ExitCod
     ...written.map((r) => r.output as string),
     ...dirResults.filter((d) => d.blocked === undefined).map((d) => d.output),
   ])];
-  const risky = dryRun ? [] : destinations.map((p) => {
-    const root = gitRootOf(p);
-    return { path: p, root, status: root === undefined ? "ignored" as const : checkIgnored(root, p) };
-  }).filter((d) => d.root !== undefined && d.status !== "ignored");
+  // Grouped by repository so `git check-ignore` runs once per repo rather than once per file: the
+  // reported workflow is ~25 generated reports, and a folder walk can be far larger.
+  const byRepo = new Map<string, string[]>();
+  if (!dryRun) {
+    for (const p of destinations) {
+      const root = gitRootOf(p);
+      if (root === undefined) continue; // not in a work tree, so nothing to warn about
+      byRepo.set(root, [...(byRepo.get(root) ?? []), p]);
+    }
+  }
+  const risky: Array<{ path: string; root: string; status: IgnoreStatus }> = [];
+  for (const [root, paths] of byRepo) {
+    const statuses = checkIgnored(root, paths);
+    for (const p of paths) {
+      const status = statuses.get(resolvePath(p)) ?? "unknown";
+      if (status !== "ignored") risky.push({ path: p, root, status });
+    }
+  }
 
   if (ctx.format === "json" || ctx.format === "ndjson") {
     renderDataDocument(

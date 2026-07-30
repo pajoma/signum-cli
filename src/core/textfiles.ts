@@ -5,8 +5,14 @@
  * text file, where the output goes, whether the destination is about to be committed — are testable
  * without driving a command.
  *
- * Nothing here knows what a handle is. It walks paths and moves UTF-8 around; `core/privacy.ts` owns
- * the substitution. Keeping that split is what lets the substitution be a pure function.
+ * The boundary with `core/privacy.ts`: this module owns PATHS and BYTES, `privacy.ts` owns what a
+ * handle means. `resolveSegment` below is path-domain and calls down into the pure substitution
+ * rather than reimplementing it; nothing here mints a handle, classifies a value, or touches the
+ * store. The dependency runs one way only, textfiles -> privacy.
+ *
+ * (An earlier version of this header claimed "nothing here knows what a handle is". That stopped
+ * being true when name resolution was added, and a header that misdescribes its own module is worse
+ * than none — it is the comment a reader trusts before reading the code.)
  */
 
 import { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
@@ -262,7 +268,7 @@ export function gitRootOf(path: string): string | undefined {
 export type IgnoreStatus = "ignored" | "not-ignored" | "unknown";
 
 /**
- * Is `path` ignored by git?
+ * Which of `paths` are ignored by git — ONE subprocess for the whole set.
  *
  * This is the first subprocess in `src/`, and the alternative was worse. Hand-rolling gitignore
  * semantics means reimplementing negations, precedence and nested `.gitignore` files, and a
@@ -270,21 +276,40 @@ export type IgnoreStatus = "ignored" | "not-ignored" | "unknown";
  * is precisely the failure this check exists to prevent. `git check-ignore` is the authority, and it
  * is present in any tree that has a `.git` to begin with.
  *
- * Returns "unknown" — never a guess — when git is missing or errors, and the caller warns on that as
- * if it were "not-ignored". Args are passed as an array, so a path is never parsed by a shell.
+ * Batched deliberately. The per-path version spawned one `git` per destination, so the reported
+ * workflow — ~25 generated reports — paid 25 process creations for a warning, and a folder walk over
+ * a large tree would pay one per file. `--stdin -z` takes the whole set and echoes back exactly the
+ * ignored ones, so the cost is one spawn per repository.
+ *
+ * Every path maps to "unknown" — never a guess — when git is missing or errors, and the caller warns
+ * on that as if it were "not-ignored". Paths go over stdin rather than argv, so neither a shell nor
+ * an argument-length limit is in play.
  */
-export function checkIgnored(gitRoot: string, path: string): IgnoreStatus {
+export function checkIgnored(gitRoot: string, paths: readonly string[]): Map<string, IgnoreStatus> {
+  const out = new Map<string, IgnoreStatus>();
+  if (paths.length === 0) return out;
+  const absolute = paths.map((p) => resolve(p));
   try {
     const res = Bun.spawnSync({
-      cmd: ["git", "check-ignore", "--quiet", "--no-index", resolve(path)],
+      cmd: ["git", "check-ignore", "-z", "--stdin", "--no-index"],
       cwd: gitRoot,
-      stdout: "ignore",
+      stdin: Buffer.from(absolute.join("\0") + "\0", "utf8"),
+      stdout: "pipe",
       stderr: "ignore",
     });
-    if (res.exitCode === 0) return "ignored";
-    if (res.exitCode === 1) return "not-ignored";
-    return "unknown";
+    // 0 = at least one ignored, 1 = none ignored. Anything else (no repo, git too old, error) is not
+    // an answer, and must not be read as "not ignored".
+    if (res.exitCode !== 0 && res.exitCode !== 1) {
+      for (const p of absolute) out.set(p, "unknown");
+      return out;
+    }
+    const ignored = new Set(
+      new TextDecoder().decode(res.stdout).split("\0").filter((s) => s !== ""),
+    );
+    for (const p of absolute) out.set(p, ignored.has(p) ? "ignored" : "not-ignored");
+    return out;
   } catch {
-    return "unknown";
+    for (const p of absolute) out.set(p, "unknown");
+    return out;
   }
 }

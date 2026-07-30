@@ -505,6 +505,25 @@ describe("handles in file and folder NAMES", () => {
     expect(readFileSync(join(work, "report-User;42.local.md"), "utf8")).toBe("nothing to resolve\n");
   });
 
+  it("keeps two roots with a shared name prefix apart (docs vs docs2)", async () => {
+    // Pins end-to-end behaviour for prefix-sharing roots. Note what this does NOT prove: the root
+    // lookup used a bare string prefix, so a path under `docs2` did match the `docs` root — but
+    // `resolvePathBelow` returns unchanged whenever the relative path escapes the root with `..`,
+    // which every such mismatch does, so the wrong choice degraded to a no-op rather than a wrong
+    // path. The lookup is separator-aware now because depending on a guard in another module for
+    // correctness is fragile, not because this test failed before it.
+    saveHandles({ ...H, "ref:bbbbbbbbbbbb": "Team;3" }, env());
+    mkdirSync(join(work, "docs"), { recursive: true });
+    mkdirSync(join(work, "docs2"), { recursive: true });
+    file("docs/ref:cccccccccccc/a.md", "clean\n");
+    file("docs2/ref:bbbbbbbbbbbb/b.md", "clean\n");
+    const r = await cli(["unmask", "--in", join(work, "docs"), "--in", join(work, "docs2"), "--in-place"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    // Each folder resolved under ITS OWN root, neither leaking into the other's tree.
+    expect(existsSync(join(work, "docs/Project;7/a.md"))).toBe(true);
+    expect(existsSync(join(work, "docs2/Team;3/b.md"))).toBe(true);
+  });
+
   it("never renames the root the caller named", async () => {
     // `--in <dir>` must not move <dir>: that would change the meaning of the argument passed.
     saveHandles(H, env());
@@ -624,6 +643,21 @@ describe("the git footgun — names written into a tracked tree", () => {
     file("r.md", "ref:aaaaaaaaaaaa");
     const r = await cli(["unmask", "--in", join(work, "r.md")]);
     expect(r.err).not.toContain("NOT ignored by git");
+  });
+
+  it("gets per-path status right for a MIXED set in one repo", async () => {
+    // `git check-ignore` is now asked once per repository rather than once per file. Batching is only
+    // an optimisation if the answers are still attributed to the right paths — the per-path version
+    // could not get this wrong, the batched one can.
+    initRepo();
+    writeFileSync(join(work, ".gitignore"), "ignored.local.md\n", "utf8");
+    saveHandles({ "ref_aaaaaaaaaaaa": "User;42" }, env());
+    file("ignored.md", "ref_aaaaaaaaaaaa");   // -> ignored.local.md, IS ignored
+    file("watched.md", "ref_aaaaaaaaaaaa");   // -> watched.local.md, is NOT
+    const r = await cli(["unmask", "--in", work, "--json"], {}, false);
+    const doc = JSON.parse(r.out) as { unignoredOutputs: Array<{ path: string }> };
+    expect(doc.unignoredOutputs).toHaveLength(1);
+    expect(doc.unignoredOutputs[0]?.path).toContain("watched.local.md");
   });
 
   it("exposes the same finding in --json, so a wrapper can gate a commit on it", async () => {
