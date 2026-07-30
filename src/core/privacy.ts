@@ -98,6 +98,10 @@ export type ClassificationReason =
   | "mode-off"
   /** An entity reference: identifying by construction, whatever the member is called (AC-52.12). */
   | "identity"
+  /** An entity's DISPLAY STRING — `ToString` / `toStr`. Reported apart from `identity` so the
+   *  introspection view says which rule fired: a reader auditing `Entity.ToString` needs to see
+   *  that it was caught as a label, not guess that a name heuristic happened to match (#105). */
+  | "entity-label"
   | "policy-allow"
   | "policy-always"
   | "heuristic-match"
@@ -157,6 +161,12 @@ export function sensitivity(input: SensitivityInput, policy: PrivacyPolicy): Cla
   if (byName.reason === "policy-allow") return byName;
   if (byName.reason === "policy-always") return byName;
 
+  // A display string is reported as `entity-label`, an entity reference as `identity`. Both are
+  // structural, neither is a heuristic, and the distinction is what makes the introspection view
+  // legible rather than merely correct.
+  if (input.isEntityLabel === true || isEntityLabelName(input.name)) {
+    return { pseudonymize: true, reason: "entity-label" };
+  }
   if (isIdentityInput(input)) return { pseudonymize: true, reason: "identity" };
 
   return byName;
@@ -193,9 +203,47 @@ function nameDecision(token: string, policy: PrivacyPolicy): Classification {
   return result;
 }
 
-/** The three ways we can know a member denotes an entity, none of which is its name. */
+/**
+ * Names that ARE an entity's display string (#105).
+ *
+ * The display string is the one identity-bearing value whose shape reveals nothing: it arrives as a
+ * plain string, so the value-based rule cannot see it, and it is called `ToString` or `toStr`, which
+ * matches no name heuristic. Both halves of the classifier therefore passed it through, and a
+ * person's name — the most sensitive thing this tool handles — came back in the clear under the
+ * DEFAULT policy, needing no flag.
+ *
+ * `--resolve` was already covered, via `isEntityLabel`, because that path rewrites the token and
+ * knows it asked for a label. That is exactly what made the bug hard to see: the obvious vector was
+ * safe while the explicit `--column Entity.ToString` and `get`'s `toStr` were not, and
+ * `explain --privacy` reported `Name` as protected either way.
+ *
+ * Recognised structurally rather than by heuristic, because `ToString` is a framework token
+ * (`EntityToStringToken.Key`) and `toStr` is a wire field — both are exact, not guesses.
+ */
+const ENTITY_LABEL_NAMES = new Set(["tostring", "tostr"]);
+
+/** Does this column token or member name denote an entity's display string? */
+function isEntityLabelName(name: string): boolean {
+  if (ENTITY_LABEL_NAMES.has(name.toLowerCase())) return true;
+  // A dotted query token: only the LAST segment decides, so `Entity.ToString` and
+  // `Entity.Customer.ToString` are labels while a member merely called `ToStringHelper` is not.
+  const last = name.split(TOKEN_PATH_SPLIT).pop();
+  return last !== undefined && ENTITY_LABEL_NAMES.has(last.toLowerCase());
+}
+
+/** Bracket-aware dot split, matching `QueryUtils.cs:370` — a cast segment may contain dots. */
+const TOKEN_PATH_SPLIT = /(?<!\[[^\]]*)\.(?![^[]*\])/;
+
+/**
+ * The ways we can know a member denotes an entity, none of which is its name.
+ *
+ * Display strings are handled by the caller so they can be reported as `entity-label`; this
+ * deliberately keeps the label checks too, so the predicate stays true to its name for any future
+ * caller that only wants a boolean.
+ */
 function isIdentityInput(input: SensitivityInput): boolean {
   if (input.isEntityLabel === true) return true;
+  if (isEntityLabelName(input.name)) return true;
   if (input.value !== undefined && isIdentityValue(input.value)) return true;
   if (input.memberType !== undefined && input.isEntityType?.(input.memberType) === true) return true;
   return false;
