@@ -149,7 +149,7 @@ export interface SensitivityInput {
  *                                       inference including the identity rule, which is what makes
  *                                       allowlisting `Entity` a usable workaround
  *   3. explicit always                — a human said this one is not
- *   4. identity (value / type / label) — identifying by construction, whatever it is called
+ *   4. identity (value / type / label / id) — identifying by construction, whatever it is called
  *   5. name heuristics                — English and German member names (AC-52.4)
  *   6. strict                         — allowlist-only, so anything left is replaced
  *
@@ -238,7 +238,24 @@ function isEntityLabelName(name: string): boolean {
 const TOKEN_PATH_SPLIT = /(?<!\[[^\]]*)\.(?![^[]*\])/;
 
 /**
- * The ways we can know a member denotes an entity, none of which is its name.
+ * A column or member that IS an entity's id (#157): `Entity.Id`, `Id`, `Entity.Customer.Id`.
+ *
+ * The other half of a Lite, and the same blind spot as the display string (#105): a plain number
+ * named `Id` matches no heuristic and is no Lite, so both halves of the classifier passed the real
+ * database id to an agent under the DEFAULT policy — the very thing `ref_` handles exist to hide
+ * (ADR 0007, "Identifiers are the hard part"). `Id` is the framework's own key for the id token
+ * (`EntityPropertyToken.IdProperty`), so it is recognised by name and case exactly. A document's
+ * `id` member never reaches this: `pseudonymizeDocument` treats it structurally.
+ */
+const ENTITY_ID_SEGMENT = "Id";
+
+function isEntityIdName(name: string): boolean {
+  return name.split(TOKEN_PATH_SPLIT).pop() === ENTITY_ID_SEGMENT;
+}
+
+/**
+ * The ways we can know a member denotes an entity. None is a guess from its name: `ToString`,
+ * `toStr` and `Id` are the framework's own keys, not words a heuristic matched.
  *
  * Display strings are handled by the caller so they can be reported as `entity-label`; this
  * deliberately keeps the label checks too, so the predicate stays true to its name for any future
@@ -247,6 +264,7 @@ const TOKEN_PATH_SPLIT = /(?<!\[[^\]]*)\.(?![^[]*\])/;
 function isIdentityInput(input: SensitivityInput): boolean {
   if (input.isEntityLabel === true) return true;
   if (isEntityLabelName(input.name)) return true;
+  if (isEntityIdName(input.name)) return true;
   if (input.value !== undefined && isIdentityValue(input.value)) return true;
   if (input.memberType !== undefined && input.isEntityType?.(input.memberType) === true) return true;
   return false;
@@ -542,8 +560,12 @@ export function resolvePolicy(opts: ResolvePolicyOptions): PrivacyPolicy {
       mode = opts.requested;
     } else if (opts.acknowledged) {
       // Loosening under an agent is possible but never quiet (AC-50.4's asymmetry, AC-52.10).
+      // The narrow alternative is named here, where the wide one is taken: `off` exposes every member,
+      // and a caller who needs a few was reaching for it because nothing said there was another way (#152).
       opts.warn?.(
-        `warning: pseudonymization loosened to '${opts.requested}' under a detected AI caller\n`,
+        `warning: pseudonymization loosened to '${opts.requested}' under a detected AI caller\n` +
+        `To read only some members, list them under "allow" in privacy.json with "mode": "strict"\n` +
+        "instead; see `signum help pseudonymization`.\n",
       );
       mode = opts.requested;
     } else {
@@ -626,9 +648,52 @@ export function pseudonymizeDocument(
   const element = (n: unknown, path: string): unknown => {
     const name = path.split(".").pop() ?? path;
     const decision = sensitivity({ name, value: n }, policy);
+    if (decision.reason === "policy-allow") return allowed(n, path);
     if (!decision.pseudonymize) return walk(n, path);
     seen.push(name);
     return surrogate(n, name, policy, recorder);
+  };
+
+  // The value is passed in, which is what fixes the leak: a nested Lite is an identity even though
+  // `Customer` matches no name heuristic. Previously this path saw the NAME only, so `get` emitted
+  // real entity types, real ids and real labels under the default policy — and reported that it had
+  // pseudonymized nothing.
+  const member = (key: string, v: unknown, path: string): unknown => {
+    const decision = sensitivity({ name: key, value: v }, policy);
+    if (decision.reason === "policy-allow") return allowed(v, path);
+    if (decision.pseudonymize) {
+      // A sensitive value is replaced WHOLE, object or not. Recursing into something already judged
+      // sensitive would emit its parts while claiming the whole was protected.
+      seen.push(key);
+      return surrogate(v, key, policy, recorder);
+    }
+    return walk(v, path);
+  };
+
+  /**
+   * An allowlisted value shows what the query path shows for an allowed column, and no more (#152).
+   * A scalar or a Lite is shown as it is: the identity and display text are what was allowed. A
+   * nested entity — a referenced one or an embedded one — shows its own display string, and every
+   * member it carries is still judged on its own: an allow entry names a member, and must not
+   * unmask the whole record behind it, which `query` would only ever show as a Lite. The same goes
+   * for the entity a loaded Lite carries, and for each MList row's element.
+   */
+  const allowed = (v: unknown, path: string): unknown => {
+    if (Array.isArray(v)) return v.map((n) => allowed(n, path));
+    if (v === null || typeof v !== "object" || v instanceof JsonNumber) return v;
+    const o = v as Record<string, unknown>;
+    if (Object.hasOwn(o, "rowId") && Object.hasOwn(o, "element")) {
+      return { ...o, element: allowed(o["element"], path) }; // an MList row is framing, not data
+    }
+    if (typeof o["EntityType"] === "string") {
+      return Object.hasOwn(o, "entity") ? { ...o, entity: walk(o["entity"], `${path}.entity`) } : o;
+    }
+    const out: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(o)) {
+      const keep = key === "toStr" || STRUCTURAL_KEYS.has(key.toLowerCase());
+      out[key] = keep ? child : member(key, child, `${path}.${key}`);
+    }
+    return out;
   };
 
   const walk = (node: unknown, path: string): unknown => {
@@ -637,23 +702,7 @@ export function pseudonymizeDocument(
 
     const out: Record<string, unknown> = {};
     for (const [key, v] of Object.entries(node as Record<string, unknown>)) {
-      if (STRUCTURAL_KEYS.has(key.toLowerCase())) {
-        out[key] = v;
-        continue;
-      }
-      // The value is passed in, which is what fixes the leak: a nested Lite is an identity even
-      // though `Customer` matches no name heuristic. Previously this path saw the NAME only, so
-      // `get` emitted real entity types, real ids and real labels under the default policy — and
-      // reported that it had pseudonymized nothing.
-      const decision = sensitivity({ name: key, value: v }, policy);
-      if (decision.pseudonymize) {
-        // A sensitive value is replaced WHOLE, object or not. Recursing into something already
-        // judged sensitive would emit its parts while claiming the whole was protected.
-        out[key] = surrogate(v, key, policy, recorder);
-        seen.push(key);
-      } else {
-        out[key] = walk(v, path === "" ? key : `${path}.${key}`);
-      }
+      out[key] = STRUCTURAL_KEYS.has(key.toLowerCase()) ? v : member(key, v, path === "" ? key : `${path}.${key}`);
     }
     return out;
   };

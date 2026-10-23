@@ -134,7 +134,9 @@ const SUB_TOKENS: Record<string, unknown[]> = {
   // named --column and --order against parseTokens, so a token this list omits now fails the way a
   // genuinely invalid one does — which is exactly what caught this fixture being short of `Total`.
   "": [
-    { key: "Id", fullKey: "Id", niceName: "Id", filterType: "Integer", type: { name: "number" }, isGroupable: true },
+    // `propertyRoute` as for a query column declared `e.Id`: it names the type whose id this is (#157).
+    { key: "Id", fullKey: "Id", niceName: "Id", filterType: "Integer", type: { name: "number" }, isGroupable: true,
+      propertyRoute: "(Order).Id" },
     { key: "Entity", fullKey: "Entity", niceName: "Order", type: { name: "Order" }, isGroupable: true },
     { key: "State", fullKey: "State", niceName: "State", type: { name: "string" }, isGroupable: true },
     { key: "Total", fullKey: "Total", niceName: "Total", filterType: "Decimal", type: { name: "decimal" }, isGroupable: true },
@@ -223,6 +225,9 @@ const EXACT_RESULT_TABLE =
   `{"EntityType":"Customer","id":9007199254740995,"model":"Anna Müller"}]}],"totalElements":1}`;
 /** When set, every executeQuery answers with EXACT_RESULT_TABLE. */
 let exactResultTable = false;
+/** When set, every executeQuery answers with an `Id` column beside the entity (#157). */
+let idResultTable = false;
+const ID_RESULT_TABLE = { columns: ["Id"], rows: [{ entity: { EntityType: "Order", id: 42 }, columns: [42] }], totalElements: 1 };
 /**
  * Serve reflection as Signum.Authorization does (AuthServer.cs:70-176).
  *   full       TypeAuthLogic and QueryAuthLogic: no entity at all to an anonymous caller, and to a
@@ -385,6 +390,9 @@ beforeAll(() => {
           : `[{"Type":"Order","id":1,"ticks":"638","toStr":"Order 1","name":"Acme GmbH",` +
             `"customer":{"EntityType":"Customer","id":7,"model":"Anna Müller"}}]`,
           { headers });
+      }
+      if (url.pathname.startsWith("/api/query/executeQuery/") && idResultTable) {
+        return new Response(JSON.stringify(ID_RESULT_TABLE), { headers });
       }
       if (url.pathname.startsWith("/api/query/executeQuery/") && exactResultTable) {
         return new Response(EXACT_RESULT_TABLE, { headers });
@@ -1083,6 +1091,30 @@ describe("query (STORY-20, STORY-21, STORY-22)", () => {
     });
   });
 
+  /**
+   * An `Id` column used to give an agent the real database id under the default policy, with a
+   * disclosure saying nothing was replaced (#157). The route `parseTokens` returns names the type, so
+   * the id becomes the same handle the record's `Entity` column gets.
+   */
+  describe("an id column is an identity (#157)", () => {
+    beforeAll(() => { idResultTable = true; });
+    afterAll(() => { idResultTable = false; });
+
+    it("becomes the record's handle under an agent, and the disclosure names it", async () => {
+      const r = await cli(["query", "Order", "--column", "Entity", "--column", "Id", "--json"], { env: { CLAUDECODE: "1" } });
+      expect(r.code).toBe(ExitCode.Ok);
+      const row = (JSON.parse(r.out) as Array<Record<string, unknown>>)[0] ?? {};
+      expect(String(row["Id"])).toStartWith(HANDLE_PREFIX);
+      expect(row["Id"]).toBe(row["Entity"]);
+      expect(r.err).toContain("pseudonymized (heuristic): Entity, Id");
+    });
+
+    it("stays the real id for a human at a terminal", async () => {
+      const r = await cli(["query", "Order", "--column", "Id", "--json"], { tty: true });
+      expect((JSON.parse(r.out) as Array<Record<string, unknown>>)[0]?.["Id"]).toBe(42);
+    });
+  });
+
   it("emits Lite keys for -o name", async () => {
     const r = await cli(["query", "Order", "-o", "name"]);
     expect(r.out).toBe("Order;42\nOrder;43\n");
@@ -1093,6 +1125,15 @@ describe("query (STORY-20, STORY-21, STORY-22)", () => {
     expect(r.out).toContain("State");
     expect(r.out).toContain("Shipped");
     expect(r.err).toContain("2 of 7 rows"); // AC-21.5
+  });
+
+  it("says a JSON page is partial on stderr, and stdout carries only its rows (AC-21.5, #149)", async () => {
+    // JSON is the default on a pipe, and it used to carry no marker: 50 rows that looked complete.
+    // Every other format is covered where the line is written, in output.test.ts.
+    const r = await cli(["query", "Order", "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.err).toContain("2 of 7 rows visible to you");
+    expect(JSON.parse(r.out)).toHaveLength(2);
   });
 
   it("--explain sends nothing and prints the request (AC-20.6)", async () => {
@@ -2875,5 +2916,53 @@ describe("caller-context override end-to-end (AC-50.4) — previously only unit-
   it("an invalid --caller-context value is a usage error, not a silent no-op", async () => {
     const r = await cli(["query", "Order", "--caller-context", "nonsense"]);
     expect(r.code).toBe(ExitCode.Usage);
+  });
+});
+
+/**
+ * The CLI as a real process with stdout on a pipe (#151). In-process tests collect `io.out` into a
+ * string and never see the pipe, so they missed that exiting right after the last write kept only
+ * the first 64 KiB — exit 0, nothing on stderr, and truncated JSON for every script and agent.
+ */
+describe("piped stdout is delivered in full (#151)", () => {
+  const TYPES = 3000;
+  let big: ReturnType<typeof Bun.serve>;
+  let bigUrl: string;
+
+  beforeAll(() => {
+    const reflection = Object.fromEntries(Array.from({ length: TYPES }, (_, i) => [`Type${i}Entity`, {
+      kind: "Entity", entityKind: "Main", niceName: `Type ${i}`, queryDefined: true,
+      members: { Id: { type: { name: "number" }, niceName: "Id" } }, operations: {},
+    }]));
+    big = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const headers = { "content-type": "application/json" };
+        if (new URL(req.url).pathname === "/api/reflection/types") return new Response(JSON.stringify(reflection), { headers });
+        return new Response(JSON.stringify({ exceptionMessage: "unhandled" }), { status: 404, headers });
+      },
+    });
+    bigUrl = `http://127.0.0.1:${big.port}`;
+  });
+  afterAll(() => big.stop(true));
+
+  it("more than 64 KiB of JSON on a pipe arrives complete and parses", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "signum-pipe-"));
+    try {
+      // Through `sh -c '… | cat'`, because Bun.spawn's "pipe" is not an OS pipe: the CLI wrote all of
+      // its output into it even before the fix. A shell pipe is what a user's pipeline gets.
+      const cliPath = join(import.meta.dir, "..", "src", "cli.ts");
+      const proc = Bun.spawn(["/bin/sh", "-c", '"$0" "$@" | cat', process.execPath, cliPath, "types", "--url", bigUrl, "-o", "json"], {
+        env: { PATH: "/usr/bin:/bin", HOME: dir, SIGNUM_CONFIG_DIR: join(dir, "config") },
+        stdin: "ignore", stdout: "pipe", stderr: "pipe",
+      });
+      // The exit status here is cat's; help.test.ts checks the CLI's own, as a real process.
+      const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+      expect(err).toBe("");
+      expect(out.length).toBeGreaterThan(64 * 1024);
+      expect((JSON.parse(out) as unknown[]).length).toBe(TYPES);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -336,5 +336,8 @@ export async function main(argv: readonly string[]): Promise<number> {
 
 // Bun sets import.meta.main for the entry module.
 if (import.meta.main) {
-  process.exit(await main(process.argv.slice(2)));
+  // Not process.exit(): stdout to a pipe is written asynchronously, and exiting at once kept only
+  // the first 64 KiB (#151). A write callback does not help either: Bun calls it before the bytes
+  // reach the pipe. Ending the process naturally lets pending writes drain first.
+  process.exitCode = await main(process.argv.slice(2));
 }

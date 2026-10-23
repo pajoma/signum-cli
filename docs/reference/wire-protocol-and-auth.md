@@ -519,7 +519,7 @@ static readonly string[] specialProps = new string[] { "toStr", "id", "isNew", "
 Other read-side constraints from the same method:
 - `"Type"` is **mandatory** — `if (info.Type == null) throw new JsonException(...)` (`:763-764`).
 - `"ticks"` must be a **JSON string**: `long.Parse(reader.GetString()!)` (`:752`). A number throws.
-- `"temporalId"` (GUID string) is a **client→server-only** identity token used to correlate new objects across the round trip (`Signum/Entities/ModifiableEntity.cs:289`; applied at `EntityJsonConverter.cs:629-630, 654-655, 672-673, 709-717`). The server never writes it.
+- `"temporalId"` (GUID string) is an identity token used to correlate new objects across the round trip (`Signum/Entities/ModifiableEntity.cs:289`; applied at `EntityJsonConverter.cs:629-630, 654-655, 672-673, 709-717`). A client sends it. The framework's writer does not, but a type can opt in with `EntityKindAttribute.SerializeTemporalId` (`Signum/Entities/TypeAttributes.cs:75-77, 122-123`, commented "Usefull for EntityAssigner.tsx"). Nothing in the framework checkout calls that opt-in, so an application that uses it writes the member itself, and a live one was seen to: last in the object, after the data members, as an all-zero GUID (#150). So the ordering rule binds what a client **sends**; a response may break it, and a client sends the value back as it was received.
 - Sending `"EntityType"` inside a full entity is an explicit error (`:755`): *"Unexpected property 'EntityType' in full entity JSON. Use 'Type' instead."*
 
 **Property naming** is computed by Signum itself, **independent of `PropertyNamingPolicy`** (`:136-144`):
@@ -815,7 +815,7 @@ A *fat* lite with a non-default model type, all optional members present, in wri
 ### 2.10 Entity-serialization checklist for a client implementer
 
 1. Emit `Type` (or `EntityType` for lites) first, then the other special props (`id`, `isNew`, `ticks`, `toStr`, `modified`, `temporalId`), **then** regular camelCase props. Never place a special prop after a regular one.
-2. `ticks` = string; `id` = number **or** string matching the PK type; `temporalId` = GUID string (optional, outbound only).
+2. `ticks` = string; `id` = number **or** string matching the PK type; `temporalId` = GUID string (optional; send back what was received, which a type with `SerializeTemporalId` carries).
 3. Always send `"modified": true` on every object you changed **and on its ancestors** — otherwise changes are silently dropped and MLists are not assigned.
 4. Round-trip everything you received (including `propsMeta` and read-only props — they are ignored because equal). **Never invent keys**: unknown keys ⇒ 500.
 5. Never send `toStr` or `Type` inside a `Lite`; never `EntityType` inside a full entity. All three are explicit `JsonException`s.

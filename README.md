@@ -4,8 +4,8 @@ A command-line client for [Signum Framework](https://github.com/signumsoftware/f
 applications — run dynamic queries, retrieve and save entities, and execute operations
 against a running Signum app.
 
-> **Status: `v0.2.0`, milestone `m1` (read-only core).** The first full release, after the
-> pre-releases `v0.1.0-b.*`; see [`CHANGELOG.md`](CHANGELOG.md). It can discover, query and read;
+> **Status: `v0.2.1`, milestone `m1` (read-only core).** A patch release of `v0.2.0`, the first
+> full release, which followed the pre-releases `v0.1.0-b.*`; see [`CHANGELOG.md`](CHANGELOG.md). It can discover, query and read;
 > it cannot write yet — saving entities and executing operations are milestone `m2`. Requirements live in
 > [`docs/requirements.md`](docs/requirements.md) and the issues labelled
 > [`requirement`](https://github.com/pajoma/signum-cli/labels/requirement).

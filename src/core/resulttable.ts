@@ -100,6 +100,13 @@ export interface ResolveOptions {
    */
   columnLabels?: Readonly<Record<string, string>> | undefined;
   /**
+   * Columns that hold an entity's id, mapped to that entity's type (`tokens.ts` `idColumnTypes`).
+   * An id is an identity (#157), and knowing its type lets it become the same `ref_` handle a Lite
+   * to that record gets — so `Entity.Id` and `Entity` agree, and the agent can act on either. An
+   * id column absent here is still replaced, as a plain value.
+   */
+  idTypes?: Readonly<Record<string, string>> | undefined;
+  /**
    * Pseudonymization policy (REQ-057). Applied HERE, inside the de-interning boundary, so no
    * renderer can ever hold a real value — the same single-choke-point argument as AC-21.1, for the
    * same reason: a protection applied per output path is a protection one output path will forget.
@@ -192,6 +199,7 @@ export function resolveResultTable(raw: RawResultTable, options: ResolveOptions 
    * name-based heuristic.
    */
   const labelColumns = new Set(Object.values(options.columnLabels ?? {}));
+  const idTypes = options.idTypes ?? {};
 
   /** Columns where something was actually replaced, for the AC-52.6 disclosure. */
   const replaced = new Set<string>();
@@ -239,16 +247,22 @@ export function resolveResultTable(raw: RawResultTable, options: ResolveOptions 
       ? aligned
       : aligned.map((v, i) => {
           const token = columns[i] as string;
+          // An id of a known type is judged, and replaced, as the Lite it is half of (#157). A lossless
+          // read tags a cell's number as a plain `number` — only an `id` MEMBER is an `identifier` —
+          // so it is re-tagged here, where the column's route says what it is, keeping its digits.
+          const idType = idTypes[token];
+          const id = v instanceof JsonNumber ? new JsonNumber("identifier", v.text) : v;
+          const subject = idType !== undefined && v !== null && v !== undefined ? { EntityType: idType, id } : v;
           // One decision function for every path (privacy.ts `sensitivity`). Called per cell because
           // an identity is only visible in the VALUE; the name-based half is memoized on the policy,
           // so this costs a map lookup and a shape check rather than a re-classification.
           const decision = sensitivity(
-            { name: token, value: v, isEntityLabel: labelColumns.has(token) },
+            { name: token, value: subject, isEntityLabel: labelColumns.has(token) },
             privacy,
           );
           if (!decision.pseudonymize) return v;
           replaced.add(token);
-          return surrogate(v, token, privacy, recorder);
+          return surrogate(subject, token, privacy, recorder);
         });
 
     return { entity, values };

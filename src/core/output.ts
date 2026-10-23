@@ -204,8 +204,21 @@ export interface RenderOptions {
 }
 
 export function renderResultTable(table: ResolvedTable, opts: RenderOptions): void {
+  assertDataWriter(opts.write); // the half of the boundary that survives type erasure
+  renderRows(table, opts);
+
+  // Total is reported distinctly from rows returned, so a page is never mistaken for all (AC-21.5).
+  // In every format: a pipe gets JSON by default, and a script or agent reading it is the caller
+  // least likely to notice a page of 50 that looks complete (#149). Here rather than in the command,
+  // because the total is an aggregate over the rows: it may only appear once the gate has handed this
+  // renderer a DataWriter, as a `--count` goes out through one.
+  if (table.totalElements !== undefined && table.totalElements > table.rows.length) {
+    opts.warn?.(`\n${table.rows.length} of ${table.totalElements} rows visible to you (use --top, --page, or --all)`);
+  }
+}
+
+function renderRows(table: ResolvedTable, opts: RenderOptions): void {
   const { format, write } = opts;
-  assertDataWriter(write); // the half of the boundary that survives type erasure
 
   if (table.rows.length === 0) {
     // Empty is success; humans get a note on stderr, machines get an empty structure (AC-22.6).

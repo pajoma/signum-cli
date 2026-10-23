@@ -47,6 +47,39 @@ const WITH_ENTITY = resolveResultTable(
   { requestedColumns: ["Id", "Entity", "State"] },
 );
 
+/**
+ * A page that is not the whole result says so, in every format, through `warn` only (AC-21.5, #149).
+ * The renderer owns the line because the total is an aggregate over the rows: it may only appear once
+ * a gated DataWriter has been handed over, as a `--count` goes out through one.
+ */
+describe("a partial page (AC-21.5, #149)", () => {
+  const PAGE = resolveResultTable({ columns: ["State"], rows: [{ columns: ["Shipped"] }, { columns: ["Open"] }], totalElements: 7 });
+  const COMPLETE = resolveResultTable({ columns: ["State"], rows: [{ columns: ["Shipped"] }], totalElements: 1 });
+  const PAST_THE_END = resolveResultTable({ columns: ["State"], rows: [], totalElements: 7 });
+
+  for (const format of ["table", "json", "ndjson", "csv", "tsv", "name"] as const) {
+    it(`reports a partial page on stderr for -o ${format}, and never in the data`, () => {
+      const s = sink();
+      renderResultTable(PAGE, { format, write: s.write, warn: s.warn });
+      expect(s.warned()).toContain("2 of 7 rows visible to you");
+      expect(s.out()).not.toContain("of 7");
+    });
+  }
+
+  it("says nothing when every row arrived", () => {
+    const s = sink();
+    renderResultTable(COMPLETE, { format: "json", write: s.write, warn: s.warn });
+    expect(s.warned()).toBe("");
+  });
+
+  it("reports a page past the end as 0 of the total, so it is not read as an empty result", () => {
+    const s = sink();
+    renderResultTable(PAST_THE_END, { format: "json", write: s.write, warn: s.warn });
+    expect(s.out()).toBe("[]\n");
+    expect(s.warned()).toContain("0 of 7 rows visible to you");
+  });
+});
+
 describe("empty results (AC-22.6)", () => {
   it("table: warns on stderr, writes nothing to stdout", () => {
     const s = sink();

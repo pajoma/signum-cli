@@ -212,7 +212,9 @@ export const COMMANDS: CommandSpec[] = [
     description:
       "Results, totals and --count include only the rows your permissions allow. The server " +
       "removes the others silently and the response carries no marker that it did, so a result " +
-      "is complete for you, not necessarily for the database (AC-08.6).",
+      "is complete for you, not necessarily for the database (AC-08.6). A page that is not the " +
+      "whole result says so on stderr in every format (\"50 of 56 rows visible to you\"), and " +
+      "stdout carries only the rows (AC-21.5).",
     flags: [
       { name: "filter", arg: "<expr>", summary: "Filter expression; repeatable (AND). See `signum help filter`" },
       { name: "filter-json", arg: "<file|@file|->", summary: "Raw FilterTS[] JSON; combines with --filter (AND)" },
@@ -587,14 +589,24 @@ export const TOPICS: Record<string, string> = {
     "  Configure it:                          <config-dir>/privacy.json",
     "                                         { \"mode\": \"strict\", \"allow\": [\"State\"] }",
     "",
+    "  TO READ SOME MEMBERS AND NOTHING ELSE, list them under \"allow\" with mode strict,",
+    "  rather than turning pseudonymization off. An allowed member shows its value: a",
+    "  reference with its display text, a list item by item, in query and get alike.",
+    "  What a reference or an embedded value CONTAINS is still judged on its own, so",
+    "  allowing Customer does not show the customer's email. Everything else stays",
+    "  masked, including each record's own title (toStr) and its Entity column, which",
+    "  stays a handle. An allow entry matches that member name at any depth, in every",
+    "  type. No acknowledgement is needed, because the file is written by a human.",
+    "",
     "  The policy is resolved from that file and the caller context — it is NOT a",
     "  per-call parameter. --pseudonymize may TIGHTEN it freely; loosening it under a",
     "  detected agent needs --i-understand-data-goes-to-a-model and is logged, because",
     "  the caller asking for weaker protection is the caller that wants the data.",
     "",
     "  Surrogates are stable per profile, so the same value reads the same across",
-    "  commands. Entity identities become opaque handles (ref_...) rather than labels,",
-    "  so an agent can act on a record it cannot identify:",
+    "  commands. Entity identities, a reference or an Id column, become opaque handles",
+    "  (ref_...) rather than labels or ids, so an agent can act on a record it cannot",
+    "  identify:",
     "",
     "    signum get ref_7f3a1c2b4d5e         resolved locally, never sent to the server",
     "    signum unmask ref_7f3a...  what it stands for (human only)",

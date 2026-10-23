@@ -3,6 +3,35 @@
 Notable changes to signum-cli. Versions are [SemVer](https://semver.org/), and `package.json` is the
 source of truth: a release tag `v<version>` must match it (see the README's release section).
 
+## 0.2.1 — 2026-10-23
+
+A patch release of the read-only core. Four of the fixes come from using 0.2.0 against a live
+application (#149 to #152); #157 was found while fixing #152. Two concern privacy under an AI
+caller: an `Id` column no longer reaches it as the real database id (#157), and an allowlist in
+`privacy.json` now reads some members and nothing else (#152).
+
+### Fixed
+
+- `query` says that a page is partial in every output format, not only in `-o table` (#149). JSON,
+  the default on a pipe, used to carry no marker, so 50 rows of 56 looked like the whole result.
+  The "N of M rows visible to you" line goes to stderr, so stdout still carries only the rows.
+- `get` no longer rejects an entity whose response lists `temporalId` after the data members
+  (#150). The serializer moves special members ahead of the data members itself, so such an entity
+  can also be sent back. A response that breaks one of the other rules now says it came from the
+  server, rather than that the CLI refused to send it.
+- Output to a pipe is no longer cut off after 64 KiB (#151). The CLI exited before stdout had
+  drained, so a script or agent reading more than that got truncated JSON with exit 0. It now ends
+  once every write has reached the pipe.
+- `get` shows an allowlisted reference with its display text under `strict`, as `query` does
+  (#152). It used to mask it. What the reference or an embedded value contains is still judged
+  member by member, so allowing `Customer` does not reveal the customer's email. `privacy.json`
+  with `"mode": "strict"` and an `allow` list now reads some members and nothing else on every
+  command, and the warning printed when pseudonymization is loosened to `off` points to it.
+- An `Id` column (`--column Entity.Id`, `Id`, `Entity.Customer.Id`) no longer gives an AI caller
+  the real database id under the default policy (#157), and the stderr note no longer says nothing
+  was replaced. The id becomes the record's `ref_` handle, the same one its `Entity` column gets,
+  when the server's property route names the type; otherwise it is masked as a plain value.
+
 ## 0.2.0 — 2026-10-21
 
 The first full release: milestone **m1**, the read-only core. It follows the pre-releases

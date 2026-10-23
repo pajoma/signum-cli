@@ -89,41 +89,62 @@ function malformed(message: string): CliError {
   return new CliError(`internal: refusing to send malformed entity JSON — ${message}`, ExitCode.Unexpected);
 }
 
+/** A `CliError` for a response that breaks an invariant. The server sent it; nothing was sent (#150). */
+function unexpected(message: string): CliError {
+  return new CliError(`unexpected entity JSON in the response — ${message}`, ExitCode.Unexpected);
+}
+
 /**
  * Check the invariants the server enforces, over the whole graph, before anything is sent or edited.
- * Each one either throws server-side with a message nobody can act on, or corrupts data.
+ * Each one either throws server-side with a message nobody can act on, or corrupts data. They hold in
+ * both directions; `fail` only words the error, so a response is never reported as a refused send.
  */
-function assertWellFormed(v: unknown, path: string): void {
+function assertWellFormed(v: unknown, path: string, fail: (message: string) => CliError): void {
   if (Array.isArray(v)) {
-    v.forEach((item, i) => assertWellFormed(item, `${path}[${i}]`));
+    v.forEach((item, i) => assertWellFormed(item, `${path}[${i}]`, fail));
     return;
   }
   if (!isObject(v)) return;
 
   const hasType = Object.hasOwn(v, "Type");
   const hasEntityType = Object.hasOwn(v, "EntityType");
-  if (hasType && hasEntityType) throw malformed(`${path || "root"} carries both Type and EntityType`);
+  if (hasType && hasEntityType) throw fail(`${path || "root"} carries both Type and EntityType`);
 
-  if (hasType) {
-    // AC-31.2: a numeric ticks throws in `long.Parse(reader.GetString())`; worse, a JS number would
-    // already have lost precision, turning every write into a false concurrency conflict.
-    if (Object.hasOwn(v, "ticks") && typeof v["ticks"] !== "string") {
-      throw malformed(`${path || "root"}.ticks must be a string`);
-    }
-    // AC-31.4: a special member after a data member throws (`EntityJsonConverter.cs:455-456`).
-    let seenData = false;
-    for (const key of Object.keys(v)) {
-      if (!SPECIAL.has(key)) seenData = true;
-      else if (seenData) throw malformed(`${path || "root"}.${key} appears after a data member`);
-    }
+  // AC-31.2: a numeric ticks throws in `long.Parse(reader.GetString())`; worse, a JS number would
+  // already have lost precision, turning every write into a false concurrency conflict.
+  if (hasType && Object.hasOwn(v, "ticks") && typeof v["ticks"] !== "string") {
+    throw fail(`${path || "root"}.ticks must be a string`);
   }
 
   if (isMListRow(v)) {
     const keys = Object.keys(v);
-    if (keys[0] !== "rowId" || keys[1] !== "element") throw malformed(`${path} must be {rowId, element}, in that order`);
+    if (keys[0] !== "rowId" || keys[1] !== "element") throw fail(`${path} must be {rowId, element}, in that order`);
   }
 
-  for (const [key, child] of Object.entries(v)) assertWellFormed(child, path === "" ? key : `${path}.${key}`);
+  for (const [key, child] of Object.entries(v)) {
+    assertWellFormed(child, path === "" ? key : `${path}.${key}`, fail);
+  }
+}
+
+/**
+ * Move every entity's special members ahead of its data members, keeping the order within each group.
+ * This is what makes AC-31.4 hold on send — a special member after a data member throws
+ * (`EntityJsonConverter.cs:455-456`). It binds sends only: a fetched entity can carry `temporalId`
+ * last (#150), and sent back unchanged it would throw.
+ */
+function hoistSpecialMembers(v: unknown): void {
+  if (Array.isArray(v)) {
+    v.forEach(hoistSpecialMembers);
+    return;
+  }
+  if (!isObject(v)) return;
+  if (Object.hasOwn(v, "Type")) {
+    const entries = Object.entries(v);
+    for (const [key] of entries) delete v[key];
+    for (const [key, value] of entries) if (SPECIAL.has(key)) v[key] = value;
+    for (const [key, value] of entries) if (!SPECIAL.has(key)) v[key] = value;
+  }
+  Object.values(v).forEach(hoistSpecialMembers);
 }
 
 /** Validate a response body as an entity. The response is the only source of one. */
@@ -131,7 +152,7 @@ export function asEntity(body: unknown): EntityJson {
   if (!isEntity(body)) {
     throw new CliError("expected an entity in the response, got something else", ExitCode.Unexpected);
   }
-  assertWellFormed(body, "");
+  assertWellFormed(body, "", unexpected);
   return body;
 }
 
@@ -256,15 +277,17 @@ function assertEntityPayload(p: EntityPayload): void {
 /**
  * The only way to produce entity JSON for the server: check the graph, propagate `modified`, write it.
  *
- * It CHANGES `root`: `modified` is raised on every ancestor of a change and client-side `error`
- * members are dropped, as the web client does. Flags are only ever raised, so serializing twice — a
- * preview, then the real send — produces the same payload.
+ * It CHANGES `root`: special members are moved ahead of the data members, `modified` is raised on
+ * every ancestor of a change and client-side `error` members are dropped, as the web client does.
+ * Flags are only ever raised and the move keeps each group's order, so serializing twice — a preview,
+ * then the real send — produces the same payload.
  *
  * `modified` on the result says whether the payload asks the server to change anything — false means
  * the server will apply nothing, and a caller must not report that as a save (AC-32.4).
  */
 export function serializeEntity(root: EntityJson): EntityPayload {
-  assertWellFormed(root, "");
+  hoistSpecialMembers(root);
+  assertWellFormed(root, "", malformed);
   const modified = propagateModified(root);
   return { json: JSON.stringify(root), modified, [ENTITY_PAYLOAD]: true };
 }

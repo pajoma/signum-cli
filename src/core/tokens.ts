@@ -51,6 +51,8 @@ export interface QueryTokenInfo {
   isGroupable: boolean;
   /** `.Nested` is offered here but rejected by executeQuery — see the header (AC-24.7). */
   usableInQuery: boolean;
+  /** `PropertyRoute.ToString()`, e.g. `(Customer).Name`, when the token maps to one. */
+  propertyRoute: string | undefined;
 }
 
 function str(v: unknown): string | undefined {
@@ -73,7 +75,27 @@ function parseToken(raw: unknown): QueryTokenInfo {
     filterType: str(t["filterType"]),
     isGroupable: t["isGroupable"] === true,
     usableInQuery: kind !== "Nested",
+    propertyRoute: str(t["propertyRoute"]),
   };
+}
+
+/**
+ * The entity type whose id each column holds, keyed by the column's token (#157).
+ *
+ * Read from the property route, not the token path: the id token's route is
+ * `PropertyRoute.Root(parent type).Add(Id)` (`EntityPropertyToken.cs:13-16`), which prints as
+ * `(Customer).Id` with the type's CLEAN name (`PropertyRoute.cs:272-275`) — the same name a Lite
+ * carries as `EntityType`. A query column declared as `e.Id` maps to the same route. So the type
+ * comes from the server, whatever the path to it, and a column whose route names no single type
+ * (an ImplementedByAll parent) is simply absent here.
+ */
+export function idColumnTypes(columns: readonly QueryTokenInfo[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const c of columns) {
+    const type = /^\(([^()]+)\)\.Id$/.exec(c.propertyRoute ?? "")?.[1];
+    if (type !== undefined) out[c.fullKey] = type;
+  }
+  return out;
 }
 
 function parseList(body: unknown): QueryTokenInfo[] {

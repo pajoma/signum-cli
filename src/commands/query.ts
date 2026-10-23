@@ -15,7 +15,7 @@ import { renderResultTable, renderDataDocument, renderDocument } from "../core/o
 import { resolveResultTable, type RawResultTable } from "../core/resulttable.ts";
 import { loadMetadata, resolveQueryKey } from "../core/metadata.ts";
 import {
-  fetchDefaultColumns, filterUnusableReason, resolveLiteColumns, validateTokens,
+  fetchDefaultColumns, filterUnusableReason, idColumnTypes, resolveLiteColumns, validateTokens,
   type QueryTokenInfo,
 } from "../core/tokens.ts";
 import { disclosure } from "../core/privacy.ts";
@@ -192,6 +192,8 @@ interface ColumnPlan {
   /** What is actually sent: the caller's columns, `--resolve`-rewritten, or the query's defaults. */
   effectiveColumns: string[];
   columnLabels: Record<string, string>;
+  /** Columns holding an entity's id, mapped to its type, so each becomes that record's handle (#157). */
+  idTypes: Record<string, string>;
 }
 
 /**
@@ -223,6 +225,7 @@ async function planColumns(
   const resolveLites = flag(ctx, "resolve");
   let effectiveColumns = requestedColumns;
   let columnLabels: Record<string, string> = {};
+  let idTypes: Record<string, string> = {};
 
   // Validate EVERY token the caller named, before the request (AC-20.7, #95).
   //
@@ -285,6 +288,9 @@ async function planColumns(
     });
   }
 
+  // The column slice comes off the front, as for --resolve below (#157).
+  idTypes = idColumnTypes(namedInfo.slice(0, requestedColumns.length));
+
   // --resolve needs the filterType of the COLUMN tokens, which the validation above already fetched.
   if (resolveLites && requestedColumns.length > 0 && namedInfo.length > 0) {
     const resolved = resolveLiteColumns(namedInfo.slice(0, requestedColumns.length));
@@ -297,6 +303,7 @@ async function planColumns(
     // only the caller can choose. Defaulting them would invent a query nobody asked for.
     try {
       const defaults = await fetchDefaultColumns(http, queryKey);
+      idTypes = idColumnTypes(defaults);
       // The description already carries each column's filterType, so --resolve is free here.
       if (resolveLites) {
         const resolved = resolveLiteColumns(defaults);
@@ -320,7 +327,7 @@ async function planColumns(
     }
   }
 
-  return { requestedColumns, orders, effectiveColumns, columnLabels };
+  return { requestedColumns, orders, effectiveColumns, columnLabels, idTypes };
 }
 
 /** `--count`: a single number, sent through the data boundary because it is derived from rows. */
@@ -361,7 +368,8 @@ async function runTable(
   // column order goes in so the hoisted `Entity` column comes back at the position the user
   // asked for, in every format (AC-21.2).
   const table = resolveResultTable(res.body, {
-    requestedColumns: plan.requestedColumns, columnLabels: plan.columnLabels, privacy: ctx.privacy,
+    requestedColumns: plan.requestedColumns, columnLabels: plan.columnLabels, idTypes: plan.idTypes,
+    privacy: ctx.privacy,
   });
 
   // Persist BEFORE emitting. A handle we have printed but not stored is exactly the unresolvable
@@ -381,11 +389,6 @@ async function runTable(
   // invites false confidence, which is worse than none.
   const note = disclosure(ctx.privacy, table.pseudonymized);
   if (note !== "") ctx.io.err("\n" + note);
-
-  // Total is reported distinctly from rows returned, so a page is never mistaken for all (AC-21.5).
-  if (ctx.format === "table" && table.totalElements !== undefined && table.totalElements > table.rows.length) {
-    ctx.io.err(`\n${table.rows.length} of ${table.totalElements} rows visible to you (use --top, --page, or --all)\n`);
-  }
   return ExitCode.Ok;
 }
 

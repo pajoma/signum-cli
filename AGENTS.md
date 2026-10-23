@@ -11,7 +11,7 @@ It is **not** a scaffolding or code-generation tool. That job already belongs to
 `Signum.Upgrade` (source-code migration engine, 223 scripts) and `Signum/CodeGeneration/`.
 Do not rebuild those here.
 
-**Status: m1 (read-only core) implemented, released as `v0.2.0`** after the pre-releases `v0.1.0-b.1`…`b.5`. Commands:
+**Status: m1 (read-only core) implemented, released as `v0.2.1`**, a patch of the first full release `v0.2.0`, which followed the pre-releases `v0.1.0-b.1`…`b.5`. Commands:
 `auth`, `types`, `queries`, `operations`, `explain`, `query`, `get`, `unmask`, `cache`, `instance`, `version`.
 No writes yet (m2). Entry point `src/cli.ts` dispatches to `src/commands/`; shared logic lives in
 `src/core/` — HTTP and the `X-ApiKey`/`New_Token` handling (`http.ts`), stored credentials

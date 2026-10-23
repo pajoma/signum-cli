@@ -14,6 +14,8 @@ import {
   disclosure, HANDLE_PREFIX, isIdentityValue, parseMode, pseudonymizeDocument, sensitivity,
   resolvePolicy, surrogate,
 } from "../src/core/privacy.ts";
+import { resolveResultTable } from "../src/core/resulttable.ts";
+import { idColumnTypes, type QueryTokenInfo } from "../src/core/tokens.ts";
 import { UsageError } from "../src/core/errors.ts";
 import { JsonNumber, parseLossless } from "../src/core/json.ts";
 
@@ -49,6 +51,8 @@ describe("mode resolution — the policy is not the caller's to weaken (AC-52.10
     const p = policy({ requested: "off", acknowledged: true, warn: (l) => warnings.push(l) });
     expect(p.mode).toBe("off");
     expect(warnings.join()).toContain("loosened");
+    // ...and names the narrow alternative, so `off` is not the only way anyone finds (#152).
+    expect(warnings.join()).toContain(`list them under "allow" in privacy.json`);
   });
 
   it("a human at a terminal may loosen freely — there is nothing to protect them from", () => {
@@ -339,6 +343,78 @@ describe("entity documents protect nested identities (the get leak)", () => {
 });
 
 /**
+ * Reading some members and nothing else (#152). `strict` with an allowlist is that: the allowed
+ * members are shown, everything else is masked. `get` walked INTO an allowed member and re-judged its
+ * parts, so under `strict` an allowed reference kept its id and lost its display text, while `query`
+ * and `explain --privacy` showed it.
+ *
+ * The first fix emitted an allowed member whole, which was a leak of its own (security review of
+ * #156): a `get` document can carry a referenced entity in full, so allowing `Customer` showed the
+ * customer's email, phone and nested references. An allowed value now shows what `query` would show
+ * for an allowed column — identity and display text — and whatever it contains is judged on its own.
+ */
+describe("an allowlisted member shows what query would show, and no more (#152)", () => {
+  const COLUMN = { EntityType: "BoardColumn", id: 3, model: "In Progress" };
+  const LABELS = [{ EntityType: "Label", id: 1, model: "urgent" }];
+  const TASK = { Type: "Task", id: 7, toStr: "Fix the boiler", ticks: "1", title: "Fix the boiler", column: COLUMN, labels: LABELS };
+
+  it("shows an allowed reference and list with their display text, and masks the rest", () => {
+    writeFileSync(join(dir, "privacy.json"), JSON.stringify({ mode: "strict", allow: ["Column", "Labels"] }));
+    const doc = pseudonymizeDocument(structuredClone(TASK), policy()).value as Record<string, unknown>;
+    expect(doc["column"]).toEqual(COLUMN);
+    expect(doc["labels"]).toEqual(LABELS);
+    expect(doc["title"]).not.toBe("Fix the boiler");
+    expect(doc["toStr"]).not.toBe("Fix the boiler");
+    expect(String(doc["id"])).toStartWith(HANDLE_PREFIX);
+  });
+
+  it("emits an allowed member exactly as the query path emits an allowed column", () => {
+    writeFileSync(join(dir, "privacy.json"), JSON.stringify({ mode: "strict", allow: ["Column"] }));
+    const p = policy();
+    const table = resolveResultTable(
+      { columns: ["Column"], rows: [{ entity: { EntityType: "Task", id: 7 }, columns: [COLUMN] }] },
+      { requestedColumns: ["Column"], privacy: p },
+    );
+    const doc = pseudonymizeDocument({ Type: "Task", id: 7, column: COLUMN }, p).value as Record<string, unknown>;
+    expect(doc["column"]).toEqual(table.rows[0]?.values[table.columns.indexOf("Column")]);
+  });
+
+  /** What allowing `Customer` must NOT reveal: everything a full record carries beyond its label. */
+  const SECRETS = ["erika@example.invalid", "+49 170 0000000", "Musterstr. 1", "Max Muster"];
+  const CUSTOMER = {
+    Type: "Customer", id: 9, ticks: "1", toStr: "Erika Mustermann",
+    email: "erika@example.invalid", phone: "+49 170 0000000",
+    address: { Type: "AddressEmbedded", toStr: "Musterstr. 1", street: "Musterstr. 1" },
+    accountManager: { EntityType: "Employee", id: 4, model: "Max Muster" },
+  };
+  const shown = (doc: unknown): string => JSON.stringify(doc);
+
+  for (const mode of ["heuristic", "strict"] as const) {
+    it(`shows a referenced entity's display text but judges its members on their own (${mode})`, () => {
+      writeFileSync(join(dir, "privacy.json"), JSON.stringify({ mode, allow: ["Customer"] }));
+      const out = pseudonymizeDocument({ Type: "Order", id: 1, customer: structuredClone(CUSTOMER) }, policy());
+      const customer = (out.value as Record<string, Record<string, unknown>>)["customer"] ?? {};
+      expect(customer["toStr"]).toBe("Erika Mustermann");
+      expect(customer["id"]).toBe(9);
+      for (const secret of SECRETS) expect(shown(out.value)).not.toContain(secret);
+      expect(String(customer["accountManager"])).toStartWith(HANDLE_PREFIX);
+      expect(out.pseudonymized).toContain("email");
+    });
+
+    it(`judges the entity inside a loaded Lite and each MList row's element on their own (${mode})`, () => {
+      writeFileSync(join(dir, "privacy.json"), JSON.stringify({ mode, allow: ["Customer", "Customers"] }));
+      const loaded = { EntityType: "Customer", id: 9, model: "Erika Mustermann", entity: structuredClone(CUSTOMER) };
+      const rows = [{ rowId: 5, element: structuredClone(CUSTOMER) }];
+      const out = pseudonymizeDocument({ Type: "Order", id: 1, customer: loaded, customers: rows }, policy());
+      const doc = out.value as Record<string, unknown>;
+      expect((doc["customer"] as Record<string, unknown>)["model"]).toBe("Erika Mustermann");
+      expect((doc["customers"] as Array<Record<string, unknown>>)[0]?.["rowId"]).toBe(5);
+      for (const secret of SECRETS) expect(shown(doc)).not.toContain(secret);
+    });
+  }
+});
+
+/**
  * `get` reads entities losslessly (#111), so ids arrive as `identifier` JsonNumbers, not numbers. The
  * identity check used to be `typeof id === "number"` — under that, an exact id made a Lite invisible
  * and it was emitted whole, real label included.
@@ -379,5 +455,57 @@ describe("the disclosure names the frequency limit (review finding)", () => {
     const d = disclosure(policy(), ["State"]);
     expect(d).toContain("FEW DISTINCT VALUES");
     expect(d).toContain("counting");
+  });
+});
+
+/**
+ * An entity's id is an identity (#157). A plain number named `Id` matched no heuristic and was no
+ * Lite, so `--column Entity.Id` gave an agent the real database id under the DEFAULT policy, and the
+ * disclosure said nothing was replaced — the other half of a Lite, missed as its label once was (#105).
+ */
+describe("an entity's id is an identity (#157)", () => {
+  it("is recognised by the framework's own key, on the last segment only", () => {
+    for (const name of ["Id", "Entity.Id", "Entity.Customer.Id"]) {
+      expect(sensitivityOf(name, policy())).toMatchObject({ pseudonymize: true, reason: "identity" });
+    }
+    for (const name of ["ExternalId", "Idea", "Entity.Id.Something", "Valid"]) {
+      expect(sensitivityOf(name, policy()).reason).not.toBe("identity");
+    }
+  });
+
+  it("is left alone when a human allowlisted it, as any identity is", () => {
+    writeFileSync(join(dir, "privacy.json"), JSON.stringify({ allow: ["Id"] }));
+    expect(sensitivityOf("Entity.Id", policy())).toMatchObject({ pseudonymize: false, reason: "policy-allow" });
+  });
+
+  it("becomes the record's own handle when its type is known, and is still masked when it is not", () => {
+    const p = policy();
+    const table = resolveResultTable(
+      {
+        columns: ["Entity.Id", "Entity.Customer.Id", "Id"],
+        rows: [{ entity: { EntityType: "Order", id: 7 }, columns: [7, 9, 7] }],
+      },
+      { requestedColumns: ["Entity", "Entity.Id", "Entity.Customer.Id", "Id"], idTypes: { "Entity.Id": "Order", "Entity.Customer.Id": "Customer" }, privacy: p },
+    );
+    const at = (c: string) => table.rows[0]?.values[table.columns.indexOf(c)];
+    expect(at("Entity.Id")).toBe(at("Entity"));
+    expect(String(at("Entity.Customer.Id"))).toStartWith(HANDLE_PREFIX);
+    expect(table.mintedHandles[String(at("Entity.Customer.Id"))]).toBe("Customer;9");
+    expect(typeof at("Id")).toBe("number");
+    expect(at("Id")).not.toBe(7);
+    expect(table.pseudonymized).toEqual(expect.arrayContaining(["Entity.Id", "Entity.Customer.Id", "Id"]));
+  });
+
+  it("takes its type from the property route the server returns", () => {
+    const info = (fullKey: string, propertyRoute?: string): QueryTokenInfo => ({
+      key: fullKey.split(".").pop() ?? fullKey, fullKey, niceName: undefined, toStr: undefined, kind: undefined,
+      type: "number", filterType: "Integer", isGroupable: true, usableInQuery: true, propertyRoute,
+    });
+    expect(idColumnTypes([
+      info("Entity.Customer.Id", "(Customer).Id"),
+      info("Id", "(Order).Id"),
+      info("Entity.Customer.Name", "(Customer).Name"),
+      info("Entity.Owner.Id"),
+    ])).toEqual({ "Entity.Customer.Id": "Customer", Id: "Order" });
   });
 });
