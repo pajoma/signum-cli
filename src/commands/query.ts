@@ -30,7 +30,7 @@ import { opt, optAll, flag } from "../core/ctx.ts";
 import { resolveTarget, type Target } from "../core/target.ts";
 import type { SignumHttp } from "../core/http.ts";
 import { readFileSync } from "node:fs";
-import { countFrom, requestedVariant, runVariant, variantRequest } from "./query-variants.ts";
+import { countFrom, DEFAULT_PAGE, requestedVariant, runVariant, variantRequest } from "./query-variants.ts";
 
 interface OrderSpec { token: string; orderType: "Ascending" | "Descending" }
 
@@ -76,7 +76,8 @@ function parsePagination(ctx: Ctx): unknown {
     // Unbounded must be explicit; the default is always bounded (AC-23.2).
     return { mode: "All" };
   }
-  return { mode: "Firsts", elementsPerPage: 50 };
+  // Bounded, and counted: see DEFAULT_PAGE (#149).
+  return DEFAULT_PAGE;
 }
 
 function readFilterJson(source: string): unknown[] {

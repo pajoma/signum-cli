@@ -3,6 +3,15 @@
 Notable changes to signum-cli. Versions are [SemVer](https://semver.org/), and `package.json` is the
 source of truth: a release tag `v<version>` must match it (see the README's release section).
 
+## Unreleased
+
+### Fixed
+
+- `query` without a paging flag now says when the page is partial (#149). The default page was
+  `Firsts`, for which the server issues no count, so against a live application the "N of M rows
+  visible to you" line from 0.2.1 never appeared, in any format. The default is now `Paginate`
+  page 1 of 50: the same rows, plus the count. `--top` stays `Firsts`, uncounted.
+
 ## 0.2.1 — 2026-10-23
 
 A patch release of the read-only core. Four of the fixes come from using 0.2.0 against a live
