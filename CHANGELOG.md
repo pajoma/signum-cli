@@ -3,7 +3,35 @@
 Notable changes to signum-cli. Versions are [SemVer](https://semver.org/), and `package.json` is the
 source of truth: a release tag `v<version>` must match it (see the README's release section).
 
-## Unreleased
+## 0.3.0 — 2026-11-12
+
+Milestone **m2**: writes, all through operations, and the ergonomics around them — many records at
+once, structured input, profiles, `--explain` everywhere, help that knows the application. The
+write paths were run against a live, non-production Signum application with every change restored
+(`test/operations.live.test.ts`). One breaking change: handles and surrogates are now per target
+application (below).
+
+### Changed
+
+- **Handles and surrogates are now per target application** (#121). The same record has a
+  different `ref_` handle in each application, and a handle minted against one never resolves
+  against another — before, a handle from a test instance resolved against production, to the
+  record with the same id there. So handles and surrogates minted before this change no longer
+  resolve or match for queries and operations; re-run the query to get fresh ones. `unmask` still
+  reads the old store, so documents written with old handles stay readable.
+- **HTTP redirects are refused, not followed.** A 3xx is reported with where it pointed (exit 8).
+  Following one would carry a token sent in a profile's own header to another host, since only
+  `Authorization` is dropped on a cross-origin hop. If an application moved, give its new address.
+
+### Fixed
+
+- `query` without a paging flag now says when the page is partial (#149, in place of PR #161). The
+  default page was `Firsts`, for which the server issues no count, so against a live application
+  the "N of M rows visible to you" line from 0.2.1 never appeared, in any format. The default is now
+  `Paginate` page 1 of 50: the same rows, plus the count. `--top` stays `Firsts`, uncounted.
+- `--dry-run` and an operation's `--help`, for a record named by a `ref_` handle that no longer
+  exists, printed the server's not-found message, which names the real id. They now name the
+  handle, as `get` and a sent operation already did.
 
 ### Added
 
@@ -35,7 +63,62 @@ source of truth: a release tag `v<version>` must match it (see the README's rele
     `--lite`, and one request reports one outcome per record. A partial failure is the new exit
     code 10 and lists which failed and why; all failing is 1. The confirmation names the count, and
     from 10 records (or any delete of several) the count must be typed back. `--dry-run` answers per
-    record. Not yet: property setters over many records (AC-45.4) and `executeLiteWithProgress`.
+    record.
+  - Values over many records (#119, AC-45.4): `--edit Member=value` with several records sets the
+    member on each, and `--setters-json` takes the setter list itself for MList rows and new
+    entities. Only for an operation that saves the entity it is given, and named in the confirmation.
+  - Each record's outcome is shown and logged the moment the server reports it. Ctrl-C stops a batch
+    and reports how far it got; the new exit code 130 means interrupted (AC-45.6).
+  - `--lite` and `--id` read a list of records from `@file` or `-` (stdin), including the rows of
+    `query -o ndjson`, so a query's answer can be piped into the operation that acts on it.
+  - `--progress` runs one record through `executeLiteWithProgress` and shows the server's progress
+    (AC-45.2).
+- **Profiles: several applications, kept apart** (#121). A profile is a target: an instance or a
+  URL, its credential, its metadata cache and its handle store. `signum auth switch <instance>`
+  makes one the default; `--url`/`-i`, then `SIGNUM_URL`/`SIGNUM_INSTANCE`, still come first, and
+  setting both variables is now refused rather than one silently winning. `auth status` lists every
+  profile and marks the active one and the default, and a write's confirmation names the instance
+  beside the URL.
+- **`--explain` on every command that sends a request** (#122), not only `query`, `get` and
+  operations: `auth login` and `auth status`, `version`, the discovery commands, `unmask --labels
+  fetch`. It is enforced in the HTTP client, so a command added later gets it too. Every preview
+  now shows the request's headers, credentials redacted. `--trace` is an alias of `--verbose`.
+- **`get --pack` and `get <Type>`** (#138). `signum get Order 42 --pack` returns the entity with
+  `canExecute`, what this login may do to it, in one call. `signum get Country` lists every record
+  of a master-data type (`--top n`, default 50, or `--all`); a transactional type is refused in
+  favour of `query --entities`, which pages.
+- **Structured input from files and stdin** (#120). `-f <file|@file|->` saves an edited entity
+  document: write it with `signum get Order;42 -o json`, change what you need, and
+  `signum save order -f order.json --yes` applies only what you changed — also to a pseudonymized
+  copy, whose surrogates and handles are recognised and never written back. A document written
+  before the record changed is a conflict (exit 7); one without an id creates a record, so a
+  constructor's output can be piped into the Save that stores it. `--filter-json -` now reads stdin.
+  One reader serves every such flag: UTF-8 whatever the codepage (invalid bytes are refused), a
+  missing file is a usage error naming it, and two flags both reading stdin are refused.
+- **`query --all` pages and streams** (AC-23.3–23.5). It fetched everything in one response; now it
+  asks for a page at a time (1000 rows, `--page-size` to change it) and writes each as it arrives.
+  At a terminal, a result of 10 000 rows or more is confirmed first (`--yes` skips the question).
+  Ctrl-C stops between pages with the output still valid, and exits 130. A result that changes
+  while it is paged is reported, since a row may then be missed or repeated.
+- **Help that knows the application** (AC-61.1–61.3, 61.5). `signum query Order --help` adds the
+  query's default columns, the tokens a filter may name and its ordering; `signum ship order --help`
+  adds what the operation runs on, whether `--edit` applies and whether a constructor's result is
+  saved, and with a record named (`ship order 42 --help`) whether this login may run it there.
+  Both read the cache first, so with a warm cache they work offline; query descriptions are now
+  cached too, and `cache show` and `cache clear` include them. Without an application, help prints
+  as before plus one note saying why it could not describe the subject, and exits 0. `explain
+  <OperationKey>` prints the same description and no longer says operations are m2.
+- **Protected profiles and the token's header** (AC-05.1, AC-05.5). `signum instance add prod <url>
+  --protected` (or `instance set prod --protected`) makes every write against it, at a terminal,
+  ask and wait for `prod` to be typed back, even with `--yes`; without a terminal `--yes` is needed
+  as everywhere. `--auth-header Signum_Authorization` sends the token in the header a Windows-AD
+  application reads it from; `SIGNUM_AUTH_HEADER` does the same without a profile. `instance list`
+  and `auth status` show both.
+- **The browser can hand the token over itself** (AC-12.9). At a terminal, `auth login` prints a
+  one-line snippet to run in the console of the signed-in application; it sends the token to a
+  one-shot listener on 127.0.0.1, so it is never copied by hand. The listener takes it only from
+  that application's origin and at a random path, and closes on the first token. Pasting at the
+  prompt works as before, beside it.
 
 ## 0.2.1 — 2026-10-23
 

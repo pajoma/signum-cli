@@ -10,8 +10,8 @@
  */
 
 import type { Ctx } from "../core/ctx.ts";
-import { ExitCode, NotAuthenticatedError, UsageError } from "../core/errors.ts";
-import { renderResultTable, renderDataDocument, renderDocument } from "../core/output.ts";
+import { CliError, ExitCode, InterruptedError, NotAuthenticatedError, UsageError } from "../core/errors.ts";
+import { renderResultTable, renderDataDocument, renderDocument, streamResultTable } from "../core/output.ts";
 import { resolveResultTable, type RawResultTable } from "../core/resulttable.ts";
 import { loadMetadata, resolveQueryKey } from "../core/metadata.ts";
 import {
@@ -26,11 +26,11 @@ import { persistHandles } from "../core/handles.ts";
 import {
   collectFilterTokens, findFilterValueMismatch, lowerFilterExpressions, parseFilterExpression, type FilterWire,
 } from "../core/filter.ts";
-import { opt, optAll, flag } from "../core/ctx.ts";
+import { flag, interruptible, opt, optAll } from "../core/ctx.ts";
 import { resolveTarget, type Target } from "../core/target.ts";
 import type { SignumHttp } from "../core/http.ts";
-import { readFileSync } from "node:fs";
-import { countFrom, requestedVariant, runVariant, variantRequest } from "./query-variants.ts";
+import { inputReader, type InputReader } from "../core/input.ts";
+import { countFrom, DEFAULT_PAGE, requestedVariant, runVariant, variantRequest } from "./query-variants.ts";
 
 interface OrderSpec { token: string; orderType: "Ascending" | "Descending" }
 
@@ -52,7 +52,8 @@ function parsePagination(ctx: Ctx): unknown {
   // --all), so a user combining them by habit got a page silently discarded. Ambiguous input
   // is now a clear error, matching the project's own rule for aggregate-without-group: silently
   // changing pagination semantics is worse than asking the user to pick one.
-  const modesGiven = [top !== undefined, page !== undefined || pageSize !== undefined, all]
+  // `--page-size` beside `--all` is the size of each page it fetches, not a mode of its own (AC-23.3).
+  const modesGiven = [top !== undefined, page !== undefined || (pageSize !== undefined && !all), all]
     .filter(Boolean).length;
   if (modesGiven > 1) {
     throw new UsageError("choose only one pagination mode: --top, --page/--page-size, or --all", {
@@ -65,7 +66,7 @@ function parsePagination(ctx: Ctx): unknown {
     if (!Number.isInteger(n) || n <= 0) throw new UsageError("--top must be a positive integer");
     return { mode: "Firsts", elementsPerPage: n };
   }
-  if (page !== undefined || pageSize !== undefined) {
+  if (page !== undefined || (pageSize !== undefined && !all)) {
     const size = Number(pageSize ?? 50);
     const current = Number(page ?? 1);
     if (!Number.isInteger(size) || size <= 0) throw new UsageError("--page-size must be a positive integer");
@@ -73,30 +74,21 @@ function parsePagination(ctx: Ctx): unknown {
     return { mode: "Paginate", elementsPerPage: size, currentPage: current };
   }
   if (all) {
-    // Unbounded must be explicit; the default is always bounded (AC-23.2).
-    return { mode: "All" };
+    // Unbounded must be explicit; the default is always bounded (AC-23.2). It is fetched a page at a
+    // time (AC-23.3), so `All` is never what is sent for rows — see `runAllPages`.
+    if (pageSize === undefined) return { mode: "All" };
+    const size = Number(pageSize);
+    if (!Number.isInteger(size) || size <= 0) throw new UsageError("--page-size must be a positive integer");
+    return { mode: "All", elementsPerPage: size };
   }
-  return { mode: "Firsts", elementsPerPage: 50 };
+  // Bounded, and counted: see DEFAULT_PAGE (#149). `--top` stays `Firsts`: the caller asked for n rows.
+  return DEFAULT_PAGE;
 }
 
-function readFilterJson(source: string): unknown[] {
-  if (source === "-") {
-    // stdin needs an async read; readFilterJson is called from synchronous request-building.
-    throw new UsageError("--filter-json - (stdin) is not yet wired for query", {
-      hint: "Pass a file path instead: --filter-json filters.json  (or --filter-json @filters.json)",
-    });
-  }
-
-  const path = source.startsWith("@") ? source.slice(1) : source;
-  let text: string;
-  try {
-    text = readFileSync(path, "utf8");
-  } catch (err) {
-    // A bad path must be a clean usage error, not a raw ENOENT stack (found by testing).
-    throw new UsageError(`could not read --filter-json file '${path}'`, {
-      hint: err instanceof Error ? err.message : String(err),
-    });
-  }
+/** `--filter-json <file|@file|->`: read through the one input reader (#120), so `-` is stdin. */
+async function readFilterJson(source: string, input: InputReader): Promise<unknown[]> {
+  // A bare value is a path, as it always was; a bad one is a clean usage error, never a raw ENOENT.
+  const text = await input.read("filter-json", source, { bare: "path" });
 
   let parsed: unknown;
   try {
@@ -144,9 +136,9 @@ const DATA_KIND = "query results";
  * The inputs that can be checked without a server: filters and pagination. Runs before the privacy
  * gate, so a mistake in the caller's own input is reported even under a detected agent.
  */
-function parseLocalInputs(ctx: Ctx): {
+async function parseLocalInputs(ctx: Ctx): Promise<{
   groupEnabled: boolean; dslFilters: FilterWire[]; jsonFilters: FilterWire[]; pagination: unknown;
-} {
+}> {
   // Parse --filter FIRST, before the privacy gate: a syntax error is not data — it is a
   // diagnostic about the agent's OWN input, which it needs to see to correct itself. Gating
   // it behind "refusing to emit data" would hide a parse error from exactly the caller who
@@ -174,7 +166,7 @@ function parseLocalInputs(ctx: Ctx): {
   // behind the privacy gate. It also has to happen before token validation below, since #97 folds
   // the escape hatch's tokens into the same round trip as the DSL's.
   const filterJsonSource = opt(ctx, "filter-json");
-  const jsonFilters = filterJsonSource !== undefined ? (readFilterJson(filterJsonSource) as FilterWire[]) : [];
+  const jsonFilters = filterJsonSource !== undefined ? (await readFilterJson(filterJsonSource, inputReader(ctx.io)) as FilterWire[]) : [];
 
   // Pagination is validated HERE, beside the filter, because it is equally local: `--top abc` is
   // wrong whatever the server says. It used to be parsed while building the request, so an invalid
@@ -302,7 +294,7 @@ async function planColumns(
     // --group is excluded: a grouped query's columns are the grouping keys plus aggregates, which
     // only the caller can choose. Defaulting them would invent a query nobody asked for.
     try {
-      const defaults = await fetchDefaultColumns(http, queryKey);
+      const defaults = await fetchDefaultColumns(http, queryKey, ctx.io.env);
       idTypes = idColumnTypes(defaults);
       // The description already carries each column's filterType, so --resolve is free here.
       if (resolveLites) {
@@ -392,6 +384,95 @@ async function runTable(
   return ExitCode.Ok;
 }
 
+/** Rows per request when `--all` pages (AC-23.3); `--page-size` changes it. */
+export const ALL_PAGE_SIZE = 1000;
+/** From this many rows on, `--all` asks a person at a terminal before transferring them (AC-23.4). */
+export const LARGE_RESULT = 10_000;
+
+/** `--all` as it is sent: the given page of `Paginate`, which the server orders by key, so pages are stable. */
+function allPage(request: Record<string, unknown>, size: number, page: number): Record<string, unknown> {
+  return { ...request, pagination: { mode: "Paginate", elementsPerPage: size, currentPage: page } };
+}
+
+/**
+ * `--all` (AC-23.3–23.5): page until the rows run out, writing each page as it arrives. The first
+ * page carries the total, so a large result is confirmed before the rest is transferred, and a page
+ * already written is never taken back: an interrupt stops between pages and closes the output, so
+ * what reached stdout parses. `Paginate` costs the server a count per page; that is the price of a
+ * result no single response has to hold.
+ */
+async function runAllPages(
+  ctx: Ctx,
+  target: Target,
+  queryKey: string,
+  request: Record<string, unknown>,
+  plan: ColumnPlan,
+  size: number,
+): Promise<ExitCode> {
+  const stream = streamResultTable({
+    format: ctx.format, write: ctx.openData(DATA_KIND), warn: (line) => ctx.io.err(line + "\n"), color: ctx.color,
+  });
+  const pseudonymized = new Set<string>();
+  let shown = 0;
+  let total: number | undefined;
+  let changed = false;
+
+  const finished = await interruptible(ctx, async (signal) => {
+    try {
+      for (let page = 1; ; page++) {
+        const res = await target.http.request<RawResultTable>({
+          method: "POST",
+          path: `api/query/executeQuery/${encodeURIComponent(queryKey)}`,
+          body: allPage(request, size, page),
+          lossless: true, // see runTable
+          signal,
+        });
+        const table = resolveResultTable(res.body, {
+          requestedColumns: plan.requestedColumns, columnLabels: plan.columnLabels, idTypes: plan.idTypes,
+          privacy: ctx.privacy,
+        });
+        if (page === 1) {
+          total = table.totalElements;
+          await confirmLargeResult(ctx, total, size);
+        } else if (table.totalElements !== total) {
+          changed = true;
+        }
+        persistHandles(ctx, table.mintedHandleDetails); // before emitting, as in runTable
+        stream.push(table);
+        shown += table.rows.length;
+        for (const t of table.pseudonymized) pseudonymized.add(t);
+        if (table.rows.length < size || (table.totalElements !== undefined && shown >= table.totalElements)) return true;
+        if (signal.aborted) return false;
+      }
+    } catch (err) {
+      if (err instanceof InterruptedError) return false;
+      throw err;
+    }
+  });
+  stream.end();
+
+  const note = disclosure(ctx.privacy, [...pseudonymized]);
+  if (note !== "") ctx.io.err("\n" + note);
+  // Rows added or removed between pages shift the ones after them, so one may be missed or repeated.
+  if (changed) ctx.io.err("\nwarning: the result changed while it was paged; a row may be missing or repeated\n");
+  if (finished) return ExitCode.Ok;
+  ctx.io.err(`\ninterrupted after ${shown} row${shown === 1 ? "" : "s"}; what was written is complete and valid\n`);
+  return ExitCode.Interrupted;
+}
+
+/** AC-23.4: a person at a terminal is told how much is coming, and may stop it. A script asked for it. */
+async function confirmLargeResult(ctx: Ctx, total: number | undefined, size: number): Promise<void> {
+  if (total === undefined || total < LARGE_RESULT || flag(ctx, "yes") || flag(ctx, "y")) return;
+  if (!ctx.io.stdoutIsTty || ctx.io.prompt === undefined) return;
+  const pages = Math.ceil(total / size);
+  const answer = await ctx.io.prompt(`--all will fetch ${total} rows in ${pages} request${pages === 1 ? "" : "s"}. Continue? [y/N] `);
+  if (!/^y(es)?$/i.test(answer.trim())) {
+    throw new CliError("not confirmed; nothing was printed", ExitCode.Usage, {
+      hint: "Narrow it with --filter, take a part with --top, or count it first with --count.",
+    });
+  }
+}
+
 export async function runQuery(ctx: Ctx): Promise<ExitCode> {
   const queryKey = ctx.args.positionals[0];
   if (queryKey === undefined) {
@@ -401,7 +482,7 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
   }
 
   // Local diagnostics FIRST, before the privacy gate — see parseLocalInputs.
-  const { groupEnabled, dslFilters, jsonFilters, pagination } = parseLocalInputs(ctx);
+  const { groupEnabled, dslFilters, jsonFilters, pagination } = await parseLocalInputs(ctx);
   const variant = requestedVariant(ctx); // REQ-024: --lites / --entities, also local
   const variantCount = variant !== undefined ? countFrom(pagination) : null;
 
@@ -441,7 +522,7 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
   // read above, before the gate.
   // AC-53.2 again, for filter values: resolve handles locally before the request is built, so a
   // `ref:` never crosses the wire.
-  const handles = loadHandles(ctx.io.env);
+  const handles = loadHandles(ctx.io.env, ctx.target);
   const filters: FilterWire[] = resolveHandlesInFilters([...dslFilters, ...jsonFilters], handles);
 
   const request: Record<string, unknown> = variant !== undefined
@@ -458,15 +539,30 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
 
   // --explain prints the request and sends nothing (AC-20.6).
   if (ctx.args.flags.explain) {
+    // Described by the client, so it shows what any request shows: headers, credentials redacted.
+    const paged = pagesAll(request, variant, wantCount);
     renderDocument(
-      { method: "POST", url: `${target.url}/api/query/${variant ?? (wantCount ? "queryValue" : "executeQuery")}/${queryKey}`, body: request },
+      target.http.describe({
+        method: "POST", path: `api/query/${variant ?? (wantCount ? "queryValue" : "executeQuery")}/${queryKey}`,
+        body: paged !== undefined ? allPage(request, paged, 1) : request,
+      }),
       { format: ctx.format === "table" ? "json" : ctx.format, write: ctx.io.out },
     );
+    if (paged !== undefined) ctx.io.err(`note: --all sends this once per page of ${paged}, currentPage 1, 2, … until the rows run out.\n`);
     return ExitCode.Ok;
   }
 
   if (variant !== undefined) return await runVariant(ctx, target, variant, request, () => ctx.openData(DATA_KIND));
-  return wantCount
-    ? await runCount(ctx, target, queryKey, request)
+  if (wantCount) return await runCount(ctx, target, queryKey, request);
+  const paged = pagesAll(request, variant, wantCount);
+  return paged !== undefined
+    ? await runAllPages(ctx, target, queryKey, request, plan, paged)
     : await runTable(ctx, target, queryKey, request, plan);
+}
+
+/** The page size when this request is rows under `--all`, which are fetched page by page; else undefined. */
+function pagesAll(request: Record<string, unknown>, variant: string | undefined, wantCount: boolean): number | undefined {
+  const p = request["pagination"] as { mode?: string; elementsPerPage?: number } | undefined;
+  if (variant !== undefined || wantCount || p?.mode !== "All") return undefined;
+  return p.elementsPerPage ?? ALL_PAGE_SIZE;
 }

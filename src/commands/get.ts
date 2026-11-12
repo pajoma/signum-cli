@@ -1,10 +1,11 @@
 /**
- * `signum get <Type> <id>` · `signum get <Lite>`
+ * `signum get <Type> <id>` · `signum get <Lite>` · `--pack` · `signum get <Type>` (every record)
  *
- * STORY-30 (retrieve), STORY-51 (agent data gate).
+ * STORY-30 (retrieve), STORY-51 (agent data gate). `--pack` and the listing are REQ-030's m2 half (#138).
  */
 
 import type { Ctx } from "../core/ctx.ts";
+import { opt } from "../core/ctx.ts";
 import { ExitCode, NotFoundError, UsageError } from "../core/errors.ts";
 import { renderDataDocument, renderDocument } from "../core/output.ts";
 import { findType, isEntityTypeInfo, loadMetadata, unknownTypeError } from "../core/metadata.ts";
@@ -16,7 +17,10 @@ import { loadHandles } from "../core/handles.ts";
 import { parseLiteKey } from "../core/text.ts";
 import { disclosure, pseudonymizeDocument } from "../core/privacy.ts";
 import { isHandle, resolveHandle } from "../core/reidentify.ts";
-import { entityPath, fetchEntity } from "../core/entity.ts";
+import { asEntity, entityPath, fetchEntity } from "../core/entity.ts";
+import type { TypeInfo } from "../core/metadata.ts";
+import type { Target } from "../core/target.ts";
+import { pseudonymizeEntities } from "./query-variants.ts";
 
 export async function runGet(ctx: Ctx): Promise<ExitCode> {
   const first = ctx.args.positionals[0];
@@ -35,21 +39,24 @@ export async function runGet(ctx: Ctx): Promise<ExitCode> {
   // itself must never reach the server, and an unresolvable one must fail here rather than be
   // forwarded as a literal string that might 404 confusingly or, worse, match something (AC-53.5).
   const viaHandle = isHandle(first);
-  const subject = viaHandle ? resolveHandle(first, loadHandles(ctx.io.env)) : first;
+  const subject = viaHandle ? resolveHandle(first, loadHandles(ctx.io.env, ctx.target)) : first;
 
   const lite = parseLiteKey(subject);
   const typeName = lite?.type ?? subject;
   const id = lite?.id ?? second;
 
-  if (id === undefined) {
-    // `signum get <Type>` with no id is a bounded listing — m2 (fetchAll).
-    throw new UsageError(`no id given for '${typeName}'`, {
-      hint:
-        "signum get Order 42\n" +
-        "Listing all entities of a type (`signum get Order`) is m2.\n" +
-        "For now use `signum query " + typeName + " --top 20`.",
-    });
+  // What each form takes, checked before anything is read: a mistake in the caller's own flags is
+  // not data, and is reported whoever the caller is.
+  const pack = flag(ctx, "pack");
+  const listing = id === undefined;
+  if (pack && flag(ctx, "exists")) throw new UsageError("choose one of --pack and --exists");
+  if (listing && (pack || flag(ctx, "exists"))) {
+    throw new UsageError(`--${pack ? "pack" : "exists"} is about one record; name it`, { hint: `signum get ${typeName} <id> --${pack ? "pack" : "exists"}` });
   }
+  if (!listing && (opt(ctx, "top") !== undefined || flag(ctx, "all"))) {
+    throw new UsageError("--top and --all bound a listing; with an id there is one record", { hint: `signum get ${typeName} --top 20` });
+  }
+  const bound = listing ? listingBound(ctx) : undefined;
 
   // Unconditional gate first — see the note in query.ts. The render paths open their own
   // writer; this call exists so a refusal costs no network round trip.
@@ -84,22 +91,26 @@ export async function runGet(ctx: Ctx): Promise<ExitCode> {
 
   // The server addresses entities by clean name (`RoleEntity` → `Role`) (AC-30.4).
   const cleanName = type.name.replace(/Entity$/, "");
-  const existsOnly = flag(ctx, "exists");
-  const pathFor = (key: string): string => existsOnly
-    ? `api/exists/${encodeURIComponent(cleanName)}/${encodeURIComponent(key)}`
-    : entityPath(cleanName, key);
-  const path = pathFor(id);
-
   if (flag(ctx, "as-command")) {
     emitCommandEcho(ctx); // REQ-078 — see the note in query.ts
     return ExitCode.Ok;
   }
+  // Under --explain the listing's one request is shown by the client, like any other (#122).
+  if (id === undefined) return await fetchAll(ctx, target, type, cleanName, bound as number | null);
+  const existsOnly = flag(ctx, "exists");
+  // `entityPack`, not `entityPackLight`: the light one empties `canExecute` (`EntityController.cs:26-45`),
+  // which is the whole point of asking for a pack.
+  const pathFor = (key: string): string => existsOnly
+    ? `api/exists/${encodeURIComponent(cleanName)}/${encodeURIComponent(key)}`
+    : pack ? `api/entityPack/${encodeURIComponent(cleanName)}/${encodeURIComponent(key)}`
+    : entityPath(cleanName, key);
+  const path = pathFor(id);
 
   if (ctx.args.flags.explain) {
     // Behind a handle the path would spell out the real id, so show the handle in its place. Built,
     // not substituted: a pattern made from the id misses when the id holds a regex character.
     const shown = viaHandle ? pathFor(first) : path;
-    renderDocument({ method: "GET", url: `${target.url}/${shown}`, ...(viaHandle ? { id: "resolved locally from the handle" } : {}) },
+    renderDocument({ ...target.http.describe({ method: "GET", path: shown }), ...(viaHandle ? { id: "resolved locally from the handle" } : {}) },
       { format: ctx.format === "table" ? "json" : ctx.format, write: ctx.io.out });
     return ExitCode.Ok;
   }
@@ -119,11 +130,13 @@ export async function runGet(ctx: Ctx): Promise<ExitCode> {
     return present ? ExitCode.Ok : ExitCode.NotFound;
   }
 
-  const body = await fetchEntity(target.http, cleanName, id).catch((err: unknown) => {
-    // A not-found names the id it looked up; behind a handle that is the identity being protected.
+  // A not-found names the id it looked up; behind a handle that is the identity being protected.
+  const hideId = (err: unknown): never => {
     if (viaHandle && err instanceof NotFoundError) throw new NotFoundError(`${first} not found`, err.hint !== undefined ? { hint: err.hint } : {});
     throw err;
-  });
+  };
+  if (pack) return await renderPack(ctx, target, path, dataKind, hideId);
+  const body = await fetchEntity(target.http, cleanName, id).catch(hideId);
 
   // An entity is a document, not a table, so it renders as JSON in every format — and it is
   // pseudonymized by member name rather than by column (REQ-057). Without this the m2 gate change
@@ -136,5 +149,74 @@ export async function runGet(ctx: Ctx): Promise<ExitCode> {
   });
   const note = disclosure(ctx.privacy, pseudonymized);
   if (note !== "") ctx.io.err("\n" + note);
+  return ExitCode.Ok;
+}
+
+/**
+ * `--pack` (AC-30.3): the entity and, beside it, what this login may do to it — `canExecute`, one
+ * operation key to null (permitted) or the reason it is not. A key ABSENT was withheld for this
+ * login, never "no such operation" (AC-08.5, `OperationLogic.cs:456`); `--dry-run` reads the same
+ * map. The entity is pseudonymized as `get` does it. Anything an application adds to its packs
+ * (`EntityPackTS.extension`, written as extra members) is data of the application's choosing, so it
+ * is judged like the entity's members rather than passed through.
+ */
+async function renderPack(ctx: Ctx, target: Target, path: string, dataKind: string, hideId: (err: unknown) => never): Promise<ExitCode> {
+  const res = await target.http.request<unknown>({ method: "GET", path, lossless: true }).catch(hideId);
+  const { entity: rawEntity, canExecute, ...extension } = (res.body ?? {}) as Record<string, unknown>;
+  const entity = pseudonymizeDocument(asEntity(rawEntity), ctx.privacy);
+  const extra = Object.keys(extension).length > 0 ? pseudonymizeDocument(extension, ctx.privacy) : undefined;
+  persistHandles(ctx, { ...entity.handleDetails, ...(extra?.handleDetails ?? {}) }); // before emitting
+  renderDataDocument({ entity: entity.value, canExecute: canExecute ?? {}, ...((extra?.value as Record<string, unknown> | undefined) ?? {}) }, {
+    format: ctx.format === "table" ? "json" : ctx.format,
+    write: ctx.openData(dataKind),
+  });
+  const note = disclosure(ctx.privacy, [...entity.pseudonymized, ...(extra?.pseudonymized ?? [])]);
+  if (note !== "") ctx.io.err("\n" + note);
+  if (ctx.format === "table") {
+    ctx.io.err("\nA key absent from canExecute was withheld for this login; it does not mean the operation does not exist.\n");
+  }
+  return ExitCode.Ok;
+}
+
+/** `--top n` (default 50) or `--all`: the same bound `query` takes (AC-23.2). Null is unbounded. */
+function listingBound(ctx: Ctx): number | null {
+  const top = opt(ctx, "top");
+  if (top !== undefined && flag(ctx, "all")) throw new UsageError("choose one of --top and --all");
+  if (flag(ctx, "all")) return null;
+  if (top === undefined) return 50;
+  const n = Number(top);
+  if (!Number.isInteger(n) || n <= 0) throw new UsageError("--top must be a positive integer");
+  return n;
+}
+
+/**
+ * `signum get <Type>`: every record of a master-data type, through `api/fetchAll` (AC-30.5). The
+ * server returns all of them — the endpoint has no paging — and refuses a Transactional type
+ * (`EntityController.cs:77-89`), so that is refused here first, pointing at the query that pages.
+ * The bound limits what is SHOWN; what was not is counted on stderr. Each entity is a document,
+ * pseudonymized on its own, as `query --entities` returns them.
+ */
+async function fetchAll(ctx: Ctx, target: Target, type: TypeInfo, cleanName: string, bound: number | null): Promise<ExitCode> {
+  if (type.entityData === "Transactional") {
+    throw new UsageError(`${type.name} is transactional data, which the server does not list whole`, {
+      hint: `List it a page at a time: signum query ${type.name} --entities --top 20`,
+    });
+  }
+  const res = await target.http.request<unknown>({ method: "GET", path: `api/fetchAll/${encodeURIComponent(cleanName)}`, lossless: true });
+  const all = (Array.isArray(res.body) ? res.body : []).map((e) => asEntity(e));
+  const shown = bound === null ? all : all.slice(0, bound);
+  const { values, pseudonymized, handleDetails } = pseudonymizeEntities(ctx, shown);
+  persistHandles(ctx, handleDetails); // before emitting
+  const out = ctx.openData("entity data");
+  if (ctx.format === "ndjson") for (const v of values) renderDataDocument(v, { format: "ndjson", write: out });
+  else renderDataDocument(values, { format: "json", write: out });
+  const note = disclosure(ctx.privacy, pseudonymized);
+  if (note !== "") ctx.io.err("\n" + note);
+  if (shown.length < all.length) {
+    // The total is an aggregate over the records (AC-51.3), so a pseudonymized run is not told it.
+    ctx.io.err(ctx.privacy.mode === "off"
+      ? `\n${shown.length} of ${all.length} shown (--top ${bound}); --all shows every one\n`
+      : `\n${shown.length} shown (--top ${bound}); there are more, and --all shows every one\n`);
+  }
   return ExitCode.Ok;
 }

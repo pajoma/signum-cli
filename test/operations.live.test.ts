@@ -23,7 +23,7 @@
  */
 
 import { afterAll, describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { run } from "../src/cli.ts";
@@ -60,7 +60,7 @@ const http = live === undefined ? undefined : new SignumHttp({ baseUrl: live.url
 interface Result { code: ExitCode; out: string; err: string }
 
 /** One command, non-interactively, as a script would run it. Output stays in memory. */
-async function cli(argv: string[]): Promise<Result> {
+async function cli(argv: string[], o: { stdin?: string } = {}): Promise<Result> {
   let out = "", err = "";
   const io: Io = {
     out: (s) => { out += s; },
@@ -69,7 +69,7 @@ async function cli(argv: string[]): Promise<Result> {
     stdinIsTty: false,
     // An isolated profile, and an explicit human context: the run is a script, not an agent.
     env: { SIGNUM_CONFIG_DIR: configDir, SIGNUM_URL: live?.url ?? "", SIGNUM_TOKEN: live?.token ?? "", SIGNUM_CALLER_CONTEXT: "automated" } as NodeJS.ProcessEnv,
-    readStdin: async () => "",
+    readStdin: async () => o.stdin ?? "",
   };
   try {
     return { code: await run(argv, io), out, err };
@@ -147,6 +147,39 @@ describe.skipIf(!writes)("live writes (#114, #117)", () => {
     // Each write was recorded with its real target and outcome (AC-46.6).
     const log = readFileSync(auditLogPath({ SIGNUM_CONFIG_DIR: configDir } as NodeJS.ProcessEnv), "utf8");
     expect(log).toContain(`"target":"${entity?.type.replace(/Entity$/, "")};${entity?.id}"`);
+  });
+
+  it("-f applies one change from a pseudonymized copy, and nothing else, then restores (#120, AC-32.5)", async () => {
+    const before = await read(entity as { type: string; id: string });
+    const k = wireKey(before as Record<string, unknown>, member as string);
+    const original = (before as Record<string, unknown>)[k];
+    if (!editable(original)) throw new Error(`${member} is not a text value this test can restore`);
+    // The copy a caller edits: pseudonymized, so every value it leaves alone is a surrogate or handle.
+    const got = await cli(["get", key, "-o", "json", "--pseudonymize", "heuristic"]);
+    expect(got.code).toBe(ExitCode.Ok);
+    const doc = JSON.parse(got.out) as Record<string, unknown>;
+    const file = join(configDir, "live-document.json");
+    writeFileSync(file, JSON.stringify(doc));
+
+    const unchanged = await cli([save as string, "-f", file, "--yes", "--pseudonymize", "heuristic"]);
+    expect(unchanged.code).toBe(ExitCode.Usage);
+    expect(unchanged.err).toContain("changes nothing");
+
+    doc[k] = `${original} (signum live -f)`;
+    writeFileSync(file, JSON.stringify(doc));
+    try {
+      const r = await cli([save as string, "-f", file, "--yes", "--pseudonymize", "heuristic"]);
+      expect(r.code).toBe(ExitCode.Ok);
+      const after = await read(entity as { type: string; id: string }) as Record<string, unknown>;
+      expect(after[k]).toBe(`${original} (signum live -f)`);
+      // Only that member changed: none of the copy's surrogates reached the record. `toStr` is the
+      // server's own, derived from the data, so it may follow the change.
+      expect(withoutTicks({ ...after, [k]: original, toStr: before.toStr } as EntityJson)).toBe(withoutTicks(before));
+    } finally {
+      const restore = await cli([save as string, "--lite", key, "--edit", `${member}=${original}`, "--yes"]);
+      expect(restore.code).toBe(ExitCode.Ok);
+    }
+    expect(withoutTicks(await read(entity as { type: string; id: string }))).toBe(withoutTicks(before));
   });
 
   it("an empty required value is refused as a validation error, exit 6 (AC-40.6)", async () => {
@@ -259,6 +292,49 @@ describe.skipIf(!createWrites)("live create and delete (#118)", () => {
       const r = await cli([createDelete as string, ...ids.flatMap((id) => ["--lite", `${type};${id}`]), "--yes", "-o", "json"]);
       expect(r.code).toBe(ExitCode.Ok);
       const clean = type.replace(/Entity$/, "");
+      expect(JSON.parse(r.out)).toEqual(ids.map((id) => ({ target: `${clean};${id}`, ok: true })));
+      ids.length = 0;
+    } finally {
+      for (const id of ids) await cli([createDelete as string, "--lite", `${type};${id}`, "--yes"]);
+    }
+  });
+
+  it("sets a value on two records in one bulk request, by setter, and both are saved (AC-45.4)", async () => {
+    const type = createType as string;
+    const ids: string[] = [];
+    try {
+      for (const n of [1, 2]) {
+        const made = await cli([createSave as string, "--edit", `${createMember}=signum live setter ${n} ${new Date().toISOString()}`, "--yes", "-o", "json"]);
+        expect(made.code).toBe(ExitCode.Ok);
+        ids.push(String((JSON.parse(made.out) as { entity: { id: unknown } }).entity.id));
+      }
+      // The member as a person writes it, lower-cased: the setter must reach the server as reflection
+      // spells it, or `PropertyRoute.GetMember` refuses it.
+      const label = `signum live set ${new Date().toISOString()}`;
+      const set = await cli([createSave as string, ...ids.flatMap((id) => ["--lite", `${type};${id}`]),
+        "--edit", `${(createMember as string).toLowerCase()}=${label}`, "--yes", "-o", "json"]);
+      expect(set.code).toBe(ExitCode.Ok);
+      for (const id of ids) {
+        const fetched = await read({ type, id }) as Record<string, unknown>;
+        expect(fetched[wireKey(fetched, createMember as string)]).toBe(label);
+      }
+    } finally {
+      for (const id of ids) await cli([createDelete as string, "--lite", `${type};${id}`, "--yes"]);
+    }
+  });
+
+  it("reads the records to act on from stdin, as a query's rows (#119, #120)", async () => {
+    const type = createType as string;
+    const ids: string[] = [];
+    try {
+      for (const n of [1, 2]) {
+        const made = await cli([createSave as string, "--edit", `${createMember}=signum live stdin ${n} ${new Date().toISOString()}`, "--yes", "-o", "json"]);
+        ids.push(String((JSON.parse(made.out) as { entity: { id: unknown } }).entity.id));
+      }
+      const clean = type.replace(/Entity$/, "");
+      const rows = ids.map((id) => JSON.stringify({ Entity: `${clean};${id}` })).join("\n");
+      const r = await cli([createDelete as string, "--lite", "-", "--yes", "-o", "json"], { stdin: rows });
+      expect(r.code).toBe(ExitCode.Ok);
       expect(JSON.parse(r.out)).toEqual(ids.map((id) => ({ target: `${clean};${id}`, ok: true })));
       ids.length = 0;
     } finally {

@@ -1,5 +1,5 @@
 /**
- * The on-disk reflection metadata cache (REQ-010).
+ * The on-disk metadata cache (REQ-010): reflection documents, and the query descriptions help reads.
  */
 
 import {
@@ -29,13 +29,62 @@ interface CacheEnvelope {
  * from poisoning `signum query` after it.
  */
 function cachePath(url: string, authenticated: boolean, env?: NodeJS.ProcessEnv): string {
-  // Filename-safe digest of the NORMALIZED URL, so the cache key agrees with credential
-  // matching (M2) — otherwise `app/` and `app` would keep separate caches.
+  const scope = authenticated ? "auth" : "anon";
+  return join(configDir(env), "cache", `reflection-${targetDigest(url)}-${scope}.json`);
+}
+
+/**
+ * Filename-safe digest of the NORMALIZED URL, so the cache key agrees with credential matching
+ * (M2) — otherwise `app/` and `app` would keep separate caches.
+ */
+function targetDigest(url: string): string {
   const key = normalizeUrl(url);
   let hash = 0;
   for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) | 0;
-  const scope = authenticated ? "auth" : "anon";
-  return join(configDir(env), "cache", `reflection-${(hash >>> 0).toString(16)}-${scope}.json`);
+  return (hash >>> 0).toString(16);
+}
+
+// ── query descriptions (AC-61.3) ────────────────────────────────────────────
+
+/**
+ * `api/query/description/{key}`, one file per target holding every query described so far. Help
+ * reads it so `signum query <key> --help` works offline once the query has run. It needs a
+ * credential, so there is no anonymous half; every live fetch rewrites the entry, which is how it
+ * stays current without a revalidation request of its own.
+ */
+interface DescriptionStore {
+  url: string;
+  queries: Record<string, { fetchedAt: string; payload: unknown }>;
+}
+
+function descriptionsPath(url: string, env?: NodeJS.ProcessEnv): string {
+  return join(configDir(env), "cache", `descriptions-${targetDigest(url)}.json`);
+}
+
+function loadDescriptionStore(url: string, env?: NodeJS.ProcessEnv): DescriptionStore | undefined {
+  const path = descriptionsPath(url, env);
+  if (!existsSync(path)) return undefined;
+  try {
+    const store = JSON.parse(readFileSync(path, "utf8")) as DescriptionStore;
+    return normalizeUrl(store.url) === normalizeUrl(url) && typeof store.queries === "object" ? store : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function loadQueryDescription(url: string, queryKey: string, env?: NodeJS.ProcessEnv): { payload: unknown; fetchedAt: string } | undefined {
+  return loadDescriptionStore(url, env)?.queries[queryKey.toLowerCase()];
+}
+
+export function saveQueryDescription(url: string, queryKey: string, payload: unknown, env?: NodeJS.ProcessEnv): void {
+  const store = loadDescriptionStore(url, env) ?? { url, queries: {} };
+  store.queries[queryKey.toLowerCase()] = { fetchedAt: new Date().toISOString(), payload };
+  writePrivate(descriptionsPath(url, env), JSON.stringify(store));
+}
+
+/** How many query descriptions are cached for a target, for `cache show`. */
+export function countQueryDescriptions(url: string, env?: NodeJS.ProcessEnv): number {
+  return Object.keys(loadDescriptionStore(url, env)?.queries ?? {}).length;
 }
 
 export function loadMetadataCache(
@@ -142,6 +191,13 @@ export function clearMetadataCache(url: string | undefined, env?: NodeJS.Process
     if (wanted !== undefined && normalizeUrl(entry.url) !== wanted) continue;
     rmSync(entry.path, { force: true });
     removed.push(entry);
+  }
+  // A target's query descriptions go with its reflection documents: both describe the same schema.
+  if (url !== undefined) rmSync(descriptionsPath(url, env), { force: true });
+  else if (existsSync(cacheDir(env))) {
+    for (const name of readdirSync(cacheDir(env))) {
+      if (name.startsWith("descriptions-") && name.endsWith(".json")) rmSync(join(cacheDir(env), name), { force: true });
+    }
   }
   return removed;
 }

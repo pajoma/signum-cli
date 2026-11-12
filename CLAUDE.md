@@ -5,8 +5,8 @@ See [`AGENTS.md`](AGENTS.md) for all shared agent context, hard rules, and conve
 Quick orientation:
 
 - **What this is:** a CLI that talks to running Signum Framework apps over HTTP.
-- **Status:** m1 (read-only core) implemented and released as `v0.2.1` (patch of `v0.2.0`, after pre-releases `v0.1.0-b.*`); no writes
-  yet. Requirements: [`docs/requirements.md`](docs/requirements.md), tracked as GitHub issues
+- **Status:** m2 — writes, all through operations — released as `v0.3.0`; m1 (read-only core) was
+  `v0.2.0`/`v0.2.1`. m3 (MCP, further auth mechanisms) is next. Requirements: [`docs/requirements.md`](docs/requirements.md), tracked as GitHub issues
   labelled `requirement`.
 - **Run it:** `npm ci` (installs the pinned Bun), then `./node_modules/.bin/bun src/cli.ts help` and
   `./node_modules/.bin/bun test`.

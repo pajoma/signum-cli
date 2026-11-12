@@ -174,12 +174,13 @@ Traces to: REQ-001 · Priority: `m2`
 that I can target the right app deliberately and never fire a write at production by accident.
 
 **Acceptance Criteria:**
-- AC-05.1: Named profiles each store a base URL, auth mechanism, credential reference, and optional header-name override.
+- AC-05.1: Named profiles each store a base URL, auth mechanism, credential reference, and optional header-name override. *(Delivered with the protected mark: a profile is a registered instance. It stores its URL and, set with `instance add`/`instance set --auth-header <name>`, the header its token goes in — `AuthTokensServer.AuthHeader` is settable, and a Windows-AD application reads `Signum_Authorization` (`AuthTokensServer.cs:57-62`, `WindowsADAuthenticator.tsx:22`); `default` restores `Authorization`, and `SIGNUM_AUTH_HEADER` sets it without a profile (AC-05.3). The value is redacted under that name as `Authorization` is. **Amended:** the credential reference is the URL, by which `credential.json` is keyed, so the secret keeps one home; and the mechanism is not a setting while there is one — the browser-handoff token — so `instance` and `auth status` report it rather than offer a choice. API keys (REQ-002) add the second, in m3.)*
 - AC-05.2: Resolution order is `--url`/`--profile` flag → environment variable → configured default profile → explicit error. Never a silent fallback.
 - AC-05.3: The CLI runs with **no config file present**, fully driven by flags and environment variables.
 - AC-05.4: `signum auth status` lists every profile, marks the active one, and shows each one's auth state without exposing secrets.
-- AC-05.5: A profile can be marked *protected*; mutating commands against it require `--yes` even when stdout is not a TTY.
+- AC-05.5: A profile can be marked *protected*; mutating commands against it require `--yes` even when stdout is not a TTY. *(Delivered as `instance add|set <name> --protected`. **Amended:** the guard (REQ-046) already requires `--yes` without a terminal for every target, so the criterion as written marks nothing. What protection adds is at a terminal: every write against the profile asks, `--yes` or not, and only the profile's name typed back confirms it — the accident it guards against is a command, `--yes` included, recalled from the test instance's history. Without a terminal `--yes` is required as for every target, and the refusal says the profile is protected. `instance list` and `auth status` show the mark.)*
 - AC-05.6: The active profile and target URL appear in the confirmation prompt for every write.
+- AC-05.7: *(Added with #121.)* A profile is a **target**: a registered instance (`signum instance add`) or a URL, the credential stored for it, and what is kept per target — the metadata cache and the handle store. Resolution: `--url` or `-i`, then `SIGNUM_URL` or `SIGNUM_INSTANCE` (both set is a usage error, as both flags are), then the default target — set by `auth switch <instance|url>`, otherwise the most recent login — then an error naming every way to give one. `auth switch` needs a stored credential for the target and says when a variable still overrides it. `auth status` names the active target by its instance, and lists every profile with its credential state, the active one and the default, from local state only. The confirmation names the instance beside the URL. AC-05.1's header-name override and AC-05.5's protected profile followed; see each.
 
 ---
 
@@ -327,7 +328,17 @@ possible.
   closes. **[TEST]** — a cross-origin POST from an HTTPS page to `http://127.0.0.1` may be blocked by
   Private Network Access preflight rules depending on browser version. **AC-12.1's manual stdin paste
   is mandatory and always available as the fallback**; assisted capture is an optimisation that must
-  never become a dependency.
+  never become a dependency. *(Delivered: at a terminal `auth login` binds 127.0.0.1 on an OS-chosen
+  port and prints `fetch("http://127.0.0.1:<port>/<nonce>",{method:"POST",body:sessionStorage.getItem("authToken")})`
+  beside the paste prompt; whichever brings a token first wins, and the other is withdrawn. The
+  path carries a 128-bit random nonce printed only on the terminal, the request's `Origin` must be
+  the target application's (a request with none is refused), the Private Network Access preflight
+  is answered with `Access-Control-Allow-Private-Network: true`, a tab that is not signed in
+  (`null`) is told so, and the first valid token closes the listener; the token is never echoed.
+  It is validated exactly as a pasted one (AC-12.3). Not under `--explain`, and not when stdin is
+  piped. **Still [TEST]:** the browser side is tested with a scripted client, not a real browser,
+  so whether a given browser version lets the snippet reach loopback is unverified; the paste
+  beside it is what keeps that from mattering.)*
 - AC-12.10: The token is validated and the resolved user echoed before the old credential is
   discarded, so a failed re-handoff never leaves the profile in a worse state than before.
 - AC-12.11: When the stored token stops working, the message states plainly that a fresh handoff is

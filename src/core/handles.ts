@@ -6,7 +6,7 @@
 import type { Ctx } from "./ctx.ts";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { configDir, writePrivate } from "./config.ts";
+import { configDir, targetDir, targetDirs, writePrivate } from "./config.ts";
 import { CliError, ExitCode } from "./errors.ts";
 
 /**
@@ -24,7 +24,10 @@ export function persistHandles(
   // `storeLabels` is a deliberate opt-OUT (#106): storing labels turns this file from a store of
   // identities into a store of names, which is a real change in what is at rest on disk. Default on,
   // because a store of `Project;20` does not deliver the readable report the handles exist for.
-  const collisions = saveHandles(entries, ctx.io.env, { storeLabels: ctx.privacy.storeLabels });
+  if (ctx.target === undefined) {
+    throw new CliError("internal: minted handles with no target application to keep them for", ExitCode.Unexpected);
+  }
+  const collisions = saveHandles(entries, ctx.io.env, { target: ctx.target, storeLabels: ctx.privacy.storeLabels });
   if (collisions.length > 0) {
     throw new CliError(
       `handle collision: ${collisions.join(", ")} already stands for a different record`,
@@ -41,15 +44,27 @@ export function persistHandles(
 /**
  * `ref:…` handle -> the real `TypeName;id` it stands for.
  *
- * Stored `0600` and per-profile, matching the surrogate secret's scope (AC-53.3, AC-53.8): a handle
- * is only meaningful against the secret that produced it, so the two must live and die together.
+ * Stored `0600`, one store per TARGET APPLICATION (#121, AC-53.6). A handle stands for `Type;id`,
+ * and the same `Type;id` is a different record in test and in production: a handle minted against
+ * one must not resolve against the other. Each target's handles are kept in its own store, and the
+ * target is part of every handle's digest (privacy.ts `surrogate`), so the same record has a
+ * different handle in each application and a handle from one is simply unknown in another.
+ *
+ * With no target, the path is the store from before per-target scoping. Nothing writes it any
+ * more; `unmask`, which only substitutes handles for a person to read, still reads it, so documents
+ * written before keep resolving there (AC-53.5).
  *
  * **This file is the one place real identities and their surrogates sit side by side.** It is never
  * emitted — not to stdout, not to `--json`, not to a trace (AC-53.3). `unmask` reads it and
  * prints one answer at a time, for a human.
  */
-export function handlesPath(env?: NodeJS.ProcessEnv): string {
-  return join(configDir(env), "handles.json");
+export function handlesPath(env?: NodeJS.ProcessEnv, target?: string): string {
+  return target !== undefined ? join(targetDir(env, target), "handles.json") : join(configDir(env), "handles.json");
+}
+
+/** Every handle store that exists: each target's, and the one from before per-target scoping. */
+export function handleStorePaths(env?: NodeJS.ProcessEnv): string[] {
+  return [...targetDirs(env).map((d) => join(d, "handles.json")), handlesPath(env)].filter((p) => existsSync(p));
 }
 
 /**
@@ -75,8 +90,24 @@ export interface HandleEntry {
  * of those, so the string form is read as an entry with no label rather than discarded — dropping
  * them would orphan every handle in circulation, which is the failure AC-53.5 exists to prevent.
  */
-export function loadHandleEntries(env?: NodeJS.ProcessEnv): Record<string, HandleEntry> {
-  const path = handlesPath(env);
+export function loadHandleEntries(env?: NodeJS.ProcessEnv, target?: string): Record<string, HandleEntry> {
+  return readStore(handlesPath(env, target));
+}
+
+/**
+ * Every store's entries together, for `unmask`: it substitutes handles in a document for a person to
+ * read, whichever application minted them. It never addresses a record, so the target that keeps a
+ * handle apart from another application's does not apply; resolving one to ACT on stays per target.
+ */
+export function loadAllHandleEntries(env?: NodeJS.ProcessEnv): Record<string, HandleEntry> {
+  const out: Record<string, HandleEntry> = {};
+  for (const path of handleStorePaths(env)) {
+    for (const [k, v] of Object.entries(readStore(path))) out[k] ??= v;
+  }
+  return out;
+}
+
+function readStore(path: string): Record<string, HandleEntry> {
   if (!existsSync(path)) return {};
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
@@ -113,9 +144,9 @@ export function loadHandleEntries(env?: NodeJS.ProcessEnv): Record<string, Handl
  * Kept as the primary accessor because a caller resolving a handle to act on a record must get the
  * `Lite` key and nothing else — a label is for reading, never for addressing.
  */
-export function loadHandles(env?: NodeJS.ProcessEnv): Record<string, string> {
+export function loadHandles(env?: NodeJS.ProcessEnv, target?: string): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(loadHandleEntries(env))) out[k] = v.lite;
+  for (const [k, v] of Object.entries(loadHandleEntries(env, target))) out[k] = v.lite;
   return out;
 }
 
@@ -129,9 +160,9 @@ export function loadHandles(env?: NodeJS.ProcessEnv): Record<string, string> {
 export function saveHandles(
   fresh: Readonly<Record<string, string | HandleEntry>>,
   env?: NodeJS.ProcessEnv,
-  options: { storeLabels?: boolean; now?: string } = {},
+  options: { target?: string | undefined; storeLabels?: boolean; now?: string } = {},
 ): string[] {
-  const existing = loadHandleEntries(env);
+  const existing = loadHandleEntries(env, options.target);
   const collisions: string[] = [];
   const storeLabels = options.storeLabels ?? true;
 
@@ -167,26 +198,29 @@ export function saveHandles(
         : {}),
     };
   }
-  writePrivate(handlesPath(env), JSON.stringify(existing, null, 2) + "\n");
+  writePrivate(handlesPath(env, options.target), JSON.stringify(existing, null, 2) + "\n");
   return collisions;
 }
 
-/** Forget every stored label, keeping the identities. The `storeLabels: false` retro-fit. */
+/** Forget every stored label in every store, keeping the identities. The `storeLabels: false` retro-fit. */
 export function stripStoredLabels(env?: NodeJS.ProcessEnv): number {
-  const existing = loadHandleEntries(env);
   let removed = 0;
-  const out: Record<string, HandleEntry> = {};
-  for (const [handle, entry] of Object.entries(existing)) {
-    if (entry.label !== undefined) removed++;
-    out[handle] = { lite: entry.lite };
+  for (const path of handleStorePaths(env)) {
+    const out: Record<string, HandleEntry> = {};
+    let here = 0;
+    for (const [handle, entry] of Object.entries(readStore(path))) {
+      if (entry.label !== undefined) here++;
+      out[handle] = { lite: entry.lite };
+    }
+    if (here > 0) writePrivate(path, JSON.stringify(out, null, 2) + "\n");
+    removed += here;
   }
-  if (removed > 0) writePrivate(handlesPath(env), JSON.stringify(out, null, 2) + "\n");
   return removed;
 }
 
+/** Remove every store, every target's included: `unmask --clear` is total (AC-53.6). */
 export function clearHandles(env?: NodeJS.ProcessEnv): boolean {
-  const path = handlesPath(env);
-  if (!existsSync(path)) return false;
-  unlinkSync(path);
-  return true;
+  const paths = handleStorePaths(env);
+  for (const path of paths) unlinkSync(path);
+  return paths.length > 0;
 }

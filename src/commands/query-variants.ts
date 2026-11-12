@@ -45,8 +45,17 @@ export function requestedVariant(ctx: Ctx): Variant | undefined {
   return variant;
 }
 
+/**
+ * The page a table query gets when no paging flag is given. `Paginate`, not `Firsts`: only
+ * `Paginate` makes the server count (`DQueryable.cs:957-1008`), and without that count a cut-off
+ * page cannot be told from a complete result (AC-21.5, #149). Compared by identity in `countFrom`,
+ * so an explicit `--page 1` is still refused by the variants.
+ */
+export const DEFAULT_PAGE = Object.freeze({ mode: "Paginate", elementsPerPage: 50, currentPage: 1 });
+
 /** `count` from the already-validated pagination: --top n → n, --all → unbounded, default bounded. */
 export function countFrom(pagination: unknown): number | null {
+  if (pagination === DEFAULT_PAGE) return DEFAULT_PAGE.elementsPerPage;
   const p = pagination as { mode: string; elementsPerPage?: number };
   if (p.mode === "All") return null;
   if (p.mode === "Firsts") return p.elementsPerPage ?? 50;
@@ -56,6 +65,25 @@ export function countFrom(pagination: unknown): number | null {
 export function variantRequest(queryKey: string, filters: unknown[], orders: unknown[], count: number | null): Record<string, unknown> {
   // filters and orders are `required` on the wire (FilterJsonConverter.cs:278-279): send [] not nothing.
   return { queryKey, filters, orders, ...(count !== null ? { count } : {}) };
+}
+
+/**
+ * A list of entities, each pseudonymized as its own document — the shape `query --entities` and
+ * `get <Type>` both return. Walked as a single array, each whole entity would be judged an identity
+ * and replaced by a handle, contents and all.
+ */
+export function pseudonymizeEntities(ctx: Ctx, items: readonly unknown[]): {
+  values: unknown[]; pseudonymized: string[]; handleDetails: Record<string, { lite: string; label?: string }>;
+} {
+  const pseudonymized = new Set<string>();
+  let handleDetails: Record<string, { lite: string; label?: string }> = {};
+  const values = items.map((e) => {
+    const r = pseudonymizeDocument(e, ctx.privacy);
+    r.pseudonymized.forEach((p) => pseudonymized.add(p));
+    handleDetails = { ...handleDetails, ...r.handleDetails };
+    return r.value;
+  });
+  return { values, pseudonymized: [...pseudonymized], handleDetails };
 }
 
 export async function runVariant(
@@ -69,17 +97,15 @@ export async function runVariant(
   });
   const items = Array.isArray(res.body) ? res.body : [];
 
-  // Each entity is its own document, so each is pseudonymized as one: walked as a single array, the
-  // whole entity would be judged an identity and replaced by a handle, contents and all.
   const pseudonymized = new Set<string>();
   let handleDetails: Record<string, { lite: string; label?: string }> = {};
   const values = variant === "entities"
-    ? items.map((e) => {
-        const r = pseudonymizeDocument(e, ctx.privacy);
+    ? (() => {
+        const r = pseudonymizeEntities(ctx, items);
         r.pseudonymized.forEach((p) => pseudonymized.add(p));
-        handleDetails = { ...handleDetails, ...r.handleDetails };
-        return r.value;
-      })
+        handleDetails = r.handleDetails;
+        return r.values;
+      })()
     : (() => {
         const r = pseudonymizeDocument(items, ctx.privacy);
         r.pseudonymized.forEach((p) => pseudonymized.add(p === "" ? "Entity" : p));

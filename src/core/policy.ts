@@ -100,7 +100,7 @@ export function makeDataOpener(
  */
 export function assertMayTrace(caller: CallerDetection, allow: boolean): void {
   if (caller.context !== "agent" || allow) return;
-  throw new PolicyError("refusing --verbose to a detected AI caller", {
+  throw new PolicyError("refusing --verbose (--trace) to a detected AI caller", {
     hint:
       "Signals: " + caller.signals.join("; ") + ".\n" +
       "A trace prints request URLs, which carry real ids — including the one behind a ref_ handle.\n" +

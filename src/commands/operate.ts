@@ -15,39 +15,41 @@
  *
  * Construct, construct-from and delete (#118) go to their own endpoints. A Save that may run on a
  * new entity, with no record named, creates one from `--edit` values, as the web UI's "new" does.
- * More than one record makes it a bulk operation (#119): one request, one outcome per record.
+ * More than one record makes it a bulk operation (#119), which `operate-bulk.ts` runs: one request,
+ * one outcome per record. `--progress` sends one record to `executeLiteWithProgress` and shows the
+ * server's progress as it streams (AC-45.2).
  */
 
 import type { Ctx } from "../core/ctx.ts";
-import { flag, optAll } from "../core/ctx.ts";
-import { CliError, ExitCode, NotAuthorizedError, NotFoundError, UsageError } from "../core/errors.ts";
-import { asEntity, fetchEntity, serializeEntity, setMember, type EntityJson, type MemberPath } from "../core/entity.ts";
+import { flag, interruptible, opt, optAll } from "../core/ctx.ts";
+import { ConcurrencyError, CliError, ExitCode, InterruptedError, NotFoundError, TransportError, UsageError } from "../core/errors.ts";
+import {
+  applyDocument, asEntity, fetchEntity, markAllModified, serializeEntity, setMember,
+  type DocumentValue, type EntityJson, type MemberPath,
+} from "../core/entity.ts";
 import { assertPermit, confirmMutation, recordMutation, type MutationPermit } from "../core/guard.ts";
-import { loadHandles, persistHandles } from "../core/handles.ts";
-import { JsonNumber } from "../core/json.ts";
-import { loadMetadata, type Metadata } from "../core/metadata.ts";
-import { encodeArgs, kebab, resolveKey, resolveVerbNoun, type ArgValue, type ResolvedOperation } from "../core/operations.ts";
-import { renderDataDocument, renderDocument } from "../core/output.ts";
-import { disclosure, pseudonymizeDocument } from "../core/privacy.ts";
+import { loadHandles } from "../core/handles.ts";
+import { assertOneStdin, inputReader, isIndirect, type InputReader } from "../core/input.ts";
+import { JsonNumber, parseLossless } from "../core/json.ts";
+import { findType, loadMetadata, type Metadata } from "../core/metadata.ts";
+import { kebab, resolveKey, resolveVerbNoun, type ArgValue, type ResolvedOperation } from "../core/operations.ts";
+import { renderDocument } from "../core/output.ts";
+import { isBuiltIn } from "../core/args.ts";
+import { looksLikeSurrogate, pseudonymizeDocument } from "../core/privacy.ts";
 import { isHandle, resolveHandle } from "../core/reidentify.ts";
 import { resolveTarget, type Target } from "../core/target.ts";
 import { nearest, parseLiteKey } from "../core/text.ts";
+import { bulkPlan, isBulkRequest, runBulk, type BulkPlan } from "./operate-bulk.ts";
+import {
+  argsOf, cleanName, DATA_KIND, explainSendError, failureOf, liteJson, packCanExecute, parseEdits, permission,
+  recordKey, renderPack, shownTarget, type Edit, type OperationTarget,
+} from "./operate-common.ts";
 
 /** What an operation command accepts besides the global flags. */
 export const OPERATION_FLAGS = [
   "arg", "arg-string", "arg-lite", "arg-json", "allow-custom-arg",
-  "lite", "id", "edit", "f", "filename", "yes", "y", "dry-run",
+  "lite", "id", "edit", "setters-json", "f", "filename", "yes", "y", "dry-run", "progress",
 ] as const;
-
-const DATA_KIND = "operation result";
-
-/** The record an operation runs on, as the caller named it and as it really is. */
-interface OperationTarget {
-  type: string;
-  id: string;
-  /** As written: a handle stays a handle in everything shown to a caller. */
-  shown: string;
-}
 
 function assertOperationFlags(ctx: Ctx): void {
   const known = new Set<string>(OPERATION_FLAGS);
@@ -74,16 +76,79 @@ function parseTarget(written: string, typeHint: string | undefined, handles: Rea
 }
 
 /**
- * The records an operation runs on: positionals after the noun, repeated `--lite`, or repeated `--id`
- * — one of the three, so a list is never half of one kind and half of another. More than one record
- * makes it a bulk operation (#119).
+ * A list of records read from a file or stdin (#119, #120): a JSON array, or one per line. Each
+ * entry is a Lite key, a handle, a bare id (for `--id`), a Lite object, or an object with an
+ * `Entity` member — a row of `signum query … -o ndjson` — so a query's answer can be piped into the
+ * operation that acts on it. Blank lines and `#` comments are skipped.
  */
-function targetsOf(ctx: Ctx, noun: string | undefined, positionals: readonly string[]): OperationTarget[] {
-  const handles = loadHandles(ctx.io.env);
+export function parseRecordList(text: string, source: string): string[] {
+  const entry = (v: unknown, where: string): string => {
+    if (typeof v === "string" && v.trim() !== "") return v.trim();
+    if (typeof v === "number") return String(v);
+    if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+      const o = v as Record<string, unknown>;
+      if (typeof o["EntityType"] === "string" && o["id"] !== undefined && o["id"] !== null) return `${o["EntityType"]};${String(o["id"])}`;
+      if ("Entity" in o) return entry(o["Entity"], where);
+    }
+    throw new UsageError(`${source}, ${where}: not a record`, {
+      hint: 'One per line: Order;42, a ref_ handle, or {"EntityType":"Order","id":42}. A query row with an Entity column works too.',
+    });
+  };
+  const trimmed = text.trim();
+  if (trimmed.startsWith("[")) {
+    let list: unknown;
+    try {
+      list = parseLossless(trimmed);
+    } catch (err) {
+      throw new UsageError(`${source} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return (list as unknown[]).map((v, i) => entry(v, `item ${i + 1}`));
+  }
+  const out: string[] = [];
+  text.split(/\r?\n/).forEach((raw, i) => {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#")) return;
+    if (line.startsWith("{")) {
+      let o: unknown;
+      try {
+        o = parseLossless(line);
+      } catch {
+        throw new UsageError(`${source}, line ${i + 1}: not valid JSON`);
+      }
+      out.push(entry(o, `line ${i + 1}`));
+    } else {
+      out.push(entry(line, `line ${i + 1}`));
+    }
+  });
+  if (out.length === 0) throw new UsageError(`${source} names no records`);
+  return out;
+}
+
+/** `--lite`/`--id` values, with every `@file` and `-` among them expanded into the records it lists. */
+async function expandRecords(input: InputReader, flagName: string, values: readonly string[]): Promise<string[]> {
+  const out: string[] = [];
+  for (const v of values) {
+    if (!isIndirect(v)) {
+      out.push(v);
+      continue;
+    }
+    const where = v === "-" ? `--${flagName} - (stdin)` : `--${flagName} file '${v.slice(1)}'`;
+    out.push(...parseRecordList(await input.read(flagName, v), where));
+  }
+  return out;
+}
+
+/**
+ * The records an operation runs on: positionals after the noun, repeated `--lite`, or repeated `--id`
+ * — one of the three, so a list is never half of one kind and half of another. `--lite` and `--id`
+ * also take `@file` and `-` (#120). More than one record makes it a bulk operation (#119).
+ */
+async function targetsOf(ctx: Ctx, input: InputReader, noun: string | undefined, positionals: readonly string[]): Promise<OperationTarget[]> {
+  const handles = loadHandles(ctx.io.env, ctx.target);
   const sources = [
     { from: "position", values: [...positionals] },
-    { from: "--lite", values: optAll(ctx, "lite") },
-    { from: "--id", values: optAll(ctx, "id") },
+    { from: "--lite", values: await expandRecords(input, "lite", optAll(ctx, "lite")) },
+    { from: "--id", values: await expandRecords(input, "id", optAll(ctx, "id")) },
   ].filter((s) => s.values.length > 0);
   if (sources.length > 1) {
     throw new UsageError(`name the records one way; got ${sources.map((s) => s.from).join(" and ")}`);
@@ -103,23 +168,6 @@ function targetsOf(ctx: Ctx, noun: string | undefined, positionals: readonly str
     seen.add(key);
   }
   return targets;
-}
-
-/** `--edit Member.Path=value`: the path addresses members, `entity`, and list indices (AC-31.7). */
-function parseEdits(ctx: Ctx): Array<{ path: MemberPath; value: ArgValue; written: string }> {
-  return optAll(ctx, "edit").map((written) => {
-    const eq = written.indexOf("=");
-    if (eq <= 0) throw new UsageError(`--edit '${written}' needs a member and a value`, { hint: "--edit Name=Acme  or  --edit Address.City=Berlin" });
-    const path = written.slice(0, eq).split(".").map((s) => (/^\d+$/.test(s) ? Number(s) : s));
-    const raw = written.slice(eq + 1);
-    // The same scalar inference as --arg, and no more: an edit sets one value.
-    const value: ArgValue = raw === "null" ? null
-      : raw === "true" ? true
-      : raw === "false" ? false
-      : /^-?(0|[1-9]\d*)(\.\d+)?$/.test(raw) ? new JsonNumber("number", raw)
-      : raw;
-    return { path, value, written };
-  });
 }
 
 /**
@@ -159,7 +207,7 @@ function wirePath(entity: EntityJson, path: MemberPath): MemberPath {
  * run on a new entity (`canBeNew`) with no record named creates one, as the web UI's "new" does.
  */
 type Route =
-  | "executeEntity" | "executeLite" | "saveNew"
+  | "executeEntity" | "executeLite" | "executeLiteWithProgress" | "saveNew"
   | "construct" | "constructFromEntity" | "constructFromLite"
   | "deleteEntity" | "deleteLite";
 
@@ -180,6 +228,7 @@ interface RouteTraits {
 const ROUTES: Record<Route, RouteTraits> = {
   executeEntity: { endpoint: "executeEntity", sends: "entity", destructive: false, constructs: false, takesEdits: true },
   executeLite: { endpoint: "executeLite", sends: "lite", destructive: false, constructs: false, takesEdits: false },
+  executeLiteWithProgress: { endpoint: "executeLiteWithProgress", sends: "lite", destructive: false, constructs: false, takesEdits: false },
   saveNew: { endpoint: "executeEntity", sends: "new", destructive: false, constructs: false, takesEdits: true },
   construct: { endpoint: "construct", sends: "type", destructive: false, constructs: true, takesEdits: false },
   constructFromEntity: { endpoint: "constructFromEntity", sends: "entity", destructive: false, constructs: true, takesEdits: false },
@@ -195,29 +244,16 @@ interface Plan {
   target: OperationTarget | undefined;
   route: Route;
   args: ArgValue[] | null;
-  edits: ReturnType<typeof parseEdits>;
+  edits: Edit[];
+  /** `-f`: the document the caller edited, applied to the record as it is when sent (#120). */
+  document: EntityDocument | undefined;
 }
 
-/** An operation over many records (#119): one request, one outcome per record. */
-interface BulkPlan {
-  many: true;
-  op: ResolvedOperation;
-  targets: OperationTarget[];
-  route: "executeMultiple" | "deleteMultiple" | "constructFromMultiple" | "constructFromMany";
-  args: ArgValue[] | null;
-}
-
-function cleanName(typeName: string): string {
-  return typeName.replace(/Entity$/, "");
-}
-
-/** `type;id`, case-folded: how a record is recognised again, in the targets and in the server's answer. */
-function recordKey(type: string, id: string): string {
-  return `${cleanName(type).toLowerCase()};${id}`;
-}
-
-function liteJson(t: OperationTarget): Record<string, unknown> {
-  return { EntityType: cleanName(t.type), id: /^\d+$/.test(t.id) ? new JsonNumber("identifier", t.id) : t.id };
+interface EntityDocument {
+  edited: EntityJson;
+  /** Where it came from, for `--explain` and messages: `-f order.json`, `-f - (stdin)`. */
+  source: string;
+  value: DocumentValue;
 }
 
 function routeOf(op: ResolvedOperation, hasTarget: boolean): Route {
@@ -236,7 +272,7 @@ function routeOf(op: ResolvedOperation, hasTarget: boolean): Route {
   }
 }
 
-function plan(ctx: Ctx, md: Metadata): Plan | BulkPlan {
+async function plan(ctx: Ctx, md: Metadata, input: InputReader): Promise<Plan | BulkPlan> {
   const isKey = ctx.args.kind === "operation-key";
   const command = String(ctx.args.command);
   const noun = isKey ? undefined : ctx.args.positionals[0];
@@ -246,25 +282,144 @@ function plan(ctx: Ctx, md: Metadata): Plan | BulkPlan {
       hint: "Run `signum operations` to see the operations and the types they run on.",
     });
   }
-  if (optAll(ctx, "f").length > 0 || optAll(ctx, "filename").length > 0) {
-    throw new UsageError("-f is not supported yet: an entity edited in a file carries no `modified` flags, and the server discards unmarked changes", {
-      hint: "Use --edit Member=value, which marks what changed (AC-31.7). Input from files is #120.",
-    });
-  }
-
-  const targets = targetsOf(ctx, noun, positionals);
+  // Before anything is read: a second reader of stdin must be refused, not fail to parse the first's input.
+  assertOneStdin(["lite", "id", "f", "filename", "setters-json"].flatMap((f) => optAll(ctx, f).map((v) => [f, v] as const)));
+  const document = await readDocument(ctx, md, input);
+  const targets = await targetsOf(ctx, input, noun, positionals);
+  if (document !== undefined) adoptDocumentTarget(document, targets, loadHandles(ctx.io.env, ctx.target));
   // A key alone names no type; for a constructor the noun or the key's only type does (AC-44.1).
   const op = isKey
     ? resolveKey(md, command, targets[0]?.type)
     : resolveVerbNoun(md, command, noun as string);
   assertTargetsOfType(op, targets);
-  if (targets.length > 1 || op.info.kind === "ConstructorFromMany") return bulkPlan(ctx, op, targets);
+  if (document !== undefined && cleanName(document.edited.Type).toLowerCase() !== cleanName(op.type.name).toLowerCase()) {
+    throw new UsageError(`${document.source} is a ${document.edited.Type}, not a ${op.type.name}`);
+  }
+  if (isBulkRequest(ctx, targets.length) || op.info.kind === "ConstructorFromMany") {
+    if (document !== undefined) {
+      throw new UsageError("-f is one record's document; over many records, set values with --edit or --setters-json");
+    }
+    if (flag(ctx, "progress")) {
+      throw new UsageError("--progress is for one record; over many records each outcome is shown as it arrives", {
+        hint: "Drop --progress: a bulk operation already reports record by record.",
+      });
+    }
+    const settersSource = opt(ctx, "setters-json");
+    return bulkPlan(ctx, op, targets, settersSource !== undefined ? await input.read("setters-json", settersSource) : undefined);
+  }
 
   const target = targets[0];
-  const route = routeOf(op, target !== undefined);
+  let route = routeOf(op, target !== undefined);
   const edits = parseEdits(ctx);
-  validateSingle(op, target, route, edits);
-  return { op, target, route, args: argsOf(ctx), edits };
+  validateSingle(op, target, route, edits, document);
+  if (flag(ctx, "progress")) route = progressRoute(op, route, edits.length > 0 || document !== undefined);
+  return { op, target, route, args: argsOf(ctx), edits, document };
+}
+
+/**
+ * `-f` / `--filename`: an entity document from a file, `@file` or `-` (#120). It may be the bare
+ * entity, as `get -o json` writes it, or a pack `{entity, canExecute}`, as an operation writes its
+ * result — so a constructor's output can be piped into the Save that stores it.
+ */
+async function readDocument(ctx: Ctx, md: Metadata, input: InputReader): Promise<EntityDocument | undefined> {
+  const given = [...optAll(ctx, "f").map((v) => ["f", v] as const), ...optAll(ctx, "filename").map((v) => ["filename", v] as const)];
+  if (given.length === 0) return undefined;
+  if (given.length > 1) throw new UsageError("-f takes one document");
+  const [flagName, written] = given[0] as readonly [string, string];
+  const source = written === "-" ? `-${flagName.length === 1 ? "" : "-"}${flagName} - (stdin)` : `${flagName.length === 1 ? "-" : "--"}${flagName} ${written.replace(/^@/, "")}`;
+  const text = await input.read(flagName, written, { bare: "path" });
+  let parsed: unknown;
+  try {
+    parsed = parseLossless(text);
+  } catch (err) {
+    throw new UsageError(`${source} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const o = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  const entity = typeof o["Type"] !== "string" && o["entity"] !== null && typeof o["entity"] === "object" ? o["entity"] : parsed;
+  if (entity === null || typeof entity !== "object" || typeof (entity as Record<string, unknown>)["Type"] !== "string") {
+    throw new UsageError(`${source} is not an entity: it needs a "Type"`, { hint: "Write it with `signum get <Type;id> -o json`, then edit it." });
+  }
+  return { edited: asEntity(entity), source, value: documentValue(md, loadHandles(ctx.io.env, ctx.target)) };
+}
+
+/** The record a document names, by its `id`, is the target — and must agree with one named as well. */
+function adoptDocumentTarget(doc: EntityDocument, targets: OperationTarget[], handles: Readonly<Record<string, string>>): void {
+  const id = doc.edited.id;
+  if (id === undefined || id === null || doc.edited.isNew === true) {
+    if (targets.length > 0) throw new UsageError(`${doc.source} is a new record, so it takes no record to run on`);
+    return;
+  }
+  const written = String(id);
+  // `get` writes the id as a handle when it pseudonymizes; it resolves locally like any other.
+  const fromDoc = parseTarget(isHandle(written) ? written : `${cleanName(doc.edited.Type)};${written}`, undefined, handles);
+  const named = targets[0];
+  if (named === undefined) {
+    targets.push(fromDoc);
+    return;
+  }
+  if (targets.length > 1 || recordKey(named.type, named.id) !== recordKey(fromDoc.type, fromDoc.id)) {
+    throw new UsageError(`${doc.source} is ${fromDoc.shown}, but the command names ${named.shown}`, {
+      hint: "Name the record once: the document's id is enough.",
+    });
+  }
+}
+
+/**
+ * How a value from the caller's document goes on the wire. A handle resolves locally to the Lite it
+ * stands for (AC-53.2); a `Type;id` string where the record holds a Lite, or names an entity type,
+ * is that Lite. A string shaped like the surrogate pseudonymization gives that member is refused: it
+ * is a pseudonym the caller copied, not a value, and sending it would write it into the record.
+ * Values inside a new object are judged the same way, each under its own member name.
+ */
+function documentValue(md: Metadata, handles: Readonly<Record<string, string>>): DocumentValue {
+  const one = (v: unknown, key: string, path: string, current: unknown): unknown => {
+    if (typeof v === "string") {
+      if (isHandle(v)) {
+        const real = resolveHandle(v, handles);
+        const lite = parseLiteKey(real);
+        return lite !== undefined ? liteJson({ type: lite.type, id: lite.id, shown: v }) : real;
+      }
+      if (key !== "" && looksLikeSurrogate(v, key)) {
+        throw new UsageError(`${path}: '${v}' is a pseudonym, not a value`, {
+          hint: "The document was written pseudonymized. Leave a value you did not change exactly as it was\n" +
+            "shown, and write a changed one in full; or read the record with --pseudonymize off.",
+        });
+      }
+      const lite = parseLiteKey(v);
+      const isLiteSlot = current !== null && typeof current === "object" && typeof (current as Record<string, unknown>)["EntityType"] === "string";
+      if (lite !== undefined && (isLiteSlot || findType(md, lite.type)?.kind === "Entity")) {
+        return liteJson({ type: lite.type, id: lite.id, shown: v });
+      }
+      return v;
+    }
+    if (Array.isArray(v)) return v.map((x, i) => one(x, key, `${path}.${i}`, undefined));
+    if (v !== null && typeof v === "object" && !(v instanceof JsonNumber)) {
+      const o = v as Record<string, unknown>;
+      return Object.fromEntries(Object.entries(o).map(([k, x]) =>
+        [k, k === "Type" || k === "EntityType" || k === "rowId" ? x : one(x, k, `${path}.${k}`, undefined)]));
+    }
+    return v;
+  };
+  return (v, path, current) => one(v, path.split(".").filter((s) => !/^\d+$/.test(s)).pop() ?? "", path, current);
+}
+
+/**
+ * `--progress`: the same execute, sent to `executeLiteWithProgress`, which streams the server's
+ * `ProgressProxy` as it works (`OperationController.cs:82-95`, AC-45.2). The server retrieves the
+ * record itself, so it takes a Lite: an edit would be dropped, and is refused. Which operations
+ * report progress is the application's choice — the web client opts in per operation — so it is the
+ * caller's flag here; one that reports none simply finishes.
+ */
+function progressRoute(op: ResolvedOperation, route: Route, edited: boolean): Route {
+  if (route !== "executeLite" && route !== "executeEntity") {
+    throw new UsageError(`--progress is for an operation that executes on a record; ${op.key} does not`);
+  }
+  if (edited) {
+    throw new UsageError("--progress sends the record as a Lite, so an --edit or -f would be discarded", {
+      hint: "Save the edit first, then run the operation with --progress.",
+    });
+  }
+  return "executeLiteWithProgress";
 }
 
 /** Every record must be of the operation's type; each is then spelled as the metadata spells it. */
@@ -277,18 +432,21 @@ function assertTargetsOfType(op: ResolvedOperation, targets: OperationTarget[]):
   }
 }
 
-/** The positional args, in the order typed (AC-42.1). */
-function argsOf(ctx: Ctx): ArgValue[] | null {
-  return encodeArgs(ctx.args.sequence, {
-    handles: loadHandles(ctx.io.env),
-    allowCustomObjects: flag(ctx, "allow-custom-arg"),
-    warn: (line) => ctx.io.err(line),
-  });
-}
-
 /** A record where the route needs one and none where it takes none; edits only where they are saved. */
-function validateSingle(op: ResolvedOperation, target: OperationTarget | undefined, route: Route, edits: ReturnType<typeof parseEdits>): void {
+function validateSingle(
+  op: ResolvedOperation, target: OperationTarget | undefined, route: Route, edits: readonly Edit[], document: EntityDocument | undefined,
+): void {
   const sends = ROUTES[route].sends;
+  if (document !== undefined && target === undefined && sends !== "new") {
+    throw new UsageError(`${document.source} is a new record, and ${op.key} cannot create one`, {
+      hint: "Create it with an operation that may run on a new record, such as the type's Save.",
+    });
+  }
+  if (document !== undefined && !ROUTES[route].takesEdits) {
+    throw new UsageError(`${op.key} does not save the record it is given, so ${document.source} would be discarded`, {
+      hint: "Save a document with an operation that takes the entity, such as its Save.",
+    });
+  }
   if (sends === "type" && target !== undefined) {
     throw new UsageError(`${op.key} constructs from nothing, so it takes no record`, {
       hint: `signum ${kebab(op.info.verb)} ${kebab(op.type.name)}`,
@@ -313,30 +471,6 @@ function validateSingle(op: ResolvedOperation, target: OperationTarget | undefin
   }
 }
 
-function bulkPlan(ctx: Ctx, op: ResolvedOperation, targets: OperationTarget[]): BulkPlan {
-  const kind = op.info.kind ?? "Execute";
-  if (targets.length === 0) {
-    throw new UsageError(`${op.key} runs on records; name them`, {
-      hint: `signum ${op.key} --lite "${op.type.name};1" --lite "${op.type.name};2"`,
-    });
-  }
-  if (optAll(ctx, "edit").length > 0) {
-    // The multi endpoints take property setters, not entities (AC-45.4); an --edit has nowhere to go.
-    throw new UsageError("--edit is for one record; over many records it would be discarded", {
-      hint: "Run the operation once per record, or wait for property setters over many records.",
-    });
-  }
-  const route = kind === "Execute" ? "executeMultiple"
-    : kind === "Delete" ? "deleteMultiple"
-    : kind === "ConstructorFrom" ? "constructFromMultiple"
-    : kind === "ConstructorFromMany" ? "constructFromMany"
-    : undefined;
-  if (route === undefined) {
-    throw new UsageError(`${op.key} is a constructor, which runs on no record`, { hint: `signum ${kebab(op.info.verb)} ${kebab(op.type.name)}` });
-  }
-  return { many: true, op, targets, route, args: argsOf(ctx) };
-}
-
 function operationPath(p: Plan): string {
   return `api/operation/${ROUTES[p.route].endpoint}/${encodeURIComponent(p.op.key)}`;
 }
@@ -349,7 +483,9 @@ function operationPath(p: Plan): string {
  */
 function newEntity(p: Plan): EntityJson {
   const members = new Map(p.op.type.members.map((m) => [m.name.toLowerCase(), m.name]));
-  const e: Record<string, unknown> = { Type: cleanName(p.op.type.name), isNew: true, modified: true };
+  const e: Record<string, unknown> = p.document !== undefined
+    ? newFromDocument(p.document)
+    : { Type: cleanName(p.op.type.name), isNew: true, modified: true };
   for (const edit of p.edits) {
     const written = String(edit.path[0]);
     const name = members.get(written.toLowerCase());
@@ -363,43 +499,41 @@ function newEntity(p: Plan): EntityJson {
   return e as EntityJson;
 }
 
-/** What the target looks like in the request, with a handle in place of the id it stands for. */
-function shownTarget(t: OperationTarget): Record<string, unknown> {
-  return { ...liteJson(t), ...(isHandle(t.shown) ? { id: t.shown } : {}) };
+/**
+ * A new record from the caller's document (`-f`, #120): every value translated as for an edit, the
+ * identity and concurrency members dropped, and every entity in it marked, since all of it is new.
+ * A pseudonymized document is refused outright: with no stored record to compare against, its
+ * surrogates cannot be told from values — a number least of all.
+ */
+function newFromDocument(doc: EntityDocument): Record<string, unknown> {
+  const toStr = doc.edited.toStr;
+  if (typeof toStr === "string" && looksLikeSurrogate(toStr, "toStr")) {
+    throw new UsageError(`${doc.source} was written pseudonymized, so its values cannot be told from pseudonyms`, {
+      hint: "A new record has nothing stored to compare with. Write the real values, or produce the\n" +
+        "document with --pseudonymize off (e.g. signum create order --pseudonymize off -o json).",
+    });
+  }
+  const { id: _id, ticks: _ticks, toStr: _toStr, ...rest } = doc.edited as Record<string, unknown>;
+  const e = doc.value(rest, "", undefined) as Record<string, unknown>;
+  return markAllModified({ ...e, Type: doc.edited.Type, isNew: true });
 }
 
 /** `--explain`: the exact request, sending nothing (REQ-053, AC-42.7). */
 function explainPlan(ctx: Ctx, target: Target, p: Plan): ExitCode {
+  const applied = [...(p.document !== undefined ? [`the changes in ${p.document.source}`] : []), ...p.edits.map((e) => e.written)];
   const fetched = (t: OperationTarget | undefined): string =>
-    `${t?.shown}, as fetched from api/entity when sent` +
-    (p.edits.length > 0 ? `, with ${p.edits.map((e) => e.written).join(", ")} applied` : "");
+    `${t?.shown}, as fetched from api/entity when sent` + (applied.length > 0 ? `, with ${applied.join(", ")} applied` : "");
   const sends = ROUTES[p.route].sends;
+  // A new record from a document is described, not shown: shown, its handles would be resolved.
   const body: Record<string, unknown> =
     sends === "type" ? { Type: cleanName(p.op.type.name), args: p.args }
+    : sends === "new" && p.document !== undefined ? { entity: `a new ${p.op.type.name} from ${p.document.source}${p.edits.length > 0 ? `, with ${p.edits.map((e) => e.written).join(", ")}` : ""}`, args: p.args }
     : sends === "new" ? { entity: newEntity(p), args: p.args }
     : sends === "lite" ? { lite: shownTarget(p.target as OperationTarget), args: p.args }
     : { entity: fetched(p.target), args: p.args };
-  renderDocument({ method: "POST", url: `${target.url}/${operationPath(p)}`, body },
+  renderDocument(target.http.describe({ method: "POST", path: operationPath(p), body }, body),
     { format: ctx.format === "table" ? "json" : ctx.format, write: ctx.io.out });
   return ExitCode.Ok;
-}
-
-/** Whether `canExecute` permits `key`, and the server's reason when not. */
-function permission(canExecute: Record<string, unknown>, key: string): { ok: boolean; reason?: string } {
-  // A key ABSENT was withheld for this login (`OperationLogic.cs:456`): not permitted, never unknown (#112).
-  if (!Object.hasOwn(canExecute, key)) return { ok: false, reason: "not permitted for this login; the server gives no reason" };
-  const r = canExecute[key];
-  return r === null || r === undefined || r === "" ? { ok: true } : { ok: false, reason: String(r) };
-}
-
-/** The `canExecute` of a stored record's entity pack. A read: nothing is invoked. */
-async function packCanExecute(target: Target, t: OperationTarget): Promise<Record<string, unknown>> {
-  const res = await target.http.request<unknown>({
-    method: "GET",
-    path: `api/entityPack/${encodeURIComponent(cleanName(t.type))}/${encodeURIComponent(t.id)}`,
-    lossless: true,
-  });
-  return (((res.body ?? {}) as Record<string, unknown>)["canExecute"] ?? {}) as Record<string, unknown>;
 }
 
 /**
@@ -415,7 +549,7 @@ async function dryRun(ctx: Ctx, target: Target, p: Plan): Promise<ExitCode> {
   let canExecute: Record<string, unknown> | undefined;
   if (p.route === "saveNew") {
     const payload = serializeEntity(newEntity(p));
-    const res = await target.http.request<unknown>({ method: "POST", path: "api/entityPackEntity", rawBody: payload.json, lossless: true });
+    const res = await target.http.request<unknown>({ method: "POST", path: "api/entityPackEntity", rawBody: payload.json, lossless: true, prepare: true });
     canExecute = (((res.body ?? {}) as Record<string, unknown>)["canExecute"] ?? {}) as Record<string, unknown>;
   } else if (p.target !== undefined) {
     canExecute = await packCanExecute(target, p.target);
@@ -441,22 +575,38 @@ async function dryRun(ctx: Ctx, target: Target, p: Plan): Promise<ExitCode> {
 }
 
 /** The fetched record with the edits applied, as its `serializeEntity` payload. */
-async function fetchedPayload(target: Target, p: Plan): Promise<string> {
+async function fetchedPayload(ctx: Ctx, target: Target, p: Plan): Promise<string> {
   const t = p.target as OperationTarget;
   // Fetched now, so its `ticks` is the one the server last issued and travels back verbatim as a
   // string: a stale one is the server's concurrency check, never something to refresh away (#117).
   const entity: EntityJson = await fetchEntity(target.http, cleanName(t.type), t.id);
   let changed = false;
+  if (p.document !== undefined) {
+    // The document was written from the record at ITS ticks. If the record changed since, applying
+    // the document would silently undo someone else's change, so it is the conflict it is (#117).
+    const written = p.document.edited.ticks;
+    if (written !== undefined && String(written) !== String(entity.ticks)) {
+      throw new ConcurrencyError(`${t.shown} changed since ${p.document.source} was written; nothing was sent`, {
+        hint: "Read it again, redo the change on the fresh copy, and save that.",
+      });
+    }
+    // Compared with the record as `get` would show it now, under the same policy: what the caller
+    // left alone is recognised as alone whatever surrogate it carries.
+    const shown = pseudonymizeDocument(entity, ctx.privacy).value;
+    changed = applyDocument(entity, shown, p.document.edited, p.document.value).length > 0;
+  }
   for (const e of p.edits) changed = setMember(entity, wirePath(entity, e.path), e.value) || changed;
-  if (p.edits.length > 0 && !changed) {
+  if ((p.edits.length > 0 || p.document !== undefined) && !changed) {
     // Saving nothing is not a save (AC-32.4): say so and send nothing.
-    throw new CliError("every --edit already holds that value; nothing was sent", ExitCode.Usage);
+    throw new CliError(p.document !== undefined
+      ? `${p.document.source} changes nothing in ${t.shown}; nothing was sent`
+      : "every --edit already holds that value; nothing was sent", ExitCode.Usage);
   }
   return serializeEntity(entity).json;
 }
 
 /** The request body for each route. */
-async function body(target: Target, p: Plan): Promise<string> {
+async function body(ctx: Ctx, target: Target, p: Plan): Promise<string> {
   const args = JSON.stringify(p.args);
   switch (ROUTES[p.route].sends) {
     case "type":
@@ -467,13 +617,14 @@ async function body(target: Target, p: Plan): Promise<string> {
     case "lite":
       return JSON.stringify({ lite: liteJson(p.target as OperationTarget), args: p.args });
     case "entity":
-      return `{"entity":${await fetchedPayload(target, p)},"args":${args}}`;
+      return `{"entity":${await fetchedPayload(ctx, target, p)},"args":${args}}`;
   }
 }
 
 /** The only place a mutation leaves the CLI. */
-async function send(target: Target, p: Plan, permit: MutationPermit): Promise<unknown> {
+async function send(ctx: Ctx, target: Target, p: Plan, permit: MutationPermit): Promise<unknown> {
   assertPermit(permit);
+  if (p.route === "executeLiteWithProgress") return await sendWithProgress(ctx, target, p);
   if (p.route === "deleteLite") {
     // The Lite route retrieves the record server-side; a missing one would be its error, so it is
     // asked first, and a record that is not there is a clean not-found (#118).
@@ -484,62 +635,108 @@ async function send(target: Target, p: Plan, permit: MutationPermit): Promise<un
     if (!(exists.body === true || exists.body === "true")) throw new NotFoundError(`${t.shown} not found`);
   }
   const res = await target.http.request<unknown>({
-    method: "POST", path: operationPath(p), rawBody: await body(target, p), lossless: true,
+    method: "POST", path: operationPath(p), rawBody: await body(ctx, target, p), lossless: true,
   });
   return res.body;
 }
 
-/** `EntityPackTS` → the entity, pseudonymized like `get`, beside its new `canExecute`. */
-function renderPack(ctx: Ctx, pack: unknown): void {
-  const o = (pack ?? {}) as Record<string, unknown>;
-  const entity = o["entity"] !== undefined && o["entity"] !== null ? asEntity(o["entity"]) : null;
-  const { value, pseudonymized, handleDetails } = pseudonymizeDocument(entity, ctx.privacy);
-  persistHandles(ctx, handleDetails); // before emitting — see the note in query.ts
-  renderDataDocument({ entity: value, canExecute: o["canExecute"] ?? {} }, {
-    format: ctx.format === "table" ? "json" : ctx.format,
-    write: ctx.openData(DATA_KIND),
-  });
-  const note = disclosure(ctx.privacy, pseudonymized);
-  if (note !== "") ctx.io.err("\n" + note);
+/** `ProgressStep<EntityPackTS>` (`OperationController.cs:286-297`), one per line. */
+interface ProgressStep {
+  currentTask?: string | null;
+  min?: unknown;
+  max?: unknown;
+  position?: unknown;
+  isFinished?: boolean;
+  result?: unknown;
+  error?: unknown;
+}
+
+/**
+ * How progress is shown (AC-45.2). Under `-o ndjson` each step is a line on stdout, passed through
+ * with its free text judged like any other member, since `currentTask` is the server's own words and
+ * can name a record. At a terminal it is one line on stderr, rewritten in place. Anywhere else it is
+ * not shown: a script waiting on the result has no use for a spinner in its logs.
+ */
+function progressDisplay(ctx: Ctx): { step(s: ProgressStep): void; done(): void } {
+  const shown = (s: ProgressStep): Record<string, unknown> => {
+    const { value } = pseudonymizeDocument({
+      ...(s.currentTask !== undefined && s.currentTask !== null ? { currentTask: s.currentTask } : {}),
+      min: s.min ?? null, max: s.max ?? null, position: s.position ?? null,
+    }, ctx.privacy);
+    return value as Record<string, unknown>;
+  };
+  if (ctx.format === "ndjson") {
+    const write = ctx.openData(DATA_KIND);
+    return { step: (s) => write(JSON.stringify(shown(s)) + "\n"), done: () => {} };
+  }
+  if (!ctx.io.stdoutIsTty) return { step: () => {}, done: () => {} };
+  let drawn = false;
+  return {
+    step(s) {
+      const v = shown(s);
+      const count = v["max"] !== null && v["position"] !== null ? `[${String(v["position"])}/${String(v["max"])}] ` : "";
+      ctx.io.err(`\r\x1b[2K${count}${typeof v["currentTask"] === "string" ? v["currentTask"] : "working…"}`);
+      drawn = true;
+    },
+    done() {
+      if (drawn) ctx.io.err("\n");
+    },
+  };
+}
+
+/**
+ * Execute one record with the server's progress streamed back (AC-45.2). The last step carries the
+ * result or the error; a stream that ends without one ended before the operation did. Ctrl-C stops
+ * the request — the server's `ProgressProxy` is cancelled with it — and is reported, not ignored.
+ */
+async function sendWithProgress(ctx: Ctx, target: Target, p: Plan): Promise<unknown> {
+  const display = progressDisplay(ctx);
+  let last: ProgressStep | undefined;
+  try {
+    await interruptible(ctx, (signal) => target.http.requestLines({
+      method: "POST", path: operationPath(p), rawBody: JSON.stringify({ lite: liteJson(p.target as OperationTarget), args: p.args }),
+      lossless: true, signal,
+    }, (line) => {
+      let s: ProgressStep;
+      try {
+        s = parseLossless(line) as ProgressStep;
+      } catch {
+        return; // a step that cannot be read is a lost progress update, not a result
+      }
+      if (s.isFinished === true) last = s;
+      else display.step(s);
+    }));
+  } catch (err) {
+    if (err instanceof InterruptedError) {
+      throw new InterruptedError(`interrupted while ${p.op.key} was running`, {
+        hint: "The server cancels a progress operation when the caller goes, but it may already have\n" +
+          `finished. Check the record before running it again: signum get ${p.target?.shown ?? ""}`.trimEnd(),
+      });
+    }
+    throw err;
+  } finally {
+    display.done();
+  }
+  if (last === undefined) {
+    throw new TransportError(`the progress stream ended before ${p.op.key} finished`, {
+      hint: "The server may still have completed it. Check the record before running it again.",
+    });
+  }
+  if (last.error !== undefined && last.error !== null) throw target.http.errorFromBody(last.error);
+  return last.result;
 }
 
 /** What the result is, said plainly: a constructed entity is not a stored one (#118). */
 function describeResult(ctx: Ctx, p: Plan, pack: unknown): void {
   if (ROUTES[p.route].constructs && !p.op.info.resultIsSaved) {
     ctx.io.err(`note: ${p.op.key} returned a new ${p.op.type.name} that is NOT saved; nothing was stored.\n` +
-      "Saving it needs the entity as input, which is #120.\n");
+      `To store it, pipe it into the Save: … --pseudonymize off -o json | signum save ${kebab(p.op.type.name)} -f - --yes\n`);
   }
   if (p.route === "saveNew") {
     const entity = ((pack ?? {}) as Record<string, unknown>)["entity"];
     if (entity === null || entity === undefined) return;
     ctx.io.err(`note: created a new ${p.op.type.name}; its id is in entity.id.\n`);
   }
-}
-
-/**
- * A failed send, said in the CLI's terms. A 403 may mean the operation is hidden from the UI: the
- * server judges every call as if the UI made it (`OperationController.cs:137`), so such an operation
- * cannot be invoked over the API at all (AC-40.5). A not-found reached through a handle must not
- * spell out the id behind it, so it is replaced by `hiddenNotFound` when one is given (AC-53.2).
- */
-function explainSendError(err: unknown, hiddenNotFound: string | undefined): unknown {
-  if (err instanceof NotAuthorizedError) {
-    return new NotAuthorizedError(`not permitted: ${err.message}`, {
-      hint: "This login may not run it on this record, or the operation is hidden from the UI —\n" +
-        "the API invokes only what the UI may (OperationController.cs:137). Check with --dry-run.",
-    });
-  }
-  if (err instanceof NotFoundError && hiddenNotFound !== undefined) return new NotFoundError(hiddenNotFound);
-  return err;
-}
-
-/** The audit outcome of a failure. */
-function failureOf(err: unknown): { ok: false; error: string; exitCode: number } {
-  return {
-    ok: false,
-    error: err instanceof Error ? err.message : String(err),
-    exitCode: err instanceof CliError ? err.exitCode : ExitCode.Unexpected,
-  };
 }
 
 export async function runOperation(ctx: Ctx): Promise<ExitCode> {
@@ -555,7 +752,7 @@ export async function runOperation(ctx: Ctx): Promise<ExitCode> {
     url: target.url, http: target.http, offline: ctx.args.flags.offline,
     env: ctx.io.env, warn: (l) => ctx.io.err(l),
   });
-  const planned = plan(ctx, md);
+  const planned = await plan(ctx, md, inputReader(ctx.io));
   if ("many" in planned) return await runBulk(ctx, target, planned, { explain, dry });
   const p = planned;
 
@@ -578,7 +775,7 @@ export async function runOperation(ctx: Ctx): Promise<ExitCode> {
 
   let pack: unknown;
   try {
-    pack = await send(target, p, permit);
+    pack = await send(ctx, target, p, permit);
   } catch (err) {
     const viaHandle = p.target !== undefined && p.target.shown !== realTarget;
     const failure = explainSendError(err, viaHandle ? `${p.target?.shown} not found` : undefined);
@@ -604,152 +801,123 @@ export async function runOperation(ctx: Ctx): Promise<ExitCode> {
   return ExitCode.Ok;
 }
 
-// ─── many records (#119) ───────────────────────────────────────────────────────
-
-/** One record's outcome, as the multi endpoints stream it (`OperationController.OperationResult`). */
-interface BulkOutcome {
-  /** As the caller named it: a handle stays a handle. */
-  target: string;
-  ok: boolean;
-  error?: string;
+/** A section of help only this application can supply (STORY-61), in both renderings. */
+export interface AppHelp {
+  doc: Record<string, unknown>;
+  text: string;
 }
 
-function bulkPath(p: BulkPlan): string {
-  return `api/operation/${p.route}/${encodeURIComponent(p.op.key)}`;
-}
+/**
+ * What metadata says about an operation: what it runs on, where it is sent, what it takes. The one
+ * description `explain <OperationKey>` and `<verb> <Type> --help` both print (AC-61.2).
+ */
+export function operationFacts(op: ResolvedOperation): AppHelp {
+  const { info, type } = op;
+  const kind = info.kind ?? "Execute";
+  const many = kind === "ConstructorFromMany";
+  const route = many ? undefined : routeOf(op, true);
+  const runsOn = many ? "many" : route === "construct" ? "none" : ROUTES[route as Route].sends === "entity" ? "entity" : "lite";
+  const endpoint = many ? "constructFromMany" : ROUTES[route as Route].endpoint;
+  const takesEdits = route !== undefined && ROUTES[route].takesEdits;
+  const createsWithoutRecord = kind === "Execute" && info.canBeModified && info.canBeNew;
+  const destructive = kind === "Delete";
+  const shadowed = isBuiltIn(info.verb.toLowerCase());
+  const command = `signum ${kebab(info.verb)} ${kebab(type.name)}`;
+  const record = runsOn === "none" ? "" : runsOn === "many" ? " 42 43" : " 42";
+  const usage = shadowed ? `signum ${info.key}${record === "" ? "" : ` --lite "${type.name};42"`}` : `${command}${record}`;
 
-/** `MultiOperationRequest`: the Lites, the args, and for constructFromMany the type when no Lite says it. */
-function bulkBody(p: BulkPlan, lite: (t: OperationTarget) => Record<string, unknown>): Record<string, unknown> {
+  const target = {
+    entity: `a record, sent whole (api/operation/${endpoint})\n              fetched first, so --edit and -f change it on the way`,
+    lite: `a record, sent as its identity only (api/operation/${endpoint})`,
+    none: `no record: it builds a new ${type.name} (api/operation/construct)`,
+    many: `several records at once, which it builds one new entity from (api/operation/constructFromMany)`,
+  }[runsOn];
+  const lines = [
+    `${info.key}  (${kind} on ${type.name})${info.niceName !== undefined ? `  ${info.niceName}` : ""}`,
+    "",
+    `  run as:     ${usage}`,
+    ...(shadowed ? [`              '${info.verb.toLowerCase()}' is shadowed by a built-in command; only the canonical key reaches it`] : []),
+    `  runs on:    ${target}`,
+    ...(createsWithoutRecord ? ["              with no record named it creates one, from --edit values"] : []),
+    ...(runsOn === "entity" || runsOn === "lite"
+      ? [`              several records: one ${destructive ? "deleteMultiple" : kind === "Execute" ? "executeMultiple" : "constructFromMultiple"} request, one outcome each`]
+      : []),
+    `  edits:      ${takesEdits ? "--edit Member=value and -f apply, and only to what changed" : "none: it does not save the record it is given, so --edit is refused"}`,
+    "  arguments:  the application does not declare them; Signum passes an untyped list the",
+    "              operation reads by position. --arg, --arg-string, --arg-lite and --arg-json",
+    "              build it in the order typed (`signum help operations`).",
+    ...(destructive ? ["  deletes:    it cannot be undone; the confirmation says so"] : []),
+    ...(ROUTES[route as Route]?.constructs === true || many
+      ? [`  result:     ${info.resultIsSaved ? "saved by the operation" : "NOT saved: run the type's Save on it to keep it"}`]
+      : []),
+  ];
   return {
-    lites: p.targets.map(lite),
-    args: p.args,
-    ...(p.route === "constructFromMany" ? { type: cleanName(p.op.type.name) } : {}),
+    doc: {
+      kind: "operation", key: info.key, verb: info.verb, type: type.name, niceName: info.niceName ?? null,
+      operationType: kind, runsOn, endpoint: `api/operation/${endpoint}`, takesEdits, createsWithoutRecord,
+      destructive, shadowed, command: shadowed ? `signum ${info.key}` : command, example: usage,
+      arguments: null,
+      argumentsNote: "Signum does not describe an operation's arguments; it reads an untyped list by position.",
+      ...(ROUTES[route as Route]?.constructs === true || many ? { resultIsSaved: info.resultIsSaved } : {}),
+    },
+    text: lines.join("\n") + "\n",
   };
 }
 
 /**
- * The NDJSON the multi endpoints answer with: one `{entity, error}` line per record, in no promised
- * order. Matched back to the records by `Type;id`, so each outcome is reported under the name the
- * caller used. A record the stream never mentions is reported as failed — silence is not success.
- *
- * It never throws. By now the server has acted, and every record must still be audited and
- * reported, so a line that cannot be read (a stream cut off mid-line) leaves its record unmatched,
- * which is a failure that says why.
+ * `signum ship order [42] --help` (AC-61.2): the operation as this application describes it, and,
+ * for a record named, whether this login may run it there and why not — the `--dry-run` question,
+ * asked of the same entity pack. Metadata comes from the cache when there is one (AC-61.3).
  */
-function parseOutcomes(p: BulkPlan, text: string): BulkOutcome[] {
-  const byKey = new Map(p.targets.map((t) => [recordKey(t.type, t.id), t]));
-  const outcomes = new Map<string, BulkOutcome>();
-  let unreadable = 0;
-  for (const line of text.split("\n")) {
-    if (line.trim() === "") continue;
-    let o: { entity?: { EntityType?: string; id?: unknown }; error?: string | null };
-    try {
-      o = JSON.parse(line) as typeof o;
-    } catch {
-      unreadable++;
-      continue;
-    }
-    const key = recordKey(String(o.entity?.EntityType ?? ""), String(o.entity?.id ?? ""));
-    const t = byKey.get(key);
-    if (t === undefined) continue;
-    outcomes.set(key, { target: t.shown, ok: o.error === null || o.error === undefined || o.error === "", ...(o.error ? { error: o.error } : {}) });
+export async function describeOperation(ctx: Ctx): Promise<AppHelp> {
+  const isKey = ctx.args.kind === "operation-key";
+  const command = String(ctx.args.command);
+  const noun = isKey ? undefined : ctx.args.positionals[0];
+  if (!isKey && noun === undefined) {
+    throw new UsageError(`'${command}' names no type`, { hint: `Name one: signum ${command} <Type> --help` });
   }
-  const missing = unreadable > 0
-    ? "no readable outcome: the server's answer was cut off or malformed; check the record"
-    : "no outcome reported by the server";
-  return p.targets.map((t) => outcomes.get(recordKey(t.type, t.id)) ?? { target: t.shown, ok: false, error: missing });
-}
+  const target = resolveTarget(ctx);
+  const md = await loadMetadata({
+    url: target.url, http: target.http, offline: ctx.args.flags.offline, preferCache: true,
+    env: ctx.io.env, warn: (l) => ctx.io.err(l),
+  });
+  const targets = await targetsOf(ctx, inputReader(ctx.io), noun, isKey ? ctx.args.positionals : ctx.args.positionals.slice(1));
+  const op = isKey ? resolveKey(md, command, targets[0]?.type) : resolveVerbNoun(md, command, noun as string);
+  assertTargetsOfType(op, targets);
+  const facts = operationFacts(op);
+  const from = md.origin.fromCache ? `  (metadata cached ${md.origin.fetchedAt})` : "";
 
-/** 0 when every record succeeded, 10 when some did, 1 when none did (AC-45.3). */
-function bulkExit(outcomes: readonly BulkOutcome[]): ExitCode {
-  const failed = outcomes.filter((o) => !o.ok).length;
-  if (failed === 0) return ExitCode.Ok;
-  return failed === outcomes.length ? ExitCode.Unexpected : ExitCode.PartialFailure;
-}
-
-function renderOutcomes(ctx: Ctx, outcomes: readonly BulkOutcome[], verdictWord: { ok: string; failed: string }): void {
-  if (ctx.format === "json") {
-    renderDocument(outcomes, { format: "json", write: ctx.io.out });
-  } else if (ctx.format === "ndjson") {
-    for (const o of outcomes) ctx.io.out(JSON.stringify(o) + "\n");
+  // Permission is per record; reflection lists only what this login may run at all (#112).
+  const named = targets[0];
+  // As the caller wrote it when that was a handle, which must not be resolved in output; else as Type;id.
+  const record = named === undefined ? undefined
+    : { ...named, shown: isHandle(named.shown) ? named.shown : `${cleanName(named.type)};${named.id}` };
+  let permitted: Record<string, unknown>;
+  if (record === undefined) {
+    const constructs = op.info.kind === "Constructor";
+    permitted = {
+      permission: null,
+      permissionNote: constructs
+        ? "Listed only for a login that may run it; the server checks the rest when it runs."
+        : `Whether this login may run it depends on the record: name one (signum ${kebab(op.info.verb)} ${kebab(op.type.name)} 42 --help), or use --dry-run.`,
+    };
+  } else if (ctx.args.flags.offline || target.tokenSource === "none") {
+    permitted = {
+      permission: null,
+      permissionNote: ctx.args.flags.offline
+        ? `Not asked for ${record.shown}: --offline, and permission is a live question.`
+        : `Not asked for ${record.shown}: that needs a login.`,
+    };
   } else {
-    for (const o of outcomes) ctx.io.out(o.ok ? `${verdictWord.ok}  ${o.target}\n` : `${verdictWord.failed}  ${o.target}: ${o.error}\n`);
+    const verdict = permission(await packCanExecute(target, record), op.key);
+    permitted = { permission: { record: record.shown, permitted: verdict.ok, ...(verdict.reason !== undefined ? { reason: verdict.reason } : {}) } };
   }
-  const failed = outcomes.filter((o) => !o.ok).length;
-  ctx.io.err(`${outcomes.length - failed} of ${outcomes.length} ${verdictWord.ok === "permitted" ? "permitted" : "succeeded"}` +
-    (failed > 0 ? `; ${failed} ${verdictWord.ok === "permitted" ? "not permitted" : "failed"}` : "") + "\n");
-}
-
-/**
- * `--dry-run` over many records: each record's own `canExecute` from its entity pack (AC-45.5,
- * #119). `stateCanExecutes` answers for the SET as a whole, which is the blanket answer a per-record
- * dry run must not give. Reads only; no `api/operation/*` request.
- */
-async function bulkDryRun(ctx: Ctx, target: Target, p: BulkPlan): Promise<ExitCode> {
-  const outcomes: BulkOutcome[] = [];
-  for (const t of p.targets) {
-    const { ok, reason } = permission(await packCanExecute(target, t), p.op.key);
-    outcomes.push({ target: t.shown, ok, ...(reason !== undefined ? { error: reason } : {}) });
-  }
-  renderOutcomes(ctx, outcomes, { ok: "permitted", failed: "blocked" });
-  ctx.io.err("note: a dry run checks permission, not success: a permitted operation can still fail when run.\n");
-  const blocked = outcomes.filter((o) => !o.ok).length;
-  return blocked === 0 ? ExitCode.Ok : ExitCode.NotAuthorized;
-}
-
-async function runBulk(ctx: Ctx, target: Target, p: BulkPlan, mode: { explain: boolean; dry: boolean }): Promise<ExitCode> {
-  if (mode.explain) {
-    renderDocument({ method: "POST", url: `${target.url}/${bulkPath(p)}`, body: bulkBody(p, shownTarget) },
-      { format: ctx.format === "table" ? "json" : ctx.format, write: ctx.io.out });
-    if (!mode.dry) return ExitCode.Ok;
-  }
-  if (mode.dry) return await bulkDryRun(ctx, target, p);
-
-  const real = (t: OperationTarget) => `${cleanName(t.type)};${t.id}`;
-  const isDelete = p.route === "deleteMultiple";
-  // The count first, before anything else can scroll it away (AC-45.5).
-  ctx.io.err(`${p.op.key} on ${p.targets.length} records\n`);
-  const permit = await confirmMutation(ctx, {
-    operation: p.op.key,
-    target: `${p.targets.length} records`,
-    realTarget: p.targets.map(real).join(", "),
-    url: target.url,
-    destructive: isDelete,
-    records: p.targets.map(real),
-  });
-
-  let response: unknown;
-  try {
-    response = (await target.http.request<unknown>({
-      method: "POST", path: bulkPath(p), rawBody: JSON.stringify(bulkBody(p, liteJson)), lossless: true,
-    })).body;
-  } catch (err) {
-    // The request as a whole failed: every record in it did.
-    const viaHandle = p.targets.some((t) => isHandle(t.shown));
-    const failure = explainSendError(err, viaHandle ? `a record among the ${p.targets.length} was not found` : undefined);
-    for (const t of p.targets) recordMutation(ctx, permit, failureOf(failure), { realTarget: real(t), target: t.shown });
-    throw failure;
-  }
-
-  if (p.route === "constructFromMany") {
-    // One new entity from many records: a pack, not a stream.
-    recordMutation(ctx, permit, { ok: true });
-    if (response === null || response === undefined || response === "") {
-      ctx.io.err(`note: ${p.op.key} declined to construct anything; nothing was returned.\n`);
-      return ExitCode.Ok;
-    }
-    if (!p.op.info.resultIsSaved) ctx.io.err(`note: ${p.op.key} returned a new ${p.op.type.name} that is NOT saved; nothing was stored.\n`);
-    renderPack(ctx, response);
-    return ExitCode.Ok;
-  }
-
-  const text = typeof response === "string" ? response : JSON.stringify(response);
-  const outcomes = parseOutcomes(p, text);
-  p.targets.forEach((t, i) => {
-    const o = outcomes[i] as BulkOutcome;
-    recordMutation(ctx, permit, o.ok ? { ok: true } : { ok: false, error: o.error ?? "", exitCode: ExitCode.PartialFailure },
-      { realTarget: real(t), target: t.shown });
-  });
-  renderOutcomes(ctx, outcomes, { ok: isDelete ? "deleted" : "ok", failed: "FAILED" });
-  return bulkExit(outcomes);
+  const p = permitted["permission"] as { record: string; permitted: boolean; reason?: string } | null;
+  const permissionLine = p === null
+    ? `  permission: ${String(permitted["permissionNote"])}`
+    : `  permission: on ${p.record}, ${p.permitted ? "permitted for this login" : `not permitted — ${p.reason ?? ""}`}`;
+  return {
+    doc: { ...facts.doc, ...permitted, source: { url: md.origin.url, metadataCachedAt: md.origin.fromCache ? md.origin.fetchedAt : null } },
+    text: `\n${op.type.name.toUpperCase()} IN THIS APPLICATION${from}\n\n${facts.text}${permissionLine}\n`,
+  };
 }

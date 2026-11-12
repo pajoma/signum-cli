@@ -23,7 +23,7 @@
  * "nothing is queryable".
  */
 
-import { SignumHttp } from "./http.ts";
+import { Explained, SignumHttp } from "./http.ts";
 import { loadMetadataCache, saveMetadataCache } from "./metadata-cache.ts";
 import { CliError, ExitCode, NotAuthenticatedError, NotAuthorizedError, NotFoundError, UsageError } from "./errors.ts";
 import { editDistance } from "./text.ts";
@@ -32,6 +32,10 @@ export interface MemberInfo {
   name: string;
   type: string | undefined;
   niceName: string | undefined;
+  /** `TypeReferenceTS.IsLite` (`ReflectionServer.cs:548`): a value for it is a Lite, `{EntityType, id}`. */
+  isLite?: boolean;
+  /** An MList, or another collection: a setter cannot address one of its rows by position. */
+  isCollection?: boolean;
 }
 
 /** `OperationType` (`Operation.cs:233-240`), serialized by name. */
@@ -69,6 +73,11 @@ export interface TypeInfo {
   kind: string | undefined;
   /** For entities only: `Main`, `Part`, `String`, `System`, … (`TypeInfoTS.EntityKind`, `:469`). */
   entityKind: string | undefined;
+  /**
+   * For entities only: `Master` or `Transactional` (`TypeInfoTS.EntityData`, `ReflectionServer.cs:470`).
+   * `api/fetchAll` refuses a Transactional type (`EntityController.cs:77-89`), so `get <Type>` asks first.
+   */
+  entityData?: string | undefined;
   niceName: string | undefined;
   members: MemberInfo[];
   operations: OperationInfo[];
@@ -112,7 +121,12 @@ function parseMembers(raw: unknown): MemberInfo[] {
     const typeName = t !== null && typeof t === "object"
       ? str((t as Record<string, unknown>)["name"])
       : str(t);
-    return { name, type: typeName, niceName: str(i["niceName"]) };
+    const ref = t !== null && typeof t === "object" ? t as Record<string, unknown> : {};
+    return {
+      name, type: typeName, niceName: str(i["niceName"]),
+      ...(ref["isLite"] === true ? { isLite: true } : {}),
+      ...(ref["isCollection"] === true ? { isCollection: true } : {}),
+    };
   });
 }
 
@@ -143,6 +157,7 @@ export function parseMetadata(payload: unknown, origin: Metadata["origin"]): Met
         name,
         kind: str(t["kind"]),
         entityKind: str(t["entityKind"]),
+        ...(str(t["entityData"]) !== undefined ? { entityData: str(t["entityData"]) } : {}),
         niceName: str(t["niceName"]),
         members: parseMembers(t["members"]),
         operations: parseOperations(t["operations"]),
@@ -314,6 +329,11 @@ export interface LoadMetadataOptions {
   http: SignumHttp;
   /** Skip the network entirely and use whatever is cached. */
   offline?: boolean;
+  /**
+   * A cached document is answer enough, and the network is asked only when there is none: help
+   * (AC-61.3), which must work offline with a warm cache and is no reason to wait for a server.
+   */
+  preferCache?: boolean;
   env?: NodeJS.ProcessEnv;
   warn?: (line: string) => void;
 }
@@ -324,7 +344,7 @@ export async function loadMetadata(opts: LoadMetadataOptions): Promise<Metadata>
   const authenticated = opts.http.hasToken;
   const cached = loadMetadataCache(opts.url, authenticated, opts.env);
 
-  if (opts.offline === true) {
+  if (opts.offline === true || (opts.preferCache === true && cached !== undefined)) {
     if (cached === undefined) {
       throw new CliError("no cached metadata for this target", ExitCode.Transport, {
         hint: "Run a command online once to populate the cache.",
@@ -341,6 +361,7 @@ export async function loadMetadata(opts: LoadMetadataOptions): Promise<Metadata>
       path: "api/reflection/types",
       allowAnonymous: true, // anonymous endpoint — no credential needed (AC-61.4)
       ifModifiedSince: cached?.lastModified,
+      prepare: true, // metadata to build a request with; sent under --explain too (REQ-053)
     });
 
     if (res.notModified && cached !== undefined) {
@@ -355,6 +376,7 @@ export async function loadMetadata(opts: LoadMetadataOptions): Promise<Metadata>
       url: opts.url, fetchedAt: new Date().toISOString(), fromCache: false, stale: false, authenticated,
     });
   } catch (err) {
+    if (err instanceof Explained) throw err;
     // A stale cache is used and flagged, never discarded (AC-61.6).
     if (cached !== undefined) {
       opts.warn?.(`warning: could not refresh metadata, using cache from ${cached.fetchedAt}\n`);

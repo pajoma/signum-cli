@@ -108,15 +108,15 @@ const FLAGS_WITH_VALUE = new Set([
   "url", "instance", "i", "output", "o", "timeout", "caller-context", "pseudonymize",
   "filter", "filter-json", "column", "order", "top", "page", "page-size",
   "context", "pseudonymize", "arg", "arg-string", "arg-lite", "arg-json",
-  "lite", "id", "filename", "f", "edit",
-  "in", "glob", "labels", "kind",
+  "lite", "id", "filename", "f", "edit", "setters-json",
+  "in", "glob", "labels", "kind", "auth-header",
 ]);
 
 /** Boolean flags — listing one above would make it demand a value. */
 export const BOOLEAN_FLAGS = new Set([
   "with-token", "exists", "count", "all", "yes", "y", "raw", "group",
   "resolve", "privacy", "list", "clear", "as-command", "dry-run", "in-place", "forget-labels", "lites", "entities",
-  "allow-custom-arg",
+  "allow-custom-arg", "progress", "protected", "unprotected",
 ]);
 
 /** Invariant: a flag cannot need a value and be boolean-only at once. Checked by test. */
@@ -185,7 +185,8 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
       switch (name) {
         case "help": case "h": flags.help = true; break;
         case "explain": flags.explain = true; break;
-        case "verbose": case "v": flags.verbose = true; break;
+        // `--trace` is REQ-053's name for it; `--verbose`/`-v` came first. One flag, three spellings (#122).
+        case "verbose": case "v": case "trace": flags.verbose = true; break;
         case "no-color": flags.noColor = true; break;
         case "json": flags.output = "json"; break;
         case "url": flags.url = value; break;
@@ -244,6 +245,12 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
   if (flags.url === undefined && flags.instance === undefined) {
     const instance = env["SIGNUM_INSTANCE"];
     const url = env["SIGNUM_URL"];
+    // The same rule for the environment as for the flags (AC-05.2: never a silent choice).
+    if (instance !== undefined && instance !== "" && url !== undefined && url !== "") {
+      throw new UsageError("SIGNUM_URL and SIGNUM_INSTANCE both name a target; unset one", {
+        hint: "Or name the target for this command with --url or -i, which takes precedence over both.",
+      });
+    }
     if (instance !== undefined && instance !== "") flags.instance = instance;
     else if (url !== undefined && url !== "") flags.url = url;
   }

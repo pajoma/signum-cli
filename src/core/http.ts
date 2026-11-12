@@ -13,7 +13,7 @@
  */
 
 import {
-  ConcurrencyError, NotAuthenticatedError, NotAuthorizedError, NotFoundError,
+  ConcurrencyError, InterruptedError, NotAuthenticatedError, NotAuthorizedError, NotFoundError,
   TransportError, ValidationError, CliError, ExitCode,
 } from "./errors.ts";
 import { rotateCredential } from "./credentials.ts";
@@ -25,12 +25,40 @@ export const REDACTED = "<redacted>";
 export interface HttpOptions {
   baseUrl: string;
   token?: string | undefined;
+  /** The header the token goes in, as `Bearer <token>`; `Authorization` unless the profile says otherwise (AC-05.1). */
+  authHeader?: string | undefined;
   timeoutMs?: number | undefined;
   /** Trace to stderr with credentials redacted (AC-11.2). */
   trace?: ((line: string) => void) | undefined;
   /** Called when the server rotates the token, so it can be persisted. */
   onTokenRotated?: ((token: string) => void) | undefined;
   env?: NodeJS.ProcessEnv;
+  /**
+   * `--explain` (REQ-053): every request not marked `prepare` is handed here, described with its
+   * credentials redacted, and NOT sent; the client then throws `Explained` to end the command. One
+   * place for every command, so a command added later cannot forget to honour the flag (#122).
+   */
+  explain?: ((request: ExplainedRequest) => void) | undefined;
+}
+
+/** A request as `--explain` shows it: everything that would be sent, credentials redacted. */
+export interface ExplainedRequest {
+  method: string;
+  url: string;
+  headers: Record<string, string>;
+  body?: unknown;
+}
+
+/**
+ * Thrown once `--explain` has shown the request a command was about to send. Not a `CliError`, so a
+ * command's own error handling — which maps failures to messages — cannot mistake it for one; the
+ * entry point turns it into exit 0.
+ */
+export class Explained extends Error {
+  constructor() {
+    super("explained; nothing was sent");
+    this.name = "Explained";
+  }
 }
 
 /**
@@ -50,6 +78,14 @@ export type RequestSpec = RequestBody & {
   /** Sent even when no token is stored — used for anonymous endpoints. */
   allowAnonymous?: boolean;
   ifModifiedSince?: string | undefined;
+  /** Abort the request — the caller's interrupt (AC-45.6). Reported as `InterruptedError`. */
+  signal?: AbortSignal | undefined;
+  /**
+   * A read the command needs in order to BUILD its request — metadata, a query's tokens, a dry
+   * run's permission check — and so sent even under `--explain`, as its help says ("metadata may be
+   * fetched"). Never an operation: a request that can change data is refused this mark.
+   */
+  prepare?: boolean;
 };
 
 export interface HttpResponse<T = unknown> {
@@ -62,10 +98,12 @@ export interface HttpResponse<T = unknown> {
 
 const SENSITIVE_HEADERS = new Set(["authorization", "x-apikey", "new_token", "cookie"]);
 
-function redactHeaders(headers: Record<string, string>): Record<string, string> {
+/** `authHeader`: a profile's own header name for the token is as secret as `Authorization`. */
+function redactHeaders(headers: Record<string, string>, authHeader?: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(headers)) {
-    out[k] = SENSITIVE_HEADERS.has(k.toLowerCase()) ? REDACTED : v;
+    const secret = SENSITIVE_HEADERS.has(k.toLowerCase()) || k.toLowerCase() === authHeader?.toLowerCase();
+    out[k] = secret ? REDACTED : v;
   }
   return out;
 }
@@ -143,6 +181,10 @@ export class SignumHttp {
     return this.opts.baseUrl;
   }
 
+  private get authHeader(): string {
+    return this.opts.authHeader ?? "Authorization";
+  }
+
   /**
    * Whether this client will send a credential. Reflection responses are role-dependent
    * (`AuthServer.cs:143-157` clears `QueryDefined` for anything the caller may not query, and
@@ -154,6 +196,119 @@ export class SignumHttp {
   }
 
   async request<T = unknown>(spec: RequestSpec): Promise<HttpResponse<T>> {
+    const res = await this.open(spec);
+    if (res.status === 304) {
+      return { status: 304, body: undefined as T, headers: res.headers, notModified: true };
+    }
+    const body = await this.readBody(res, spec);
+    if (res.ok) return { status: res.status, body: body as T, headers: res.headers, notModified: false };
+    throw this.toError(res.status, body);
+  }
+
+  /**
+   * A response read line by line, as it arrives: the multi and progress endpoints write NDJSON and
+   * flush after every line (`OperationController.cs:598-624`). Each complete line is handed over at
+   * once, so a caller can act on it before the rest arrives; a last line with no newline — a stream
+   * that broke off — is handed over too, and it is the caller's to judge. An error status is read
+   * whole and thrown like `request`'s.
+   */
+  async requestLines(spec: RequestSpec, onLine: (line: string) => void): Promise<{ status: number; headers: Headers }> {
+    const res = await this.open(spec);
+    if (!res.ok) throw this.toError(res.status, await this.readBody(res, spec));
+    if (res.body === null) return { status: res.status, headers: res.headers };
+    // UTF-8 whatever the platform says, and a character split across chunks is held until whole.
+    const decoder = new TextDecoder("utf-8");
+    let pending = "";
+    const reader = res.body.getReader();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        pending += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = pending.indexOf("\n")) !== -1) {
+          const line = pending.slice(0, nl);
+          pending = pending.slice(nl + 1);
+          if (line.trim() !== "") onLine(line);
+        }
+      }
+    } catch (err) {
+      if (spec.signal?.aborted === true) throw new InterruptedError();
+      throw new TransportError(`the response from ${this.opts.baseUrl} broke off`, {
+        hint: "The server may still have acted on part of the request.",
+        cause: err,
+      });
+    }
+    pending += decoder.decode();
+    if (pending.trim() !== "") onLine(pending);
+    return { status: res.status, headers: res.headers };
+  }
+
+  /**
+   * An error body from inside a stream (`ProgressStep.error`), as the error it would have been as a
+   * response: the status is the one the server's filter gives that exception type
+   * (`SignumExceptionFilterAttribute.GetStatus`, `:131-146`).
+   */
+  errorFromBody(body: unknown): CliError {
+    const type = exceptionType(body) ?? "";
+    const status = type.endsWith("UnauthorizedAccessException") || type.endsWith("AuthenticationException") ? 403
+      : type.endsWith("EntityNotFoundException") ? 404
+      : type.endsWith("IntegrityCheckException") ? 400
+      : 500;
+    return this.toError(status, body);
+  }
+
+  private async readBody(res: Response, spec: RequestSpec): Promise<unknown> {
+    const text = await res.text();
+    let body: unknown = text;
+    const contentType = res.headers.get("content-type") ?? "";
+    if (text !== "" && (contentType.includes("json") || text.startsWith("{") || text.startsWith("["))) {
+      try {
+        body = spec.lossless === true ? parseLossless(text) : JSON.parse(text);
+      } catch {
+        body = text;
+      }
+    }
+    return body;
+  }
+
+  /** Whether `--explain` is on: requests not marked `prepare` are described, never sent. */
+  get explaining(): boolean {
+    return this.opts.explain !== undefined;
+  }
+
+  /** The request as `--explain` shows it. `body` replaces the real one where it would disclose more. */
+  describe(spec: RequestSpec, body?: unknown): ExplainedRequest {
+    const headers: Record<string, string> = { accept: "application/json", ...(spec.headers ?? {}) };
+    if (this.opts.token !== undefined && this.opts.token !== "") headers[this.authHeader] = `Bearer ${this.opts.token}`;
+    const payload = spec.rawBody ?? (spec.body !== undefined ? JSON.stringify(spec.body) : undefined);
+    if (payload !== undefined) headers["content-type"] = "application/json";
+    if (spec.ifModifiedSince !== undefined) headers["if-modified-since"] = spec.ifModifiedSince;
+    let shown: unknown = body;
+    if (shown === undefined && payload !== undefined) {
+      try {
+        shown = parseLossless(payload);
+      } catch {
+        shown = payload;
+      }
+    }
+    return {
+      method: spec.method,
+      url: buildUrl(this.opts.baseUrl, spec.path, spec.query),
+      headers: redactHeaders(headers, this.authHeader),
+      ...(shown !== undefined ? { body: shown } : {}),
+    };
+  }
+
+  /** Send, adopt a rotated token, and hand back the response unread. */
+  private async open(spec: RequestSpec): Promise<Response> {
+    if (spec.prepare === true && spec.path.replace(/^\/+/, "").startsWith("api/operation/")) {
+      throw new CliError("internal: an operation request was marked as preparation, which --explain would send", ExitCode.Unexpected);
+    }
+    if (this.opts.explain !== undefined && spec.prepare !== true) {
+      this.opts.explain(this.describe(spec));
+      throw new Explained();
+    }
     const url = buildUrl(this.opts.baseUrl, spec.path, spec.query);
     const headers: Record<string, string> = {
       accept: "application/json",
@@ -161,7 +316,7 @@ export class SignumHttp {
     };
 
     if (this.opts.token !== undefined && this.opts.token !== "") {
-      headers["Authorization"] = `Bearer ${this.opts.token}`;
+      headers[this.authHeader] = `Bearer ${this.opts.token}`;
     } else if (spec.allowAnonymous !== true) {
       throw new NotAuthenticatedError("no stored credential for this target", {
         loginHint: { url: this.opts.baseUrl, render: (login) => "Run `" + login + " --with-token`. See `signum help auth`." },
@@ -174,7 +329,7 @@ export class SignumHttp {
 
     this.opts.trace?.(`> ${spec.method} ${url}\n`);
     if (this.opts.trace !== undefined) {
-      for (const [k, v] of Object.entries(redactHeaders(headers))) {
+      for (const [k, v] of Object.entries(redactHeaders(headers, this.authHeader))) {
         this.opts.trace(`> ${k}: ${v}\n`);
       }
     }
@@ -182,16 +337,21 @@ export class SignumHttp {
     const controller = new AbortController();
     const timeout = this.opts.timeoutMs ?? 30_000;
     const timer = setTimeout(() => controller.abort(), timeout);
+    const signal = spec.signal !== undefined ? AbortSignal.any([controller.signal, spec.signal]) : controller.signal;
 
     let res: Response;
     try {
       res = await fetch(url, {
         method: spec.method,
         headers,
-        signal: controller.signal,
+        signal,
+        // Never followed: fetch drops `Authorization` on a cross-origin hop but keeps every other
+        // header, so a profile's own token header would travel to wherever a redirect points.
+        redirect: "manual",
         ...(payload !== undefined ? { body: payload } : {}),
       });
     } catch (err) {
+      if (spec.signal?.aborted === true) throw new InterruptedError();
       const aborted = err instanceof Error && err.name === "AbortError";
       throw new TransportError(
         aborted ? `request timed out after ${timeout}ms` : `could not reach ${this.opts.baseUrl}`,
@@ -223,24 +383,19 @@ export class SignumHttp {
       }
     }
 
-    if (res.status === 304) {
-      return { status: 304, body: undefined as T, headers: res.headers, notModified: true };
+    // A Signum API does not redirect; a proxy or a moved site does. Refused, with where it pointed.
+    if (res.status >= 300 && res.status < 400 && res.status !== 304) {
+      const location = res.headers.get("location");
+      void res.body?.cancel();
+      const to = location !== null ? new URL(location, url).toString() : "elsewhere (no Location given)";
+      throw new TransportError(`${this.opts.baseUrl} answered ${res.status}, redirecting to ${to}`, {
+        hint:
+          "signum does not follow redirects, so the credential was not sent there. If the application\n" +
+          "moved, use its new address (--url, or `signum instance remove` and `instance add`).",
+      });
     }
 
-    const text = await res.text();
-    let body: unknown = text;
-    const contentType = res.headers.get("content-type") ?? "";
-    if (text !== "" && (contentType.includes("json") || text.startsWith("{") || text.startsWith("["))) {
-      try {
-        body = spec.lossless === true ? parseLossless(text) : JSON.parse(text);
-      } catch {
-        body = text;
-      }
-    }
-
-    if (res.ok) return { status: res.status, body: body as T, headers: res.headers, notModified: false };
-
-    throw this.toError(res.status, body);
+    return res;
   }
 
   private toError(status: number, body: unknown): CliError {

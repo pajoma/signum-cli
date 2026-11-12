@@ -19,18 +19,33 @@ export interface Io {
   env: NodeJS.ProcessEnv;
   readStdin: () => Promise<string>;
   /**
-   * Ask the person at the terminal something. `hidden` suppresses echo, for a credential.
+   * Ask the person at the terminal something. `hidden` suppresses echo, for a credential. `signal`
+   * withdraws the question when the answer arrived another way (AC-12.9): the prompt then resolves
+   * with "" and stops reading the terminal.
    *
    * Absent when there is nothing to ask — no TTY, or a test that has not opted in — so every caller
    * must handle its absence rather than assume an interactive human is there (STORY-09: never hang
    * waiting for input that cannot arrive).
    */
-  prompt?: ((question: string, opts?: { hidden?: boolean }) => Promise<string>) | undefined;
+  prompt?: ((question: string, opts?: { hidden?: boolean; signal?: AbortSignal }) => Promise<string>) | undefined;
+  /**
+   * Run `handler` on the caller's interrupt (Ctrl-C) instead of dying at once, until the returned
+   * function is called. For a request whose server keeps working: what it already did must still be
+   * reported and logged (AC-45.6). Absent where nothing can interrupt.
+   */
+  onInterrupt?: ((handler: () => void) => () => void) | undefined;
 }
 
 export interface Ctx {
   args: ParsedArgs;
   io: Io;
+  /**
+   * The target application's URL, resolved once (REQ-001, AC-05.2): `--url` or `-i`, then
+   * SIGNUM_URL or SIGNUM_INSTANCE, then the default target (`auth switch`, else the latest login).
+   * Undefined when none applies. Everything kept per target — the handle store, the surrogates —
+   * is keyed by it, so one run never mixes two applications.
+   */
+  target: string | undefined;
   format: OutputFormat;
   color: boolean;
   caller: CallerDetection;
@@ -83,4 +98,25 @@ export function optAll(ctx: Ctx, name: string): string[] {
 
 export function flag(ctx: Ctx, name: string): boolean {
   return ctx.args.booleans.has(declared(ctx, name));
+}
+
+/**
+ * Run `work` with Ctrl-C turned into an abort of its request instead of the death of the process,
+ * so what the server already did can still be reported and logged (AC-45.6), and what was already
+ * written can be closed so it stays valid (AC-23.5). A second Ctrl-C is
+ * the default again: whoever presses it twice means it.
+ */
+export async function interruptible<T>(ctx: Ctx, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  let release: (() => void) | undefined;
+  release = ctx.io.onInterrupt?.(() => {
+    release?.();
+    release = undefined;
+    controller.abort();
+  });
+  try {
+    return await work(controller.signal);
+  } finally {
+    release?.();
+  }
 }

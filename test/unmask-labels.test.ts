@@ -318,12 +318,22 @@ describe("--labels fetch fills the gaps", () => {
 
   const url = (): string => `http://127.0.0.1:${server.port}`;
 
+  it("asks only for this application's handles: another's Type;id names a different record (#121)", async () => {
+    saveHandles({ ref_aaaaaaaaaaaa: { lite: "Project;20" } }, env(), { target: "https://other.example" });
+    file("r.md", "ref_aaaaaaaaaaaa");
+    const r = await cli(["unmask", "--in", work, "--labels", "fetch", "--url", url()], { SIGNUM_TOKEN: "t" });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(requests).toHaveLength(0);
+    // Still resolved for reading — by identity, since this application cannot vouch for its label.
+    expect(readFileSync(join(work, "r.local.md"), "utf8")).toBe("Project;20");
+  });
+
   it("batches by entity type — one round trip per type, not per handle", async () => {
     saveHandles({
       ref_aaaaaaaaaaaa: { lite: "Project;20" },
       ref_bbbbbbbbbbbb: { lite: "Project;21" },
       ref_cccccccccccc: { lite: "User;42" },
-    }, env());
+    }, env(), { target: url() });
     file("r.md", "ref_aaaaaaaaaaaa ref_bbbbbbbbbbbb ref_cccccccccccc");
     const r = await cli(["unmask", "--in", work, "--labels", "fetch", "--url", url()], { SIGNUM_TOKEN: "t" });
     expect(r.code).toBe(ExitCode.Ok);
@@ -334,10 +344,10 @@ describe("--labels fetch fills the gaps", () => {
   });
 
   it("caches what it fetched, so a second run needs no request", async () => {
-    saveHandles({ ref_aaaaaaaaaaaa: { lite: "Project;20" } }, env());
+    saveHandles({ ref_aaaaaaaaaaaa: { lite: "Project;20" } }, env(), { target: url() });
     file("r.md", "ref_aaaaaaaaaaaa");
     await cli(["unmask", "--in", work, "--labels", "fetch", "--url", url()], { SIGNUM_TOKEN: "t" });
-    expect(loadHandleEntries(env())["ref_aaaaaaaaaaaa"]?.label).toBe("Website Relaunch");
+    expect(loadHandleEntries(env(), url())["ref_aaaaaaaaaaaa"]?.label).toBe("Website Relaunch");
     requests.length = 0;
     const again = await cli(["unmask", "--in", work, "--url", url()], { SIGNUM_TOKEN: "t" });
     expect(again.code).toBe(ExitCode.Ok);
@@ -345,7 +355,7 @@ describe("--labels fetch fills the gaps", () => {
   });
 
   it("the default makes no network call at all", async () => {
-    saveHandles({ ref_aaaaaaaaaaaa: { lite: "Project;20" } }, env());
+    saveHandles({ ref_aaaaaaaaaaaa: { lite: "Project;20" } }, env(), { target: url() });
     file("r.md", "ref_aaaaaaaaaaaa");
     const r = await cli(["unmask", "--in", work, "--url", url()], { SIGNUM_TOKEN: "t" });
     expect(r.code).toBe(ExitCode.Ok);
@@ -355,18 +365,18 @@ describe("--labels fetch fills the gaps", () => {
 
   it("uses fetched labels for the run but does not store them when storeLabels is false", async () => {
     writeFileSync(join(dir, "privacy.json"), JSON.stringify({ storeLabels: false }), "utf8");
-    saveHandles({ ref_aaaaaaaaaaaa: { lite: "Project;20" } }, env());
+    saveHandles({ ref_aaaaaaaaaaaa: { lite: "Project;20" } }, env(), { target: url() });
     file("r.md", "ref_aaaaaaaaaaaa");
     const r = await cli(["unmask", "--in", work, "--labels", "fetch", "--url", url()], { SIGNUM_TOKEN: "t" });
     expect(r.code).toBe(ExitCode.Ok);
     // Substituted in the output...
     expect(readFileSync(join(work, "r.local.md"), "utf8")).toBe("Website Relaunch");
     // ...and deliberately not written down.
-    expect(loadHandleEntries(env())["ref_aaaaaaaaaaaa"]?.label).toBeUndefined();
+    expect(loadHandleEntries(env(), url())["ref_aaaaaaaaaaaa"]?.label).toBeUndefined();
   });
 
   it("sends the ids for the type and no surrogate, which is what keeps the promise", async () => {
-    saveHandles({ ref_aaaaaaaaaaaa: { lite: "Project;20" } }, env());
+    saveHandles({ ref_aaaaaaaaaaaa: { lite: "Project;20" } }, env(), { target: url() });
     file("r.md", "ref_aaaaaaaaaaaa");
     await cli(["unmask", "--in", work, "--labels", "fetch", "--url", url()], { SIGNUM_TOKEN: "t" });
     const sent = JSON.stringify(requests[0]);

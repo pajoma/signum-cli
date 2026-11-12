@@ -23,6 +23,8 @@ export const ExitCode = {
   Policy: 9,
   /** Some records of a bulk operation failed and some did not (AC-45.3); all failing is 1. */
   PartialFailure: 10,
+  /** Stopped by the caller (Ctrl-C) while the server was working (AC-45.6); 128 + SIGINT, by convention. */
+  Interrupted: 130,
 } as const;
 
 export type ExitCode = (typeof ExitCode)[keyof typeof ExitCode];
@@ -40,6 +42,7 @@ export const EXIT_CODE_DESCRIPTIONS: Record<ExitCode, string> = {
   [ExitCode.Transport]: "network or timeout",
   [ExitCode.Policy]: "blocked by policy",
   [ExitCode.PartialFailure]: "partial failure — some records of a bulk operation failed; the output lists which",
+  [ExitCode.Interrupted]: "interrupted — stopped while the server was working; the output says how far it got",
 };
 
 export interface CliErrorOptions {
@@ -123,6 +126,13 @@ export class ConcurrencyError extends CliError {
 export class TransportError extends CliError {
   constructor(message: string, options: CliErrorOptions = {}) {
     super(message, ExitCode.Transport, options);
+  }
+}
+
+/** The caller stopped a request in flight (AC-45.6). What the server already did, it did. */
+export class InterruptedError extends CliError {
+  constructor(message = "interrupted", options: CliErrorOptions = {}) {
+    super(message, ExitCode.Interrupted, options);
   }
 }
 

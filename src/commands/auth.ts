@@ -11,12 +11,15 @@ import { ExitCode, NotAuthenticatedError, TransportError, UsageError } from "../
 import { renderDocument } from "../core/output.ts";
 import {
   defaultCredentialUrl, deleteAllCredentials, deleteCredential, loadCredential, permissionsAreUnenforceable, saveCredential,
-  storedCredentialUrls,
+  setDefaultTarget, storedCredentialUrls,
 } from "../core/credentials.ts";
-import { appVersionFrom, SignumHttp } from "../core/http.ts";
+import { authHeaderFor, DEFAULT_AUTH_HEADER, instanceForUrl, listInstances, resolveInstance, validateUrl } from "../core/instances.ts";
+import { normalizeUrl } from "../core/text.ts";
+import { appVersionFrom, Explained, SignumHttp } from "../core/http.ts";
 import { flag } from "../core/ctx.ts";
-import { resolveTarget } from "../core/target.ts";
+import { explainSink, resolveTarget } from "../core/target.ts";
 import { handoffInstructions, loginCommand } from "../core/handoff.ts";
+import { listenForToken } from "../core/capture.ts";
 
 /** Generic form, for error hints where no target URL is known (`auth status` on a fresh install). */
 
@@ -30,14 +33,29 @@ import { handoffInstructions, loginCommand } from "../core/handoff.ts";
  *   • it prints the CONCRETE url, which is clickable in most terminals, instead of `<url>`
  *   • it prompts inline, so the next thing you do is on the line your cursor is already on
  */
-function handoffPreamble(url: string): string {
+function handoffPreamble(url: string, snippet: string | undefined): string {
+  if (snippet === undefined) {
+    return [
+      "Browser will not be opened automatically.",
+      "Please sign in at",
+      `  ${url}`,
+      "",
+      "Then open the browser console and run",
+      '  sessionStorage.getItem("authToken")',
+      "",
+      "",
+    ].join("\n");
+  }
+  // AC-12.9: the snippet hands the token over itself; pasting stays offered beside it (AC-12.1).
   return [
     "Browser will not be opened automatically.",
     "Please sign in at",
     `  ${url}`,
     "",
-    "Then open the browser console and run",
-    '  sessionStorage.getItem("authToken")',
+    "Then, in the browser console of a tab on that site, run this line to send the token here:",
+    `  ${snippet}`,
+    "",
+    'Or run sessionStorage.getItem("authToken") there and paste the value below.',
     "",
     "",
   ].join("\n");
@@ -96,12 +114,29 @@ async function login(ctx: Ctx): Promise<ExitCode> {
         hint: "The token is read from stdin so it never appears in shell history.\n\n" + handoff,
       });
     }
-    ctx.io.err(handoffPreamble(url));
-    token = (await ctx.io.prompt("Enter the token displayed in your browser: ", { hidden: true })).trim();
-    // Silence is safe but disorienting for a value this long — you cannot see a truncated paste.
-    // A character count confirms something arrived without putting the token on screen or in
-    // scrollback. The immediate currentUser check is what catches a bad one either way (AC-12.3).
-    if (token !== "") ctx.io.err(`Received ${token.length} characters.\n`);
+    // Assisted capture (AC-12.9) races the paste: whichever brings a token first wins, and the other
+    // is withdrawn. Not under --explain, which stores nothing and so has nothing to wait for.
+    const listener = ctx.args.flags.explain ? undefined : listenForToken(url);
+    ctx.io.err(handoffPreamble(url, listener?.snippet));
+    const withdraw = new AbortController();
+    try {
+      const pasted = ctx.io.prompt(
+        listener !== undefined ? "Waiting for the token; or paste it: " : "Enter the token displayed in your browser: ",
+        { hidden: true, signal: withdraw.signal },
+      ).then((t) => ({ token: t, via: "paste" as const }));
+      const sent = listener?.token.then((t) => ({ token: t, via: "browser" as const }));
+      const first = await (sent !== undefined ? Promise.race([pasted, sent]) : pasted);
+      token = first.token.trim();
+      // Silence is safe but disorienting for a value this long — you cannot see a truncated paste.
+      // A character count confirms something arrived without putting the token on screen or in
+      // scrollback. The immediate currentUser check is what catches a bad one either way (AC-12.3).
+      if (token !== "") {
+        ctx.io.err(first.via === "browser" ? "\nReceived the token from the browser.\n" : `Received ${token.length} characters.\n`);
+      }
+    } finally {
+      withdraw.abort();
+      listener?.close();
+    }
   } else {
     token = (await ctx.io.readStdin()).trim();
   }
@@ -122,9 +157,12 @@ async function login(ctx: Ctx): Promise<ExitCode> {
   const http = new SignumHttp({
     baseUrl: url,
     token,
+    authHeader: authHeaderFor(url, ctx.io.env),
     timeoutMs: ctx.args.flags.timeoutMs,
     trace: ctx.args.flags.verbose ? (l) => ctx.io.err(l) : undefined,
     onTokenRotated: (fresh) => { rotated = fresh; },
+    // `auth login --explain` shows the verification request, token redacted, and stores nothing.
+    explain: explainSink(ctx),
     env: ctx.io.env,
   });
 
@@ -211,14 +249,80 @@ function userName(user: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * Every profile this machine knows (AC-05.4): each registered instance, and each URL with a stored
+ * credential that no instance names. A profile is a target — its URL, the credential stored for it,
+ * and what is kept per target: the metadata cache and the handle store. Only local state is read;
+ * no other target is contacted, and no token is shown.
+ */
+function profiles(ctx: Ctx): Array<{
+  instance: string | null; url: string; credential: "stored" | "none"; active: boolean; default: boolean;
+  protected: boolean; authHeader: string;
+}> {
+  const env = ctx.io.env;
+  const active = ctx.target !== undefined ? normalizeUrl(ctx.target) : undefined;
+  const fallback = defaultCredentialUrl(env);
+  const byUrl = new Map<string, { instance: string | null; url: string; protected: boolean }>();
+  for (const i of listInstances(env)) byUrl.set(normalizeUrl(i.url), { instance: i.slug, url: i.url, protected: i.protected === true });
+  for (const u of storedCredentialUrls(env)) if (!byUrl.has(normalizeUrl(u))) byUrl.set(normalizeUrl(u), { instance: null, url: u, protected: false });
+  return [...byUrl.entries()].map(([key, p]) => ({
+    ...p,
+    credential: loadCredential(p.url, env) !== undefined ? "stored" as const : "none" as const,
+    active: key === active,
+    default: fallback !== undefined && key === normalizeUrl(fallback),
+    authHeader: authHeaderFor(p.url, env),
+  }));
+}
+
+function renderProfiles(ctx: Ctx, list: ReturnType<typeof profiles>): void {
+  if (list.length === 0) return;
+  ctx.io.out("\nProfiles      (* this command's target; default: used when none is named)\n");
+  for (const p of list) {
+    const marks = [
+      p.default ? "default" : "", p.protected ? "protected" : "",
+      p.credential === "stored" ? "credential stored" : "no credential",
+      p.authHeader !== DEFAULT_AUTH_HEADER ? `token in ${p.authHeader}` : "",
+    ].filter((m) => m !== "").join(", ");
+    ctx.io.out(`  ${p.active ? "*" : " "} ${(p.instance ?? "-").padEnd(14)} ${p.url}  (${marks})\n`);
+  }
+}
+
+/**
+ * `auth switch <instance|url>`: change the default target (AC-05.2). A flag or variable still wins
+ * over it, as the resolution order says — which is reported, since a switch that seems not to take
+ * is otherwise baffling.
+ */
+function switchTarget(ctx: Ctx): ExitCode {
+  const named = ctx.args.positionals[1];
+  if (named === undefined) {
+    throw new UsageError("`auth switch` needs the instance or URL to make the default", { hint: "signum auth switch <instance>   or   signum auth switch <url>" });
+  }
+  const url = /^https?:\/\//i.test(named) ? validateUrl(named) : resolveInstance(named, ctx.io.env);
+  if (!setDefaultTarget(url, ctx.io.env)) {
+    const instance = instanceForUrl(url, ctx.io.env);
+    throw new UsageError(`no stored credential for ${instance ?? url}, so it cannot be the default`, {
+      hint: `Log in first: signum ${instance !== undefined ? `-i ${instance}` : `--url ${url}`} auth login`,
+    });
+  }
+  const instance = instanceForUrl(url, ctx.io.env);
+  ctx.io.out(`Default target: ${instance !== undefined ? `${instance} (${url})` : url}\n`);
+  const overriding = ["SIGNUM_INSTANCE", "SIGNUM_URL"].filter((v) => (ctx.io.env[v] ?? "") !== "");
+  if (overriding.length > 0) {
+    ctx.io.err(`note: ${overriding.join(" and ")} ${overriding.length > 1 ? "are" : "is"} set and still take${overriding.length > 1 ? "" : "s"} precedence over the default.\n`);
+  }
+  return ExitCode.Ok;
+}
+
 async function status(ctx: Ctx): Promise<ExitCode> {
-  const url = ctx.args.flags.url ?? defaultCredentialUrl(ctx.io.env);
+  const url = ctx.target;
   const stored = url !== undefined ? loadCredential(url, ctx.io.env) : undefined;
   const envToken = ctx.io.env["SIGNUM_TOKEN"];
   const hasEnvToken = envToken !== undefined && envToken !== "";
+  const known = profiles(ctx);
 
   const report = {
     target: url ?? null,
+    instance: url !== undefined ? instanceForUrl(url, ctx.io.env) ?? null : null,
     // An ambient SIGNUM_TOKEN outranks a stored one (see resolveTarget), so say which is in play.
     credential: hasEnvToken ? "environment" : stored !== undefined ? "stored" : "none",
     // A token is NEVER printed, not even truncated (AC-06.3).
@@ -231,15 +335,18 @@ async function status(ctx: Ctx): Promise<ExitCode> {
     appVersion: null as string | null,
     appBuildTime: null as string | null,
     detail: null as string | null,
+    profiles: known,
   };
 
   if (url === undefined) {
     if (ctx.format === "json" || ctx.format === "ndjson") {
       renderDocument(report, { format: ctx.format, write: ctx.io.out });
     } else {
-      ctx.io.out("Not configured.\n");
+      ctx.io.out(known.length > 0 ? "No target: none is named and there is no default.\n" : "Not configured.\n");
       if (hasEnvToken) ctx.io.out("SIGNUM_TOKEN is set, but no target URL is — pass --url or set SIGNUM_URL.\n");
-      ctx.io.out("\n" + handoffInstructions() + "\n");
+      renderProfiles(ctx, known);
+      if (known.length > 0) ctx.io.out("\nPick one with -i <instance>, or make it the default: signum auth switch <instance>\n");
+      else ctx.io.out("\n" + handoffInstructions() + "\n");
     }
     return ExitCode.NotAuthenticated;
   }
@@ -254,9 +361,10 @@ async function status(ctx: Ctx): Promise<ExitCode> {
     if (ctx.format === "json" || ctx.format === "ndjson") {
       renderDocument(report, { format: ctx.format, write: ctx.io.out });
     } else {
-      ctx.io.out(`Target        ${url}\n`);
+      ctx.io.out(`Target        ${report.instance !== null ? `${report.instance} (${url})` : url}\n`);
       ctx.io.out(`Credential    none for this target\n`);
       ctx.io.out(`Caller        ${ctx.caller.context}\n`);
+      renderProfiles(ctx, known);
       ctx.io.out("\nDiscovery works without credentials; data access does not.\n");
     }
     return ExitCode.NotAuthenticated;
@@ -275,6 +383,7 @@ async function status(ctx: Ctx): Promise<ExitCode> {
     report.appVersion = app.version ?? null;
     report.appBuildTime = app.buildTime ?? null;
   } catch (err) {
+    if (err instanceof Explained) throw err;
     // Only a TRANSPORT failure means the target is unreachable. A 403 proves the opposite: the
     // server answered. Reporting `reachable: false` next to "not authenticated: No authentication
     // information found!" sent a reader looking for a network problem that did not exist (#83).
@@ -285,7 +394,7 @@ async function status(ctx: Ctx): Promise<ExitCode> {
   if (ctx.format === "json" || ctx.format === "ndjson") {
     renderDocument(report, { format: ctx.format, write: ctx.io.out });
   } else {
-    ctx.io.out(`Target        ${url}\n`);
+    ctx.io.out(`Target        ${report.instance !== null ? `${report.instance} (${url})` : url}\n`);
     ctx.io.out(
       target.tokenSource === "environment"
         ? "Credential    SIGNUM_TOKEN (environment; not persisted, not rotated)\n"
@@ -308,6 +417,7 @@ async function status(ctx: Ctx): Promise<ExitCode> {
     if (ctx.args.flags.verbose) {
       for (const s of ctx.caller.signals) ctx.io.out(`              · ${s}\n`);
     }
+    renderProfiles(ctx, known);
     // The one credential is a single point of failure; say so (AC-12.13).
     ctx.io.err("\nThis token is the only credential for this application (no Signum.Rest, no password).\n");
     if (target.tokenSource === "environment") {
@@ -335,7 +445,7 @@ function logout(ctx: Ctx): ExitCode {
     removed = deleteAllCredentials(ctx.io.env);
   } else {
     // The named target, else the default one — the credential a bare command would have used.
-    const url = ctx.args.flags.url ?? defaultCredentialUrl(ctx.io.env);
+    const url = ctx.target;
     removed = url !== undefined && deleteCredential(url, ctx.io.env) ? [url] : [];
   }
   if (removed.length === 0) ctx.io.out("No stored credential.\n");
@@ -359,11 +469,12 @@ export async function runAuth(ctx: Ctx): Promise<ExitCode> {
     case "status":
     case "whoami": return await status(ctx); // REQ-007 names both
     case "logout": return logout(ctx);
+    case "switch": return switchTarget(ctx);
     case undefined:
       throw new UsageError("`auth` needs a subcommand", { hint: "Run `signum auth --help`." });
     default:
       throw new UsageError(`unknown auth subcommand '${sub}'`, {
-        hint: "Valid subcommands: login, status, logout, whoami (same as status).",
+        hint: "Valid subcommands: login, status, switch, logout, whoami (same as status).",
       });
   }
 }
