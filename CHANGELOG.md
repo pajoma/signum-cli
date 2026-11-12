@@ -5,6 +5,15 @@ source of truth: a release tag `v<version>` must match it (see the README's rele
 
 ## Unreleased
 
+### Changed
+
+- **Handles and surrogates are now per target application** (#121). The same record has a
+  different `ref_` handle in each application, and a handle minted against one never resolves
+  against another — before, a handle from a test instance resolved against production, to the
+  record with the same id there. So handles and surrogates minted before this change no longer
+  resolve or match for queries and operations; re-run the query to get fresh ones. `unmask` still
+  reads the old store, so documents written with old handles stay readable.
+
 ### Added
 
 - **Writes: operations can be executed** (milestone m2; #112, #113, #114, #115, #116, #117). Every
@@ -45,6 +54,12 @@ source of truth: a release tag `v<version>` must match it (see the README's rele
     `query -o ndjson`, so a query's answer can be piped into the operation that acts on it.
   - `--progress` runs one record through `executeLiteWithProgress` and shows the server's progress
     (AC-45.2).
+- **Profiles: several applications, kept apart** (#121). A profile is a target: an instance or a
+  URL, its credential, its metadata cache and its handle store. `signum auth switch <instance>`
+  makes one the default; `--url`/`-i`, then `SIGNUM_URL`/`SIGNUM_INSTANCE`, still come first, and
+  setting both variables is now refused rather than one silently winning. `auth status` lists every
+  profile and marks the active one and the default, and a write's confirmation names the instance
+  beside the URL.
 - **Structured input from files and stdin** (#120). `-f <file|@file|->` saves an edited entity
   document: write it with `signum get Order;42 -o json`, change what you need, and
   `signum save order -f order.json --yes` applies only what you changed — also to a pseudonymized

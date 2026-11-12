@@ -143,7 +143,7 @@ async function expandRecords(input: InputReader, flagName: string, values: reado
  * also take `@file` and `-` (#120). More than one record makes it a bulk operation (#119).
  */
 async function targetsOf(ctx: Ctx, input: InputReader, noun: string | undefined, positionals: readonly string[]): Promise<OperationTarget[]> {
-  const handles = loadHandles(ctx.io.env);
+  const handles = loadHandles(ctx.io.env, ctx.target);
   const sources = [
     { from: "position", values: [...positionals] },
     { from: "--lite", values: await expandRecords(input, "lite", optAll(ctx, "lite")) },
@@ -285,7 +285,7 @@ async function plan(ctx: Ctx, md: Metadata, input: InputReader): Promise<Plan | 
   assertOneStdin(["lite", "id", "f", "filename", "setters-json"].flatMap((f) => optAll(ctx, f).map((v) => [f, v] as const)));
   const document = await readDocument(ctx, md, input);
   const targets = await targetsOf(ctx, input, noun, positionals);
-  if (document !== undefined) adoptDocumentTarget(document, targets, loadHandles(ctx.io.env));
+  if (document !== undefined) adoptDocumentTarget(document, targets, loadHandles(ctx.io.env, ctx.target));
   // A key alone names no type; for a constructor the noun or the key's only type does (AC-44.1).
   const op = isKey
     ? resolveKey(md, command, targets[0]?.type)
@@ -338,7 +338,7 @@ async function readDocument(ctx: Ctx, md: Metadata, input: InputReader): Promise
   if (entity === null || typeof entity !== "object" || typeof (entity as Record<string, unknown>)["Type"] !== "string") {
     throw new UsageError(`${source} is not an entity: it needs a "Type"`, { hint: "Write it with `signum get <Type;id> -o json`, then edit it." });
   }
-  return { edited: asEntity(entity), source, value: documentValue(md, loadHandles(ctx.io.env)) };
+  return { edited: asEntity(entity), source, value: documentValue(md, loadHandles(ctx.io.env, ctx.target)) };
 }
 
 /** The record a document names, by its `id`, is the target — and must agree with one named as well. */

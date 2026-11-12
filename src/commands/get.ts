@@ -35,7 +35,7 @@ export async function runGet(ctx: Ctx): Promise<ExitCode> {
   // itself must never reach the server, and an unresolvable one must fail here rather than be
   // forwarded as a literal string that might 404 confusingly or, worse, match something (AC-53.5).
   const viaHandle = isHandle(first);
-  const subject = viaHandle ? resolveHandle(first, loadHandles(ctx.io.env)) : first;
+  const subject = viaHandle ? resolveHandle(first, loadHandles(ctx.io.env, ctx.target)) : first;
 
   const lite = parseLiteKey(subject);
   const typeName = lite?.type ?? subject;

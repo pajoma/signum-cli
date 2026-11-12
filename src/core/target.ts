@@ -5,7 +5,7 @@
 
 import type { Ctx } from "./ctx.ts";
 import { SignumHttp } from "./http.ts";
-import { defaultCredentialUrl, loadCredential, type StoredCredential } from "./credentials.ts";
+import { loadCredential, type StoredCredential } from "./credentials.ts";
 import { NotAuthenticatedError, UsageError } from "./errors.ts";
 
 export interface Target {
@@ -20,7 +20,7 @@ export interface Target {
 }
 
 export function resolveTarget(ctx: Ctx, options: { requireAuth?: boolean } = {}): Target {
-  const url = ctx.args.flags.url ?? defaultCredentialUrl(ctx.io.env);
+  const url = ctx.target;
 
   if (url === undefined) {
     throw new UsageError("no target application specified", {

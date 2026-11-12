@@ -180,6 +180,7 @@ that I can target the right app deliberately and never fire a write at productio
 - AC-05.4: `signum auth status` lists every profile, marks the active one, and shows each one's auth state without exposing secrets.
 - AC-05.5: A profile can be marked *protected*; mutating commands against it require `--yes` even when stdout is not a TTY.
 - AC-05.6: The active profile and target URL appear in the confirmation prompt for every write.
+- AC-05.7: *(Added with #121.)* A profile is a **target**: a registered instance (`signum instance add`) or a URL, the credential stored for it, and what is kept per target — the metadata cache and the handle store. Resolution: `--url` or `-i`, then `SIGNUM_URL` or `SIGNUM_INSTANCE` (both set is a usage error, as both flags are), then the default target — set by `auth switch <instance|url>`, otherwise the most recent login — then an error naming every way to give one. `auth switch` needs a stored credential for the target and says when a variable still overrides it. `auth status` names the active target by its instance, and lists every profile with its credential state, the active one and the default, from local state only. The confirmation names the instance beside the URL. **Not yet:** AC-05.1's auth mechanism and header-name override (there is one mechanism, the browser handoff) and AC-05.5's protected profile.
 
 ---
 

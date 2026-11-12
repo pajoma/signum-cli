@@ -126,6 +126,12 @@ export function removeInstance(slug: string, env?: NodeJS.ProcessEnv): Instance 
   return { slug, url: existing.url };
 }
 
+/** The instance a URL is registered as, if any — to name the target the way the user does. */
+export function instanceForUrl(url: string, env?: NodeJS.ProcessEnv): string | undefined {
+  const key = normalizeUrl(url);
+  return listInstances(env).find((i) => normalizeUrl(i.url) === key)?.slug;
+}
+
 /** The URL a slug names, or a UsageError that says what does exist. */
 export function resolveInstance(slug: string, env?: NodeJS.ProcessEnv): string {
   const all = listInstances(env);

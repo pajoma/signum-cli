@@ -26,6 +26,7 @@ import { join } from "node:path";
 import { configDir, writeSecret } from "./config.ts";
 import { UsageError } from "./errors.ts";
 import { JsonNumber, idText } from "./json.ts";
+import { normalizeUrl } from "./text.ts";
 
 export const PSEUDONYMIZE_MODES = ["off", "heuristic", "strict"] as const;
 export type PseudonymizeMode = (typeof PSEUDONYMIZE_MODES)[number];
@@ -89,6 +90,12 @@ export interface PrivacyPolicy {
    * is not writable.
    */
   secret: () => string;
+  /**
+   * The target application, canonical, or "" with none. Mixed into every digest (#121): the same
+   * `Type;id` is a different record in test and in production, so it must not get the same handle —
+   * one minted against test would otherwise resolve against production, to the wrong record.
+   */
+  scope: string;
   /** Where the policy came from, for `--privacy` output. */
   origin: "default" | "profile";
   /** Whether a captured display string may be written to the handle store (#106). */
@@ -299,7 +306,8 @@ export function surrogate(
   if (value === null || value === undefined) return value; // absence is not identifying
   if (typeof value === "boolean") return value;            // one bit cannot identify anyone
 
-  const digest = createHmac("sha256", policy.secret()).update(canonical(value)).digest("hex");
+  // The scope first, NUL-separated, so no value can be read as a different scope's value.
+  const digest = createHmac("sha256", policy.secret()).update(policy.scope === "" ? "" : `${policy.scope}\u0000`).update(canonical(value)).digest("hex");
 
   // A Lite is an IDENTITY, not a value, so it becomes an opaque handle the caller can act through
   // rather than a label it can only read (AC-53.1). `ref:` is deliberately not `Type;id`-shaped, so
@@ -508,7 +516,8 @@ function secretPath(env?: NodeJS.ProcessEnv): string {
 }
 
 /**
- * The per-profile surrogate secret, created on first use.
+ * The per-profile surrogate secret, created on first use. One per config directory; the target is
+ * mixed into each digest instead (`PrivacyPolicy.scope`), so surrogates differ per application.
  *
  * Per-profile rather than per-run is the resolution of ADR 0009 open question 1: the target
  * workflow spans several invocations — discover the type, resolve a lookup entity, then query rows
@@ -528,6 +537,8 @@ function loadSecret(env?: NodeJS.ProcessEnv): string {
 
 export interface ResolvePolicyOptions {
   callerIsAgent: boolean;
+  /** The target application. Part of every digest, so surrogates and handles differ per target (#121). */
+  target?: string | undefined;
   /** From `--pseudonymize`. May tighten freely; loosening under an agent needs `acknowledged`. */
   requested?: PseudonymizeMode | undefined;
   /** True when the human passed `--i-understand-data-goes-to-a-model`. */
@@ -603,6 +614,7 @@ export function resolvePolicy(opts: ResolvePolicyOptions): PrivacyPolicy {
       let cached: string | undefined;
       return () => (cached ??= loadSecret(opts.env));
     })(),
+    scope: opts.target !== undefined ? normalizeUrl(opts.target) : "",
     origin,
     storeLabels,
     memo: new Map(),
@@ -619,7 +631,7 @@ export function disclosure(policy: PrivacyPolicy, pseudonymizedTokens: readonly 
   if (policy.mode === "off" || pseudonymizedTokens.length === 0) return "";
   return [
     `note: pseudonymized (${policy.mode}): ${[...new Set(pseudonymizedTokens)].join(", ")}`,
-    "Surrogates are stable per profile, so the same value reads the same across commands.",
+    "Surrogates are stable per target application, so the same value reads the same across commands.",
     "Coverage is INCOMPLETE: free text is not scanned, heuristics are locale-dependent, and",
     "aggregates can still identify. A surrogate over FEW DISTINCT VALUES is also reversible by",
     "counting rows — stability is what makes grouping work, and what makes that possible.",

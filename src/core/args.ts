@@ -244,6 +244,12 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
   if (flags.url === undefined && flags.instance === undefined) {
     const instance = env["SIGNUM_INSTANCE"];
     const url = env["SIGNUM_URL"];
+    // The same rule for the environment as for the flags (AC-05.2: never a silent choice).
+    if (instance !== undefined && instance !== "" && url !== undefined && url !== "") {
+      throw new UsageError("SIGNUM_URL and SIGNUM_INSTANCE both name a target; unset one", {
+        hint: "Or name the target for this command with --url or -i, which takes precedence over both.",
+      });
+    }
     if (instance !== undefined && instance !== "") flags.instance = instance;
     else if (url !== undefined && url !== "") flags.url = url;
   }

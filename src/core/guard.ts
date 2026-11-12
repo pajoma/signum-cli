@@ -26,6 +26,7 @@ import { dirname, join } from "node:path";
 import { configDir } from "./config.ts";
 import { flag, type Ctx } from "./ctx.ts";
 import { CliError, ExitCode, PolicyError, UsageError } from "./errors.ts";
+import { instanceForUrl } from "./instances.ts";
 
 const PERMIT: unique symbol = Symbol("signum.mutationPermit");
 
@@ -90,12 +91,15 @@ export async function confirmMutation(ctx: Ctx, m: MutationDescription): Promise
   }
 
   // Show the real target: this is a person at their own terminal, and the wrong record is the
-  // mistake a confirmation exists to catch. The URL is there for the wrong-environment mistake.
+  // mistake a confirmation exists to catch. The instance and URL are there for the wrong-environment
+  // mistake (AC-05.6), the likeliest of all: `testwork` and `work` differ by four letters.
+  const instance = instanceForUrl(m.url, ctx.io.env);
+  const where = instance !== undefined ? `${instance} (${m.url})` : m.url;
   if (m.records !== undefined && count > 1) {
     const listed = m.records.slice(0, 5).join(", ") + (count > 5 ? `, … (${count - 5} more)` : "");
     const typed = count >= TYPED_CONFIRMATION_FROM || m.destructive === true;
     const setting = m.changes !== undefined && m.changes.length > 0 ? `, setting ${m.changes.join(", ")}` : "";
-    const question = `${m.destructive === true ? "DELETE" : "Run " + m.operation + " on"} ${count} records at ${m.url}${setting}: ${listed}` +
+    const question = `${m.destructive === true ? "DELETE" : "Run " + m.operation + " on"} ${count} records at ${where}${setting}: ${listed}` +
       (m.destructive === true ? ". This cannot be undone." : ".") +
       (typed ? ` Type ${count} to confirm: ` : " [y/N] ");
     const answer = (await ctx.io.prompt(question)).trim();
@@ -105,8 +109,8 @@ export async function confirmMutation(ctx: Ctx, m: MutationDescription): Promise
     return permit;
   }
   const answer = await ctx.io.prompt(m.destructive === true
-    ? `DELETE ${m.realTarget} with ${m.operation} at ${m.url}? This cannot be undone. [y/N] `
-    : `Run ${m.operation} on ${m.realTarget} at ${m.url}? [y/N] `);
+    ? `DELETE ${m.realTarget} with ${m.operation} at ${where}? This cannot be undone. [y/N] `
+    : `Run ${m.operation} on ${m.realTarget} at ${where}? [y/N] `);
   if (!/^y(es)?$/i.test(answer.trim())) {
     throw new CliError("not confirmed; nothing was sent", ExitCode.Usage);
   }

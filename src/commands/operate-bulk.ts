@@ -68,7 +68,7 @@ export function bulkPlan(ctx: Ctx, op: ResolvedOperation, targets: OperationTarg
         hint: "Set values with an operation that takes the entity, such as its Save.",
       });
     }
-    const handles = loadHandles(ctx.io.env);
+    const handles = loadHandles(ctx.io.env, ctx.target);
     setters = [
       ...settersFromEdits(op.type, edits, handles),
       ...(settersJson !== undefined ? parseSettersJson(settersJson, handles) : []),

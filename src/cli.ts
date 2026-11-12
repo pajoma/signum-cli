@@ -22,6 +22,7 @@ import { runGet } from "./commands/get.ts";
 import { runCache } from "./commands/cache.ts";
 import { runInstance } from "./commands/instance.ts";
 import { assertNoUserInfo, resolveInstance } from "./core/instances.ts";
+import { defaultCredentialUrl } from "./core/credentials.ts";
 import { runUnmask } from "./commands/unmask.ts";
 import { runOperation } from "./commands/operate.ts";
 import { decodeUtf8 } from "./core/input.ts";
@@ -158,8 +159,12 @@ async function runParsed(args: ParsedArgs, io: Io): Promise<ExitCode> {
   // --url, SIGNUM_URL and a registered instance alike: a credential in the URL leaks everywhere.
   if (args.flags.url !== undefined) assertNoUserInfo(args.flags.url);
 
+  // The target, once, before anything that is kept per target is read (#121).
+  const target = args.flags.url ?? defaultCredentialUrl(io.env);
+
   const privacy = resolvePolicy({
     callerIsAgent: caller.context === "agent",
+    target,
     requested: args.flags.pseudonymize !== undefined ? parseMode(args.flags.pseudonymize) : undefined,
     acknowledged: args.flags.allowAgentData,
     env: io.env,
@@ -169,6 +174,7 @@ async function runParsed(args: ParsedArgs, io: Io): Promise<ExitCode> {
   const ctx: Ctx = {
     args,
     io,
+    target,
     format,
     color: colorEnabled(io.stdoutIsTty, args.flags.noColor, io.env),
     caller,

@@ -427,7 +427,7 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
   // read above, before the gate.
   // AC-53.2 again, for filter values: resolve handles locally before the request is built, so a
   // `ref:` never crosses the wire.
-  const handles = loadHandles(ctx.io.env);
+  const handles = loadHandles(ctx.io.env, ctx.target);
   const filters: FilterWire[] = resolveHandlesInFilters([...dslFilters, ...jsonFilters], handles);
 
   const request: Record<string, unknown> = variant !== undefined

@@ -37,6 +37,13 @@ export interface Io {
 export interface Ctx {
   args: ParsedArgs;
   io: Io;
+  /**
+   * The target application's URL, resolved once (REQ-001, AC-05.2): `--url` or `-i`, then
+   * SIGNUM_URL or SIGNUM_INSTANCE, then the default target (`auth switch`, else the latest login).
+   * Undefined when none applies. Everything kept per target — the handle store, the surrogates —
+   * is keyed by it, so one run never mixes two applications.
+   */
+  target: string | undefined;
   format: OutputFormat;
   color: boolean;
   caller: CallerDetection;

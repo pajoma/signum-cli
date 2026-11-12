@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { run } from "../src/cli.ts";
 import type { Io } from "../src/core/ctx.ts";
-import { loadHandles, saveHandles } from "../src/core/handles.ts";
+import { handlesPath, loadHandles, saveHandles } from "../src/core/handles.ts";
 import { ExitCode } from "../src/core/errors.ts";
 import { loadCredential, storedCredentialUrls } from "../src/core/credentials.ts";
 // Asserted via the constant, not a literal: the prefix changed once (ref: -> ref_) and a literal
@@ -1015,7 +1015,7 @@ describe("auth lifecycle edges (QA coverage — previously 0% tested)", () => {
   it("`auth bogus` names the valid subcommands", async () => {
     const r = await cli(["auth", "bogus"]);
     expect(r.code).toBe(ExitCode.Usage);
-    expect(r.err).toContain("login, status, logout");
+    for (const sub of ["login", "status", "switch", "logout"]) expect(r.err).toContain(sub);
   });
 
   it("`auth status --url <other>` when logged into a DIFFERENT url reports no credential for it", async () => {
@@ -1087,7 +1087,7 @@ describe("query (STORY-20, STORY-21, STORY-22)", () => {
       expect(q.out).not.toContain("Anna Müller");
       expect(g.out).toContain(`"${handle}"`);
       // The store maps the handle to the EXACT record, so unmask resolves to the right one.
-      expect(loadHandles({ SIGNUM_CONFIG_DIR: configDir } as NodeJS.ProcessEnv)[handle]).toBe("Customer;9007199254740995");
+      expect(loadHandles({ SIGNUM_CONFIG_DIR: configDir } as NodeJS.ProcessEnv, baseUrl)[handle]).toBe("Customer;9007199254740995");
     });
   });
 
@@ -2063,10 +2063,10 @@ describe("ref: handles, end to end (REQ-058)", () => {
     // Stored BEFORE emission, so what we printed is always resolvable. Asserted through the
     // accessor rather than the raw file: the on-disk shape gained a label field (#106), and a test
     // that pins the serialization instead of the meaning has to be edited on every format change.
-    expect(loadHandles({ SIGNUM_CONFIG_DIR: d } as unknown as NodeJS.ProcessEnv)[handle]).toBe("Order;42");
+    expect(loadHandles({ SIGNUM_CONFIG_DIR: d } as unknown as NodeJS.ProcessEnv, baseUrl)[handle]).toBe("Order;42");
 
     // The on-disk shape IS worth one explicit assertion, separately and for its own reason.
-    const raw = JSON.parse(readFileSync(join(d, "handles.json"), "utf8")) as Record<string, unknown>;
+    const raw = JSON.parse(readFileSync(handlesPath({ SIGNUM_CONFIG_DIR: d } as unknown as NodeJS.ProcessEnv, baseUrl), "utf8")) as Record<string, unknown>;
     expect(raw[handle]).toEqual({ lite: "Order;42" });
     rmSync(d, { recursive: true, force: true });
   });
@@ -2096,7 +2096,7 @@ describe("ref: handles, end to end (REQ-058)", () => {
     const agent = (d: string) => ({ env: { SIGNUM_CONFIG_DIR: d, CLAUDECODE: "1" } });
     function withHandles(): string {
       const d = profile();
-      saveHandles({ "ref_aaaaaaaaaaaa": "Order;42", "ref_bbbbbbbbbbbb": "Order;999" }, { SIGNUM_CONFIG_DIR: d } as unknown as NodeJS.ProcessEnv);
+      saveHandles({ "ref_aaaaaaaaaaaa": "Order;42", "ref_bbbbbbbbbbbb": "Order;999" }, { SIGNUM_CONFIG_DIR: d } as unknown as NodeJS.ProcessEnv, { target: baseUrl });
       return d;
     }
 
@@ -2132,7 +2132,7 @@ describe("ref: handles, end to end (REQ-058)", () => {
     it("in --explain, whatever characters the id holds", async () => {
       // A string key with regex characters: substituting the id by pattern missed it and printed it.
       const d = profile();
-      saveHandles({ "ref_cccccccccccc": "Order;a(b).c*" }, { SIGNUM_CONFIG_DIR: d } as unknown as NodeJS.ProcessEnv);
+      saveHandles({ "ref_cccccccccccc": "Order;a(b).c*" }, { SIGNUM_CONFIG_DIR: d } as unknown as NodeJS.ProcessEnv, { target: baseUrl });
       for (const extra of [[], ["--exists"]]) {
         const r = await cli(["get", "ref_cccccccccccc", "--explain", ...extra], agent(d));
         expect(r.code).toBe(ExitCode.Ok);
@@ -2705,7 +2705,7 @@ describe("query --lites and --entities (REQ-024)", () => {
     expect(out.every((h) => h.startsWith(HANDLE_PREFIX))).toBe(true);
     expect(r.out).not.toContain("Order 1");
     expect(r.out).not.toContain("9007199254740993");
-    const stored = loadHandles({ SIGNUM_CONFIG_DIR: d } as unknown as NodeJS.ProcessEnv);
+    const stored = loadHandles({ SIGNUM_CONFIG_DIR: d } as unknown as NodeJS.ProcessEnv, baseUrl);
     expect(stored[out[1]!]).toBe("Order;9007199254740993");
     rmSync(d, { recursive: true, force: true });
   });

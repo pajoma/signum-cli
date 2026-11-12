@@ -73,7 +73,7 @@ export function shownTarget(t: OperationTarget): Record<string, unknown> {
 /** The positional args, in the order typed (AC-42.1). */
 export function argsOf(ctx: Ctx): ArgValue[] | null {
   return encodeArgs(ctx.args.sequence, {
-    handles: loadHandles(ctx.io.env),
+    handles: loadHandles(ctx.io.env, ctx.target),
     allowCustomObjects: flag(ctx, "allow-custom-arg"),
     warn: (line) => ctx.io.err(line),
   });

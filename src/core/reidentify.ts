@@ -47,9 +47,10 @@ export function resolveHandle(handle: string, handles: Readonly<Record<string, s
   if (real === undefined) {
     throw new UsageError(`cannot resolve ${handle}`, {
       hint:
-        "Handles are local, per profile, and only valid for the surrogate secret that produced\n" +
-        "them — so one from another profile, or from before `unmask --clear`, is gone for\n" +
-        "good. Re-run the query that produced it to mint a fresh handle.",
+        "Handles are local and per target application: one minted against another instance or\n" +
+        "URL never resolves here, so it cannot reach the wrong record. Neither does one from another\n" +
+        "profile, from before `unmask --clear`, or from before handles were kept per application.\n" +
+        "Re-run the query against this application to mint a fresh handle.",
     });
   }
   return real;

@@ -77,13 +77,14 @@ export const COMMANDS: CommandSpec[] = [
   {
     name: "auth",
     summary: "Authenticate against a Signum application",
-    usage: "signum auth <login|status|logout>",
+    usage: "signum auth <login|status|switch|logout>",
     milestone: "m1",
     // A command group needs its own examples too (AC-60.4) — landing on `signum auth --help`
     // and being shown only a list of subcommand names is one step short of useful.
     examples: [
       "signum auth status",
       "signum auth login --url https://app.example",
+      "signum auth switch test",
       "signum auth logout",
     ],
     subcommands: [
@@ -115,8 +116,21 @@ export const COMMANDS: CommandSpec[] = [
         milestone: "m1",
         description:
           "The first thing to run when something is not working: reachability, the target, where the " +
-          "credential comes from, who you are, and the application's version. Never prints a token.",
+          "credential comes from, who you are, and the application's version — then every profile " +
+          "this machine knows, marking the active one and the default. Never prints a token.",
         examples: ["signum auth status", "signum auth status --json"],
+      },
+      {
+        name: "switch",
+        summary: "Make an instance or URL the default target",
+        usage: "signum auth switch <instance|url>",
+        milestone: "m2",
+        description:
+          "The default target is the one a command uses when neither --url/-i nor SIGNUM_URL/" +
+          "SIGNUM_INSTANCE names one; without a switch it is the most recent login. It must have a " +
+          "stored credential. A flag or variable still takes precedence, and `auth status` shows " +
+          "which target is active and which is the default.",
+        examples: ["signum auth switch test", "signum auth switch https://app.example"],
       },
       {
         name: "whoami",
@@ -265,7 +279,7 @@ export const COMMANDS: CommandSpec[] = [
       "Type;id, so an agent can act on a record it cannot identify. This resolves them back, for a " +
       "HUMAN auditing what was read or acted on.\n\n" +
       "Nothing here touches the network: the surrogate-to-real mapping is local by construction and " +
-      "never leaves the machine. It is stored 0600 beside the credential, per profile, and is valid " +
+      "never leaves the machine. It is stored 0600 beside the credential, per target application, and is valid " +
       "only for the surrogate secret that produced it.\n\n" +
       "A handle is accepted anywhere a Lite key is, so `signum get ref_7f3a1c2b4d5e` works and is " +
       "resolved locally before the request is built.\n\n" +
@@ -665,7 +679,7 @@ export const TOPICS: Record<string, string> = {
     "  detected agent needs --i-understand-data-goes-to-a-model and is logged, because",
     "  the caller asking for weaker protection is the caller that wants the data.",
     "",
-    "  Surrogates are stable per profile, so the same value reads the same across",
+    "  Surrogates are stable per target application, so the same value reads the same across",
     "  commands. Entity identities, a reference or an Id column, become opaque handles",
     "  (ref_...) rather than labels or ids, so an agent can act on a record it cannot",
     "  identify:",
@@ -744,9 +758,20 @@ export const TOPICS: Record<string, string> = {
   contexts: [
     "CONTEXTS",
     "",
-    "  A context bundles a target URL, a credential, and a metadata cache.",
+    "  A profile is a target application: its URL, the credential stored for it, its",
+    "  metadata cache and its handle store. Name one with an instance (signum instance add)",
+    "  or a URL. The target is, in this order:",
     "",
-    "  Named contexts are m2 (REQ-001). In this milestone use --url, or set SIGNUM_URL.",
+    "    --url <url> or -i <instance>          on the command line",
+    "    SIGNUM_URL or SIGNUM_INSTANCE         in the environment",
+    "    the default                           signum auth switch <instance>; else the latest login",
+    "",
+    "  and with none of them, a command that needs one fails, naming the ways to give one.",
+    "  No config file is needed: flags and variables are enough. `signum auth status` lists",
+    "  every profile and marks the active one.",
+    "",
+    "  Handles are kept per target: one minted against one application never resolves",
+    "  against another, so it cannot reach a different record with the same id.",
     "",
     "  The metadata cache is per-target and inspectable:",
     "",

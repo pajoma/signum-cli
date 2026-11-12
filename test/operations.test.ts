@@ -506,7 +506,7 @@ describe("--dry-run (STORY-43, #112)", () => {
 describe("an agent acting through a handle (AC-53.2, AC-53.7)", () => {
   it("resolves the handle locally, gets a pseudonymized result, and the log keeps the real target", async () => {
     const handle = `${HANDLE_PREFIX}bbbbbbbbbbbb`;
-    saveHandles({ [handle]: "Order;42" }, { SIGNUM_CONFIG_DIR: configDir } as NodeJS.ProcessEnv);
+    saveHandles({ [handle]: "Order;42" }, { SIGNUM_CONFIG_DIR: configDir } as NodeJS.ProcessEnv, { target: baseUrl });
     const r = await cli(["OrderOperation.Ship", "--lite", handle, "--yes", "--i-understand-an-agent-is-writing", "--json"], { env: { CLAUDECODE: "1" } });
     expect(r.code).toBe(ExitCode.Ok);
     expect(operationCalls()[0]?.body).toContain(`"id":42`);
@@ -785,7 +785,7 @@ describe("values over many records, interruption and progress (STORY-45, #119)",
 
   it("resolves a handle in a value locally, and --explain keeps it as written (AC-53.2)", async () => {
     const handle = `${HANDLE_PREFIX}abcdef123456`;
-    saveHandles({ [handle]: "Customer;7" }, { SIGNUM_CONFIG_DIR: configDir } as NodeJS.ProcessEnv);
+    saveHandles({ [handle]: "Customer;7" }, { SIGNUM_CONFIG_DIR: configDir } as NodeJS.ProcessEnv, { target: baseUrl });
     const shown = await cli([...two, "--edit", `Customer=${handle}`, "--explain"]);
     expect(shown.out).toContain(handle);
     expect(shown.out).not.toContain('"id": 7');
@@ -878,7 +878,7 @@ describe("values over many records, interruption and progress (STORY-45, #119)",
 
   it("reads the records from stdin, a query's rows included (#119, #120)", async () => {
     const handle = `${HANDLE_PREFIX}0123456789ab`;
-    saveHandles({ [handle]: "Order;43" }, { SIGNUM_CONFIG_DIR: configDir } as NodeJS.ProcessEnv);
+    saveHandles({ [handle]: "Order;43" }, { SIGNUM_CONFIG_DIR: configDir } as NodeJS.ProcessEnv, { target: baseUrl });
     const rows = `{"Entity":"Order;42","Name":"x"}\n{"Entity":"${handle}","Name":"y"}\n`;
     const r = await cli(["OrderOperation.Approve", "--lite", "-", "--yes", "--json"], { stdin: rows });
     expect(r.code).toBe(ExitCode.Ok);
