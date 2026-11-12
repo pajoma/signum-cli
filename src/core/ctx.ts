@@ -51,6 +51,12 @@ export interface Ctx {
    * is keyed by it, so one run never mixes two applications.
    */
   target: string | undefined;
+  /**
+   * The target as this command NAMED it — `--url` or `-i`, or SIGNUM_URL or SIGNUM_INSTANCE — with an
+   * instance resolved to its URL; undefined when only the default target applies. For what must be
+   * named rather than defaulted: `auth login`, `cache clear`'s scope. `args.flags` stays as typed.
+   */
+  named?: string | undefined;
   format: OutputFormat;
   color: boolean;
   caller: CallerDetection;

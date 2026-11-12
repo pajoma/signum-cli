@@ -288,6 +288,16 @@ describe("the sensitivity decision has exactly one home", () => {
   });
 });
 
+describe("the parsed arguments stay as typed (architecture audit)", () => {
+  it("only the parser writes to args.flags; a resolved target goes into the context", async () => {
+    for (const file of new Bun.Glob("src/**/*.ts").scanSync()) {
+      if (file.endsWith("core/args.ts")) continue;
+      const writes = (await Bun.file(file).text()).match(/args\.flags\.[A-Za-z]+\s*=[^=]/g) ?? [];
+      expect([file, writes]).toEqual([file, []]);
+    }
+  });
+});
+
 describe("flag accessors (#124)", () => {
   const ctxFor = (argv: string[]) => {
     const args = parseArgs(argv, {});
