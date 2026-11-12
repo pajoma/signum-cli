@@ -9,20 +9,19 @@
  * (design/filter-expression-syntax.md "escape hatch").
  */
 
+import { emitData, streamData } from "../core/emit.ts";
 import type { Ctx } from "../core/ctx.ts";
 import { CliError, ExitCode, InterruptedError, NotAuthenticatedError, UsageError } from "../core/errors.ts";
 import { renderResultTable, renderDataDocument, renderDocument, streamResultTable } from "../core/output.ts";
-import { resolveResultTable, type RawResultTable } from "../core/resulttable.ts";
+import { resolveResultTable, type RawResultTable, type ResolvedTable } from "../core/resulttable.ts";
 import { loadMetadata, resolveQueryKey } from "../core/metadata.ts";
 import {
   fetchDefaultColumns, filterUnusableReason, idColumnTypes, resolveLiteColumns, validateTokens,
   type QueryTokenInfo,
 } from "../core/tokens.ts";
-import { disclosure } from "../core/privacy.ts";
 import { isHandle, resolveHandle } from "../core/reidentify.ts";
 import { loadHandles } from "../core/handles.ts";
 import { emitCommandEcho } from "../core/commandline.ts";
-import { persistHandles } from "../core/handles.ts";
 import {
   collectFilterTokens, findFilterValueMismatch, lowerFilterExpressions, parseFilterExpression, type FilterWire,
 } from "../core/filter.ts";
@@ -364,23 +363,9 @@ async function runTable(
     privacy: ctx.privacy,
   });
 
-  // Persist BEFORE emitting. A handle we have printed but not stored is exactly the unresolvable
-  // handle AC-53.5 exists to prevent — and we would have created it ourselves.
-  persistHandles(ctx, table.mintedHandleDetails);
-
-  renderResultTable(table, {
-    format: ctx.format,
-    write: ctx.openData(DATA_KIND),
-    warn: (line) => ctx.io.err(line + "\n"),
-    // QA finding: ctx.color was computed (TTY + NO_COLOR detection) but never consumed —
-    // colour output didn't exist. Threaded through here now.
-    color: ctx.color,
-  });
-
-  // AC-52.6: state what was replaced and that coverage is incomplete. Silent partial protection
-  // invites false confidence, which is worse than none.
-  const note = disclosure(ctx.privacy, table.pseudonymized);
-  if (note !== "") ctx.io.err("\n" + note);
+  // Handles kept before a byte is written, the disclosure after (emit.ts).
+  emitData(ctx, DATA_KIND, { handles: table.mintedHandleDetails, pseudonymized: table.pseudonymized }, (out) =>
+    renderResultTable(table, { format: ctx.format, write: out, warn: (line) => ctx.io.err(line + "\n"), color: ctx.color }));
   return ExitCode.Ok;
 }
 
@@ -409,10 +394,8 @@ async function runAllPages(
   plan: ColumnPlan,
   size: number,
 ): Promise<ExitCode> {
-  const stream = streamResultTable({
-    format: ctx.format, write: ctx.openData(DATA_KIND), warn: (line) => ctx.io.err(line + "\n"), color: ctx.color,
-  });
-  const pseudonymized = new Set<string>();
+  const stream = streamData<ResolvedTable>(ctx, DATA_KIND, (out) =>
+    streamResultTable({ format: ctx.format, write: out, warn: (line) => ctx.io.err(line + "\n"), color: ctx.color }));
   let shown = 0;
   let total: number | undefined;
   let changed = false;
@@ -437,10 +420,8 @@ async function runAllPages(
         } else if (table.totalElements !== total) {
           changed = true;
         }
-        persistHandles(ctx, table.mintedHandleDetails); // before emitting, as in runTable
-        stream.push(table);
+        stream.push({ handles: table.mintedHandleDetails, pseudonymized: table.pseudonymized }, table);
         shown += table.rows.length;
-        for (const t of table.pseudonymized) pseudonymized.add(t);
         if (table.rows.length < size || (table.totalElements !== undefined && shown >= table.totalElements)) return true;
         if (signal.aborted) return false;
       }
@@ -450,9 +431,6 @@ async function runAllPages(
     }
   });
   stream.end();
-
-  const note = disclosure(ctx.privacy, [...pseudonymized]);
-  if (note !== "") ctx.io.err("\n" + note);
   // Rows added or removed between pages shift the ones after them, so one may be missed or repeated.
   if (changed) ctx.io.err("\nwarning: the result changed while it was paged; a row may be missing or repeated\n");
   if (finished) return ExitCode.Ok;
@@ -552,7 +530,7 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
     return ExitCode.Ok;
   }
 
-  if (variant !== undefined) return await runVariant(ctx, target, variant, request, () => ctx.openData(DATA_KIND));
+  if (variant !== undefined) return await runVariant(ctx, target, variant, request, DATA_KIND);
   if (wantCount) return await runCount(ctx, target, queryKey, request);
   const paged = pagesAll(request, variant, wantCount);
   return paged !== undefined
