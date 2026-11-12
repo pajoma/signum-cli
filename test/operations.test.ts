@@ -474,6 +474,18 @@ describe("help that knows the operation (AC-61.2, AC-61.5)", () => {
     expect(r.err).not.toContain("404 not found");
   });
 
+  it("--dry-run on a handle whose record is gone names the handle, one record or many", async () => {
+    const gone = `${HANDLE_PREFIX}eeeeeeeeeeee`;
+    saveHandles({ [gone]: "Order;404" }, { SIGNUM_CONFIG_DIR: configDir } as NodeJS.ProcessEnv, { target: baseUrl });
+    const single = await cli(["approve", "order", gone, "--dry-run"], { env: { CLAUDECODE: "1" } });
+    expect(single.code).toBe(ExitCode.NotFound);
+    expect(single.err).toContain(`${gone} not found`);
+    expect(single.err).not.toContain("404 not found");
+    const bulk = await cli(["approve", "order", gone, "43", "--dry-run"], { env: { CLAUDECODE: "1" } });
+    expect(bulk.err).toContain(`${gone} not found`);
+    expect(bulk.out + bulk.err).not.toContain("404 not found");
+  });
+
   it("degrades to the static help and one line when it cannot describe it, exit 0", async () => {
     const ambiguous = await cli(["ship", "order", "--help"]);
     expect(ambiguous.code).toBe(ExitCode.Ok);

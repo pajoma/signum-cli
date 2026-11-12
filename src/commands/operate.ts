@@ -909,14 +909,7 @@ export async function describeOperation(ctx: Ctx): Promise<AppHelp> {
         : `Not asked for ${record.shown}: that needs a login.`,
     };
   } else {
-    let canExecute: Record<string, unknown>;
-    try {
-      canExecute = await packCanExecute(target, record);
-    } catch (err) {
-      // The server's not-found names the real id; a handle must stay one in the note help prints.
-      throw explainSendError(err, isHandle(record.shown) ? `${record.shown} not found` : undefined);
-    }
-    const verdict = permission(canExecute, op.key);
+    const verdict = permission(await packCanExecute(target, record), op.key);
     permitted = { permission: { record: record.shown, permitted: verdict.ok, ...(verdict.reason !== undefined ? { reason: verdict.reason } : {}) } };
   }
   const p = permitted["permission"] as { record: string; permitted: boolean; reason?: string } | null;

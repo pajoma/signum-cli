@@ -345,6 +345,9 @@ export class SignumHttp {
         method: spec.method,
         headers,
         signal,
+        // Never followed: fetch drops `Authorization` on a cross-origin hop but keeps every other
+        // header, so a profile's own token header would travel to wherever a redirect points.
+        redirect: "manual",
         ...(payload !== undefined ? { body: payload } : {}),
       });
     } catch (err) {
@@ -378,6 +381,18 @@ export class SignumHttp {
           hint: "Re-run `signum auth login --with-token` to store a fresh token.",
         });
       }
+    }
+
+    // A Signum API does not redirect; a proxy or a moved site does. Refused, with where it pointed.
+    if (res.status >= 300 && res.status < 400 && res.status !== 304) {
+      const location = res.headers.get("location");
+      void res.body?.cancel();
+      const to = location !== null ? new URL(location, url).toString() : "elsewhere (no Location given)";
+      throw new TransportError(`${this.opts.baseUrl} answered ${res.status}, redirecting to ${to}`, {
+        hint:
+          "signum does not follow redirects, so the credential was not sent there. If the application\n" +
+          "moved, use its new address (--url, or `signum instance remove` and `instance add`).",
+      });
     }
 
     return res;

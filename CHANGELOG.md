@@ -13,6 +13,15 @@ source of truth: a release tag `v<version>` must match it (see the README's rele
   record with the same id there. So handles and surrogates minted before this change no longer
   resolve or match for queries and operations; re-run the query to get fresh ones. `unmask` still
   reads the old store, so documents written with old handles stay readable.
+- **HTTP redirects are refused, not followed.** A 3xx is reported with where it pointed (exit 8).
+  Following one would carry a token sent in a profile's own header to another host, since only
+  `Authorization` is dropped on a cross-origin hop. If an application moved, give its new address.
+
+### Fixed
+
+- `--dry-run` and an operation's `--help`, for a record named by a `ref_` handle that no longer
+  exists, printed the server's not-found message, which names the real id. They now name the
+  handle, as `get` and a sent operation already did.
 
 ### Added
 

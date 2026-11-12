@@ -89,12 +89,20 @@ export function permission(canExecute: Record<string, unknown>, key: string): { 
 
 /** The `canExecute` of a stored record's entity pack. A read: nothing is invoked. */
 export async function packCanExecute(target: Target, t: OperationTarget): Promise<Record<string, unknown>> {
-  const res = await target.http.request<unknown>({
-    method: "GET",
-    path: `api/entityPack/${encodeURIComponent(cleanName(t.type))}/${encodeURIComponent(t.id)}`,
-    lossless: true,
-    prepare: true, // a dry run's permission read: it composes with --explain (AC-43.6)
-  });
+  let res: { body: unknown };
+  try {
+    res = await target.http.request<unknown>({
+      method: "GET",
+      path: `api/entityPack/${encodeURIComponent(cleanName(t.type))}/${encodeURIComponent(t.id)}`,
+      lossless: true,
+      prepare: true, // a dry run's permission read: it composes with --explain (AC-43.6)
+    });
+  } catch (err) {
+    // The server's not-found names the real id; a record named by a handle is reported by it, as
+    // `get` and a sent operation report it, wherever this read is made (dry run, help).
+    if (err instanceof NotFoundError && isHandle(t.shown)) throw new NotFoundError(`${t.shown} not found`);
+    throw err;
+  }
   return (((res.body ?? {}) as Record<string, unknown>)["canExecute"] ?? {}) as Record<string, unknown>;
 }
 
