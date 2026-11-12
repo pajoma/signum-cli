@@ -21,6 +21,8 @@ export const ExitCode = {
   Concurrency: 7,
   Transport: 8,
   Policy: 9,
+  /** Some records of a bulk operation failed and some did not (AC-45.3); all failing is 1. */
+  PartialFailure: 10,
 } as const;
 
 export type ExitCode = (typeof ExitCode)[keyof typeof ExitCode];
@@ -37,6 +39,7 @@ export const EXIT_CODE_DESCRIPTIONS: Record<ExitCode, string> = {
   [ExitCode.Concurrency]: "concurrency conflict — refetch and retry",
   [ExitCode.Transport]: "network or timeout",
   [ExitCode.Policy]: "blocked by policy",
+  [ExitCode.PartialFailure]: "partial failure — some records of a bulk operation failed; the output lists which",
 };
 
 export interface CliErrorOptions {

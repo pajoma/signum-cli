@@ -79,11 +79,13 @@ describe("a mistyped command is treated as a typo, not a lecture", () => {
     expect(r.err).not.toContain("m1 is read-only");
   });
 
-  it("still reports a genuine verb-noun attempt as the m2 feature it is", async () => {
-    // `ship` is nothing like a built-in, so it really does look like an operation.
+  it("treats a genuine verb-noun attempt as an operation, not a typo (#116)", async () => {
+    // `ship` is nothing like a built-in, so it really is an operation. With no target configured it
+    // stops there — and neither calls it a typo nor refuses it as m1 once did.
     const r = await cli(["ship", "order"]);
     expect(r.code).toBe(ExitCode.Usage);
-    expect(r.err).toContain("m1 is read-only");
+    expect(r.err).not.toContain("m1 is read-only");
+    expect(r.err).not.toContain("Did you mean");
   });
 });
 

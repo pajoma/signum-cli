@@ -6,7 +6,7 @@
 
 import { assertFormatSupported, assertKnownFlags, BUILT_INS, flagCheckPath, parseArgs, type ParsedArgs } from "./core/args.ts";
 import { nearest } from "./core/text.ts";
-import { CliError, ExitCode, UsageError, exitCodeOf } from "./core/errors.ts";
+import { CliError, ExitCode, NotFoundError, UsageError, exitCodeOf } from "./core/errors.ts";
 import { detectCallerContext } from "./core/caller.ts";
 import { assertMayTrace, makeDataOpener } from "./core/policy.ts";
 import { parseMode, resolvePolicy } from "./core/privacy.ts";
@@ -23,6 +23,7 @@ import { runCache } from "./commands/cache.ts";
 import { runInstance } from "./commands/instance.ts";
 import { assertNoUserInfo, resolveInstance } from "./core/instances.ts";
 import { runUnmask } from "./commands/unmask.ts";
+import { runOperation } from "./commands/operate.ts";
 import type { Ctx, Io } from "./core/ctx.ts";
 
 function showHelp(args: ParsedArgs, io: Io): ExitCode {
@@ -33,6 +34,13 @@ function showHelp(args: ParsedArgs, io: Io): ExitCode {
   const explicit = args.flags.output;
   const asJson = explicit === "json" || explicit === "ndjson";
   const format: OutputFormat = asJson ? explicit : "table";
+
+  // `signum ship order --help`: an operation's help is the operations topic (STORY-41).
+  if (args.kind === "operation-key" || args.kind === "verb-noun") {
+    if (asJson) renderDocument({ schemaVersion: 1, topic: "operations", text: TOPICS["operations"] }, { format, write: io.out });
+    else io.out(TOPICS["operations"] + "\n");
+    return ExitCode.Ok;
+  }
 
   const path = args.kind === "builtin" && args.command !== undefined && args.command !== "help"
     ? [args.command, ...args.positionals]
@@ -200,23 +208,21 @@ async function runParsed(args: ParsedArgs, io: Io): Promise<ExitCode> {
         });
       }
 
-      const near = nearest(typed, BUILT_INS);
-      if (near !== undefined) {
-        throw new UsageError(`unknown command '${String(args.command)}'`, {
-          hint: `Did you mean \`signum ${near}\`?\nRun \`signum help\` to see every command.`,
-        });
+      // An operation (REQ-040, REQ-041): resolved against metadata, confirmed, then sent. A near
+      // built-in is the fallback, not the first answer: `set` is one edit from `get`, and an app's
+      // `Set` operation must not be refused as a typo before metadata is even read.
+      const near = args.kind === "verb-noun" ? nearest(typed, BUILT_INS) : undefined;
+      const typo = near === undefined ? undefined : new UsageError(`unknown command '${String(args.command)}'`, {
+        hint: `Did you mean \`signum ${near}\`?\nRun \`signum help\` to see every command.`,
+      });
+      // With no noun it cannot be an operation, so answer at once, without a network round trip.
+      if (typo !== undefined && args.positionals.length === 0) throw typo;
+      try {
+        return await runOperation(ctx);
+      } catch (err) {
+        if (typo !== undefined && (err instanceof UsageError || err instanceof NotFoundError)) throw typo;
+        throw err;
       }
-
-      throw new UsageError(
-        `operations are not available in this milestone (m1 is read-only)`,
-        {
-          hint:
-            `'${args.command}' looks like an operation. Invoking operations is m2 (REQ-040).\n` +
-            "You can already discover them:\n" +
-            "  signum operations [<Type>]      list invokable operations\n" +
-            "  signum explain <OperationKey>   arguments and target kind",
-        },
-      );
     }
   }
 

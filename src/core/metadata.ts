@@ -34,12 +34,30 @@ export interface MemberInfo {
   niceName: string | undefined;
 }
 
+/** `OperationType` (`Operation.cs:233-240`), serialized by name. */
+export type OperationKind = "Execute" | "Delete" | "Constructor" | "ConstructorFrom" | "ConstructorFromMany";
+const OPERATION_KINDS: ReadonlySet<string> = new Set<OperationKind>(["Execute", "Delete", "Constructor", "ConstructorFrom", "ConstructorFromMany"]);
+
 export interface OperationInfo {
   /** Canonical key: `ContainerClass.FieldName` (Symbol.cs:22). */
   key: string;
   /** The verb half — the field name — used for `<verb> <Type>` dispatch. */
   verb: string;
   niceName: string | undefined;
+  /** `OperationInfoTS.operationType` (`ReflectionServer.cs:518-543`); undefined when not sent. */
+  kind: OperationKind | undefined;
+  /**
+   * `canBeModified`: the operation takes the ENTITY, edits included, so it goes to the `…Entity`
+   * route; otherwise only its Lite (`EntityOperations.tsx:133-149`). A `Save` is `Execute` with this.
+   */
+  canBeModified: boolean;
+  /** `canBeNew`: the operation may run on an entity that was never saved. */
+  canBeNew: boolean;
+  /**
+   * `resultIsSaved`: a constructor's result is already in the database. When false the server hands
+   * back an entity that does not exist yet, and saying "created" would be a lie (#118).
+   */
+  resultIsSaved: boolean;
 }
 
 export interface TypeInfo {
@@ -103,10 +121,15 @@ function parseOperations(raw: unknown): OperationInfo[] {
   return Object.entries(raw as Record<string, unknown>).map(([key, info]) => {
     const i = (info ?? {}) as Record<string, unknown>;
     const dot = key.lastIndexOf(".");
+    const kind = str(i["operationType"]);
     return {
       key,
       verb: dot === -1 ? key : key.slice(dot + 1),
       niceName: str(i["niceName"]),
+      kind: kind !== undefined && OPERATION_KINDS.has(kind) ? kind as OperationKind : undefined,
+      canBeModified: i["canBeModified"] === true,
+      canBeNew: i["canBeNew"] === true,
+      resultIsSaved: i["resultIsSaved"] === true,
     };
   });
 }
