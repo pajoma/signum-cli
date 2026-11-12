@@ -155,6 +155,9 @@ async function runParsed(args: ParsedArgs, io: Io): Promise<ExitCode> {
     // reads nothing, and only naming a subject makes it look further.
     const subject = applicationSubject(args);
     if (subject === undefined) return showHelp(args, io);
+    // Describing a subject sends requests, and one carries the real id behind a handle (an operation's
+    // entity pack), so its trace is gated as any command's is (#128).
+    if (args.flags.verbose) assertMayTrace(caller, args.flags.allowAgentData);
     return await showApplicationHelp(args, io, subject, () => contextFor(args, io, caller, format));
   }
 

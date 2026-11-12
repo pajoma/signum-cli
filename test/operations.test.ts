@@ -230,6 +230,9 @@ beforeAll(() => {
         return new Response(`{"entity":{"Type":"Order","id":null,"isNew":true,"toStr":"","modified":true,"name":null},"canExecute":{}}`, { headers });
       }
       const pack = /^\/api\/entityPack\/Order\/(\d+)$/.exec(url.pathname);
+      if (pack?.[1] === "404") {
+        return new Response(JSON.stringify({ exceptionType: "Signum.Engine.EntityNotFoundException", exceptionMessage: "Order 404 not found" }), { status: 404, headers });
+      }
       if (pack !== null && pack[1] !== "42") {
         return new Response(`{"entity":${ORDER_42.replace('"id":42', `"id":${pack[1]}`)},"canExecute":${JSON.stringify(canExecuteById[pack[1] as string] ?? canExecute)}}`, { headers });
       }
@@ -447,6 +450,28 @@ describe("help that knows the operation (AC-61.2, AC-61.5)", () => {
     expect(r.out).toContain("metadata cached");
     expect(r.out).toContain("shadowed by a built-in command");
     expect(seen).toEqual([]);
+  });
+
+  it("traces for an agent only with the data acknowledgement: the pack's URL carries the real id (#128)", async () => {
+    const handle = `${HANDLE_PREFIX}cccccccccccc`;
+    saveHandles({ [handle]: "Order;4711" }, { SIGNUM_CONFIG_DIR: configDir } as NodeJS.ProcessEnv, { target: baseUrl });
+    const r = await cli(["approve", "order", handle, "--help", "--verbose"], { env: { CLAUDECODE: "1" } });
+    expect(r.code).not.toBe(ExitCode.Ok);
+    expect(r.err).toContain("refusing --verbose");
+    expect(r.err).not.toContain("/api/entityPack/Order/4711");
+    expect(seen).toEqual([]);
+    const plain = await cli(["approve", "order", handle, "--help"], { env: { CLAUDECODE: "1" } });
+    expect(plain.out).toContain(`permission: on ${handle}`);
+    expect(plain.out + plain.err).not.toContain("4711");
+  });
+
+  it("a handle whose record is gone is named by the handle, never by the id the server names", async () => {
+    const handle = `${HANDLE_PREFIX}dddddddddddd`;
+    saveHandles({ [handle]: "Order;404" }, { SIGNUM_CONFIG_DIR: configDir } as NodeJS.ProcessEnv, { target: baseUrl });
+    const r = await cli(["approve", "order", handle, "--help"], { env: { CLAUDECODE: "1" } });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.err).toContain(`${handle} not found`);
+    expect(r.err).not.toContain("404 not found");
   });
 
   it("degrades to the static help and one line when it cannot describe it, exit 0", async () => {
