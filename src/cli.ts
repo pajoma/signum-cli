@@ -12,7 +12,7 @@ import { assertMayTrace, makeDataOpener } from "./core/policy.ts";
 import { parseMode, resolvePolicy } from "./core/privacy.ts";
 import { colorEnabled, effectiveFormat, renderDocument, type OutputFormat } from "./core/output.ts";
 import {
-  COMMANDS, TOPICS, findCommand, helpAsJson, renderCommand, renderOverview, topicNames,
+  COMMANDS, TOPICS, findCommand, helpAsJson, renderCommand, renderOverview, topicNames, type AppHelp,
 } from "./core/help.ts";
 import { runVersion } from "./commands/version.ts";
 import { runAuth } from "./commands/auth.ts";
@@ -24,7 +24,7 @@ import { runInstance } from "./commands/instance.ts";
 import { assertNoUserInfo, resolveInstance } from "./core/instances.ts";
 import { defaultCredentialUrl } from "./core/credentials.ts";
 import { runUnmask } from "./commands/unmask.ts";
-import { describeOperation, runOperation, type AppHelp } from "./commands/operate.ts";
+import { describeOperation, runOperation } from "./commands/operate.ts";
 import { decodeUtf8 } from "./core/input.ts";
 import { Explained } from "./core/http.ts";
 import type { Ctx, Io } from "./core/ctx.ts";

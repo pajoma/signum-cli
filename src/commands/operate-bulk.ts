@@ -17,7 +17,7 @@ import { ExitCode, InterruptedError, UsageError } from "../core/errors.ts";
 import { confirmMutation, recordMutation } from "../core/guard.ts";
 import { loadHandles } from "../core/handles.ts";
 import { parseLossless } from "../core/json.ts";
-import { kebab, type ArgValue, type ResolvedOperation } from "../core/operations.ts";
+import { bulkRouteOf, kebab, type ArgValue, type BulkRoute, type ResolvedOperation } from "../core/operations.ts";
 import { renderDocument } from "../core/output.ts";
 import { isHandle } from "../core/reidentify.ts";
 import { describeSetters, parseSettersJson, settersFromEdits, type PropertySetter } from "../core/setters.ts";
@@ -31,7 +31,7 @@ export interface BulkPlan {
   many: true;
   op: ResolvedOperation;
   targets: OperationTarget[];
-  route: "executeMultiple" | "deleteMultiple" | "constructFromMultiple" | "constructFromMany";
+  route: BulkRoute;
   args: ArgValue[] | null;
   /** Sent: handles resolved to the Lites they stand for. */
   setters: PropertySetter[] | undefined;
@@ -41,17 +41,12 @@ export interface BulkPlan {
 
 /** `settersJson` is the text `--setters-json` stood for, already read. */
 export function bulkPlan(ctx: Ctx, op: ResolvedOperation, targets: OperationTarget[], settersJson: string | undefined): BulkPlan {
-  const kind = op.info.kind ?? "Execute";
   if (targets.length === 0) {
     throw new UsageError(`${op.key} runs on records; name them`, {
       hint: `signum ${op.key} --lite "${op.type.name};1" --lite "${op.type.name};2"`,
     });
   }
-  const route = kind === "Execute" ? "executeMultiple"
-    : kind === "Delete" ? "deleteMultiple"
-    : kind === "ConstructorFrom" ? "constructFromMultiple"
-    : kind === "ConstructorFromMany" ? "constructFromMany"
-    : undefined;
+  const route = bulkRouteOf(op);
   if (route === undefined) {
     throw new UsageError(`${op.key} is a constructor, which runs on no record`, { hint: `signum ${kebab(op.info.verb)} ${kebab(op.type.name)}` });
   }

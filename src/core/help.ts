@@ -22,6 +22,12 @@ export interface FlagSpec {
   formats?: readonly OutputFormat[];
 }
 
+/** A section of help only the target application can supply (STORY-61), in both renderings. */
+export interface AppHelp {
+  doc: Record<string, unknown>;
+  text: string;
+}
+
 export interface CommandSpec {
   name: string;
   summary: string;

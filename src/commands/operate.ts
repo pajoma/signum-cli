@@ -32,9 +32,11 @@ import { loadHandles } from "../core/handles.ts";
 import { assertOneStdin, inputReader, isIndirect, type InputReader } from "../core/input.ts";
 import { JsonNumber, parseLossless } from "../core/json.ts";
 import { findType, loadMetadata, type Metadata } from "../core/metadata.ts";
-import { kebab, resolveKey, resolveVerbNoun, type ArgValue, type ResolvedOperation } from "../core/operations.ts";
+import {
+  kebab, operationFacts, resolveKey, resolveVerbNoun, ROUTES, routeOf, type ArgValue, type ResolvedOperation, type Route,
+} from "../core/operations.ts";
+import type { AppHelp } from "../core/help.ts";
 import { renderDocument } from "../core/output.ts";
-import { isBuiltIn } from "../core/args.ts";
 import { looksLikeSurrogate, pseudonymizeDocument } from "../core/privacy.ts";
 import { isHandle, resolveHandle } from "../core/reidentify.ts";
 import { resolveTarget, type Target } from "../core/target.ts";
@@ -201,42 +203,6 @@ function wirePath(entity: EntityJson, path: MemberPath): MemberPath {
   return out;
 }
 
-/**
- * Which endpoint an operation goes to. The server's own metadata decides: `operationType` picks the
- * family, `canBeModified` picks entity-or-Lite (`EntityOperations.tsx:133-149`), and a Save that may
- * run on a new entity (`canBeNew`) with no record named creates one, as the web UI's "new" does.
- */
-type Route =
-  | "executeEntity" | "executeLite" | "executeLiteWithProgress" | "saveNew"
-  | "construct" | "constructFromEntity" | "constructFromLite"
-  | "deleteEntity" | "deleteLite";
-
-/** What each route sends, and what that implies. Every route-dependent rule reads it from here. */
-interface RouteTraits {
-  /** The `api/operation/<endpoint>/{key}` segment. */
-  endpoint: string;
-  /** The fetched entity, its Lite, a new entity built from `--edit`, or only the type. */
-  sends: "entity" | "lite" | "new" | "type";
-  /** A delete: the prompt says it cannot be undone, and the result is what is gone. */
-  destructive: boolean;
-  /** A constructor: its result may be unsaved, and it may decline (AC-44.5). */
-  constructs: boolean;
-  /** Saves the entity it is given, so an `--edit` reaches the server instead of being dropped (#114). */
-  takesEdits: boolean;
-}
-
-const ROUTES: Record<Route, RouteTraits> = {
-  executeEntity: { endpoint: "executeEntity", sends: "entity", destructive: false, constructs: false, takesEdits: true },
-  executeLite: { endpoint: "executeLite", sends: "lite", destructive: false, constructs: false, takesEdits: false },
-  executeLiteWithProgress: { endpoint: "executeLiteWithProgress", sends: "lite", destructive: false, constructs: false, takesEdits: false },
-  saveNew: { endpoint: "executeEntity", sends: "new", destructive: false, constructs: false, takesEdits: true },
-  construct: { endpoint: "construct", sends: "type", destructive: false, constructs: true, takesEdits: false },
-  constructFromEntity: { endpoint: "constructFromEntity", sends: "entity", destructive: false, constructs: true, takesEdits: false },
-  constructFromLite: { endpoint: "constructFromLite", sends: "lite", destructive: false, constructs: true, takesEdits: false },
-  deleteEntity: { endpoint: "deleteEntity", sends: "entity", destructive: true, constructs: false, takesEdits: false },
-  deleteLite: { endpoint: "deleteLite", sends: "lite", destructive: true, constructs: false, takesEdits: false },
-};
-
 /** The `--explain` / request body, built once for both. */
 interface Plan {
   op: ResolvedOperation;
@@ -256,21 +222,6 @@ interface EntityDocument {
   value: DocumentValue;
 }
 
-function routeOf(op: ResolvedOperation, hasTarget: boolean): Route {
-  const kind = op.info.kind ?? "Execute";
-  const entity = op.info.canBeModified;
-  switch (kind) {
-    case "Execute":
-      if (!hasTarget && entity && op.info.canBeNew) return "saveNew";
-      return entity ? "executeEntity" : "executeLite";
-    case "Constructor": return "construct";
-    case "ConstructorFrom": return entity ? "constructFromEntity" : "constructFromLite";
-    case "Delete": return entity ? "deleteEntity" : "deleteLite";
-    case "ConstructorFromMany":
-      // `plan` sends this kind to `bulkPlan` before a single route is asked for.
-      throw new CliError(`internal: ${op.key} constructs from many records and has no single-record route`, ExitCode.Unexpected);
-  }
-}
 
 async function plan(ctx: Ctx, md: Metadata, input: InputReader): Promise<Plan | BulkPlan> {
   const isKey = ctx.args.kind === "operation-key";
@@ -799,69 +750,6 @@ export async function runOperation(ctx: Ctx): Promise<ExitCode> {
   describeResult(ctx, p, pack);
   renderPack(ctx, pack);
   return ExitCode.Ok;
-}
-
-/** A section of help only this application can supply (STORY-61), in both renderings. */
-export interface AppHelp {
-  doc: Record<string, unknown>;
-  text: string;
-}
-
-/**
- * What metadata says about an operation: what it runs on, where it is sent, what it takes. The one
- * description `explain <OperationKey>` and `<verb> <Type> --help` both print (AC-61.2).
- */
-export function operationFacts(op: ResolvedOperation): AppHelp {
-  const { info, type } = op;
-  const kind = info.kind ?? "Execute";
-  const many = kind === "ConstructorFromMany";
-  const route = many ? undefined : routeOf(op, true);
-  const runsOn = many ? "many" : route === "construct" ? "none" : ROUTES[route as Route].sends === "entity" ? "entity" : "lite";
-  const endpoint = many ? "constructFromMany" : ROUTES[route as Route].endpoint;
-  const takesEdits = route !== undefined && ROUTES[route].takesEdits;
-  const createsWithoutRecord = kind === "Execute" && info.canBeModified && info.canBeNew;
-  const destructive = kind === "Delete";
-  const shadowed = isBuiltIn(info.verb.toLowerCase());
-  const command = `signum ${kebab(info.verb)} ${kebab(type.name)}`;
-  const record = runsOn === "none" ? "" : runsOn === "many" ? " 42 43" : " 42";
-  const usage = shadowed ? `signum ${info.key}${record === "" ? "" : ` --lite "${type.name};42"`}` : `${command}${record}`;
-
-  const target = {
-    entity: `a record, sent whole (api/operation/${endpoint})\n              fetched first, so --edit and -f change it on the way`,
-    lite: `a record, sent as its identity only (api/operation/${endpoint})`,
-    none: `no record: it builds a new ${type.name} (api/operation/construct)`,
-    many: `several records at once, which it builds one new entity from (api/operation/constructFromMany)`,
-  }[runsOn];
-  const lines = [
-    `${info.key}  (${kind} on ${type.name})${info.niceName !== undefined ? `  ${info.niceName}` : ""}`,
-    "",
-    `  run as:     ${usage}`,
-    ...(shadowed ? [`              '${info.verb.toLowerCase()}' is shadowed by a built-in command; only the canonical key reaches it`] : []),
-    `  runs on:    ${target}`,
-    ...(createsWithoutRecord ? ["              with no record named it creates one, from --edit values"] : []),
-    ...(runsOn === "entity" || runsOn === "lite"
-      ? [`              several records: one ${destructive ? "deleteMultiple" : kind === "Execute" ? "executeMultiple" : "constructFromMultiple"} request, one outcome each`]
-      : []),
-    `  edits:      ${takesEdits ? "--edit Member=value and -f apply, and only to what changed" : "none: it does not save the record it is given, so --edit is refused"}`,
-    "  arguments:  the application does not declare them; Signum passes an untyped list the",
-    "              operation reads by position. --arg, --arg-string, --arg-lite and --arg-json",
-    "              build it in the order typed (`signum help operations`).",
-    ...(destructive ? ["  deletes:    it cannot be undone; the confirmation says so"] : []),
-    ...(ROUTES[route as Route]?.constructs === true || many
-      ? [`  result:     ${info.resultIsSaved ? "saved by the operation" : "NOT saved: run the type's Save on it to keep it"}`]
-      : []),
-  ];
-  return {
-    doc: {
-      kind: "operation", key: info.key, verb: info.verb, type: type.name, niceName: info.niceName ?? null,
-      operationType: kind, runsOn, endpoint: `api/operation/${endpoint}`, takesEdits, createsWithoutRecord,
-      destructive, shadowed, command: shadowed ? `signum ${info.key}` : command, example: usage,
-      arguments: null,
-      argumentsNote: "Signum does not describe an operation's arguments; it reads an untyped list by position.",
-      ...(ROUTES[route as Route]?.constructs === true || many ? { resultIsSaved: info.resultIsSaved } : {}),
-    },
-    text: lines.join("\n") + "\n",
-  };
 }
 
 /**

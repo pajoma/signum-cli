@@ -18,7 +18,8 @@ import {
   TYPE_KINDS, unknownTypeError, type Metadata, type OperationInfo, type TypeInfo,
 } from "../core/metadata.ts";
 import { loadQueryDescription } from "../core/metadata-cache.ts";
-import { operationFacts, type AppHelp } from "./operate.ts";
+import { operationFacts } from "../core/operations.ts";
+import type { AppHelp } from "../core/help.ts";
 import { loginCommand } from "../core/handoff.ts";
 import { flag, opt } from "../core/ctx.ts";
 import { resolveTarget } from "../core/target.ts";
