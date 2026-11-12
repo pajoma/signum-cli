@@ -4,9 +4,11 @@
  */
 
 import type { Ctx } from "./ctx.ts";
-import { SignumHttp } from "./http.ts";
-import { defaultCredentialUrl, loadCredential, type StoredCredential } from "./credentials.ts";
+import { SignumHttp, type ExplainedRequest } from "./http.ts";
+import { renderDocument } from "./output.ts";
+import { loadCredential, type StoredCredential } from "./credentials.ts";
 import { NotAuthenticatedError, UsageError } from "./errors.ts";
+import { authHeaderFor } from "./instances.ts";
 
 export interface Target {
   url: string;
@@ -19,8 +21,17 @@ export interface Target {
   permissionWarning: string | undefined;
 }
 
+/**
+ * Where `--explain` shows a request (REQ-053): stdout, as a document in the chosen format. Handed to
+ * every client the CLI builds, so a request any command makes is shown rather than sent (#122).
+ */
+export function explainSink(ctx: Ctx): ((request: ExplainedRequest) => void) | undefined {
+  if (!ctx.args.flags.explain) return undefined;
+  return (request) => renderDocument(request, { format: ctx.format === "table" ? "json" : ctx.format, write: ctx.io.out });
+}
+
 export function resolveTarget(ctx: Ctx, options: { requireAuth?: boolean } = {}): Target {
-  const url = ctx.args.flags.url ?? defaultCredentialUrl(ctx.io.env);
+  const url = ctx.target;
 
   if (url === undefined) {
     throw new UsageError("no target application specified", {
@@ -66,8 +77,10 @@ export function resolveTarget(ctx: Ctx, options: { requireAuth?: boolean } = {})
   const http = new SignumHttp({
     baseUrl: url,
     token,
+    authHeader: authHeaderFor(url, ctx.io.env),
     timeoutMs: ctx.args.flags.timeoutMs,
     trace: ctx.args.flags.verbose ? (line) => ctx.io.err(line) : undefined,
+    explain: explainSink(ctx),
     // An ambient token has nowhere to be written back to, so a rotation must be reported rather
     // than attempted — the default handler updates the STORED credential and would fail with
     // "no stored credential to rotate", turning a successful request into a hard error. (Same

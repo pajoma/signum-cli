@@ -116,7 +116,7 @@ describe("resolution (AC-53.2, AC-53.5)", () => {
       throw new Error("expected a throw");
     } catch (e) {
       const hint = (e as UsageError).hint ?? "";
-      expect(hint).toContain("per profile");
+      expect(hint).toContain("per target application");
       expect(hint).toContain("--clear");
     }
   });

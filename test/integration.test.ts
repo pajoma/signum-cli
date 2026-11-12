@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { run } from "../src/cli.ts";
 import type { Io } from "../src/core/ctx.ts";
-import { loadHandles, saveHandles } from "../src/core/handles.ts";
+import { handlesPath, loadHandles, saveHandles } from "../src/core/handles.ts";
 import { ExitCode } from "../src/core/errors.ts";
 import { loadCredential, storedCredentialUrls } from "../src/core/credentials.ts";
 // Asserted via the constant, not a literal: the prefix changed once (ref: -> ref_) and a literal
@@ -398,10 +398,14 @@ beforeAll(() => {
         return new Response(EXACT_RESULT_TABLE, { headers });
       }
       if (url.pathname.startsWith("/api/query/executeQuery/")) {
-        executeQueryRequests.push(
-          (await req.json()) as { queryKey: string; columns: Array<{ token: string }> },
+        const body = (await req.json()) as { queryKey: string; columns: Array<{ token: string }>; pagination?: { mode: string } };
+        executeQueryRequests.push(body);
+        // As the server does (DQueryable.cs:957-1008): `Firsts` issues no count, so the total is null.
+        // A mock that counted anyway hid #149: the default page never said it was partial.
+        return new Response(
+          JSON.stringify(body.pagination?.mode === "Firsts" ? { ...RESULT_TABLE, totalElements: null } : RESULT_TABLE),
+          { headers },
         );
-        return new Response(JSON.stringify(RESULT_TABLE), { headers });
       }
       if (url.pathname.startsWith("/api/query/queryValue/")) {
         return new Response("7", { headers });
@@ -1015,7 +1019,7 @@ describe("auth lifecycle edges (QA coverage — previously 0% tested)", () => {
   it("`auth bogus` names the valid subcommands", async () => {
     const r = await cli(["auth", "bogus"]);
     expect(r.code).toBe(ExitCode.Usage);
-    expect(r.err).toContain("login, status, logout");
+    for (const sub of ["login", "status", "switch", "logout"]) expect(r.err).toContain(sub);
   });
 
   it("`auth status --url <other>` when logged into a DIFFERENT url reports no credential for it", async () => {
@@ -1087,7 +1091,7 @@ describe("query (STORY-20, STORY-21, STORY-22)", () => {
       expect(q.out).not.toContain("Anna Müller");
       expect(g.out).toContain(`"${handle}"`);
       // The store maps the handle to the EXACT record, so unmask resolves to the right one.
-      expect(loadHandles({ SIGNUM_CONFIG_DIR: configDir } as NodeJS.ProcessEnv)[handle]).toBe("Customer;9007199254740995");
+      expect(loadHandles({ SIGNUM_CONFIG_DIR: configDir } as NodeJS.ProcessEnv, baseUrl)[handle]).toBe("Customer;9007199254740995");
     });
   });
 
@@ -1141,7 +1145,18 @@ describe("query (STORY-20, STORY-21, STORY-22)", () => {
     expect(r.code).toBe(ExitCode.Ok);
     const doc = JSON.parse(r.out) as { method: string; body: { pagination: unknown } };
     expect(doc.method).toBe("POST");
-    expect(doc.body.pagination).toEqual({ mode: "Firsts", elementsPerPage: 50 });
+    expect(doc.body.pagination).toEqual({ mode: "Paginate", elementsPerPage: 50, currentPage: 1 });
+  });
+
+  it("the default page is counted, so a partial one says so; --top is not (AC-21.5, #149)", async () => {
+    const page = await cli(["query", "Order", "--json"]);
+    expect(page.code).toBe(ExitCode.Ok);
+    expect(page.err).toContain("2 of 7 rows visible to you");
+    // The caller asked for n; `Firsts` is what the server answers without a COUNT(*).
+    const top = await cli(["query", "Order", "--top", "2", "--json"]);
+    expect(top.code).toBe(ExitCode.Ok);
+    expect(top.err).not.toContain("rows visible to you");
+    expect(JSON.parse(top.out)).toHaveLength(2);
   });
 
   it("defaults to a bounded page, never All (AC-23.2)", async () => {
@@ -1157,8 +1172,8 @@ describe("query (STORY-20, STORY-21, STORY-22)", () => {
   });
 
   it("combines and/or grouping, --filter-json, and repeated --filter (all ANDed)", async () => {
-    // --filter-json takes a FILE PATH (or `-` for stdin, not yet wired for query) — never
-    // inline JSON text, per design/filter-expression-syntax.md's own examples.
+    // --filter-json takes a FILE PATH (or `-` for stdin, #120) — never inline JSON text, per
+    // design/filter-expression-syntax.md's own examples.
     const filterJsonFile = join(configDir, "filters.json");
     writeFileSync(filterJsonFile, '[{"token":"Entity.Customer.Name","operation":"Contains","value":"Acme"}]');
     const r = await cli([
@@ -1178,6 +1193,21 @@ describe("query (STORY-20, STORY-21, STORY-22)", () => {
       { token: "Total", operation: "GreaterThan", value: 100 },
       { token: "Entity.Customer.Name", operation: "Contains", value: "Acme" },
     ]);
+  });
+
+  it("reads --filter-json - from stdin, as UTF-8 (#120, AC-20.5)", async () => {
+    const r = await cli(["query", "Order", "--filter-json", "-", "--explain"], {
+      stdin: '\uFEFF[{"token":"Entity.Customer.Name","operation":"EqualTo","value":"Müller – Ω"}]',
+    });
+    expect(r.code).toBe(ExitCode.Ok);
+    const doc = JSON.parse(r.out) as { body: { filters: unknown[] } };
+    expect(doc.body.filters).toEqual([{ token: "Entity.Customer.Name", operation: "EqualTo", value: "Müller – Ω" }]);
+  });
+
+  it("refuses --filter-json - when nothing is piped, rather than waiting", async () => {
+    const r = await cli(["query", "Order", "--filter-json", "-", "--explain"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("stdin is a terminal");
   });
 
   it("gives a clean UsageError on a --filter-json path that does not exist", async () => {
@@ -2048,10 +2078,10 @@ describe("ref: handles, end to end (REQ-058)", () => {
     // Stored BEFORE emission, so what we printed is always resolvable. Asserted through the
     // accessor rather than the raw file: the on-disk shape gained a label field (#106), and a test
     // that pins the serialization instead of the meaning has to be edited on every format change.
-    expect(loadHandles({ SIGNUM_CONFIG_DIR: d } as unknown as NodeJS.ProcessEnv)[handle]).toBe("Order;42");
+    expect(loadHandles({ SIGNUM_CONFIG_DIR: d } as unknown as NodeJS.ProcessEnv, baseUrl)[handle]).toBe("Order;42");
 
     // The on-disk shape IS worth one explicit assertion, separately and for its own reason.
-    const raw = JSON.parse(readFileSync(join(d, "handles.json"), "utf8")) as Record<string, unknown>;
+    const raw = JSON.parse(readFileSync(handlesPath({ SIGNUM_CONFIG_DIR: d } as unknown as NodeJS.ProcessEnv, baseUrl), "utf8")) as Record<string, unknown>;
     expect(raw[handle]).toEqual({ lite: "Order;42" });
     rmSync(d, { recursive: true, force: true });
   });
@@ -2081,7 +2111,7 @@ describe("ref: handles, end to end (REQ-058)", () => {
     const agent = (d: string) => ({ env: { SIGNUM_CONFIG_DIR: d, CLAUDECODE: "1" } });
     function withHandles(): string {
       const d = profile();
-      saveHandles({ "ref_aaaaaaaaaaaa": "Order;42", "ref_bbbbbbbbbbbb": "Order;999" }, { SIGNUM_CONFIG_DIR: d } as unknown as NodeJS.ProcessEnv);
+      saveHandles({ "ref_aaaaaaaaaaaa": "Order;42", "ref_bbbbbbbbbbbb": "Order;999" }, { SIGNUM_CONFIG_DIR: d } as unknown as NodeJS.ProcessEnv, { target: baseUrl });
       return d;
     }
 
@@ -2117,7 +2147,7 @@ describe("ref: handles, end to end (REQ-058)", () => {
     it("in --explain, whatever characters the id holds", async () => {
       // A string key with regex characters: substituting the id by pattern missed it and printed it.
       const d = profile();
-      saveHandles({ "ref_cccccccccccc": "Order;a(b).c*" }, { SIGNUM_CONFIG_DIR: d } as unknown as NodeJS.ProcessEnv);
+      saveHandles({ "ref_cccccccccccc": "Order;a(b).c*" }, { SIGNUM_CONFIG_DIR: d } as unknown as NodeJS.ProcessEnv, { target: baseUrl });
       for (const extra of [[], ["--exists"]]) {
         const r = await cli(["get", "ref_cccccccccccc", "--explain", ...extra], agent(d));
         expect(r.code).toBe(ExitCode.Ok);
@@ -2690,7 +2720,7 @@ describe("query --lites and --entities (REQ-024)", () => {
     expect(out.every((h) => h.startsWith(HANDLE_PREFIX))).toBe(true);
     expect(r.out).not.toContain("Order 1");
     expect(r.out).not.toContain("9007199254740993");
-    const stored = loadHandles({ SIGNUM_CONFIG_DIR: d } as unknown as NodeJS.ProcessEnv);
+    const stored = loadHandles({ SIGNUM_CONFIG_DIR: d } as unknown as NodeJS.ProcessEnv, baseUrl);
     expect(stored[out[1]!]).toBe("Order;9007199254740993");
     rmSync(d, { recursive: true, force: true });
   });

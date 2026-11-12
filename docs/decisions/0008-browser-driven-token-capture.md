@@ -85,6 +85,9 @@ Flow:
 
 ### Option 4 — assisted capture, as already specified in AC-12.9 ⚠️ keep as fallback
 
+*Implemented 2026-11-12 (`src/core/capture.ts`), as AC-12.9 now records; Option 3 is still only
+proposed, so for now this is the assisted path rather than its fallback.*
+
 A loopback listener plus a one-line console snippet that POSTs the token to it. Lower risk than
 Option 3 and already specified, but it keeps the devtools step — which is the specific part the owner
 called unusable.

@@ -145,25 +145,33 @@ const RESET = "\x1b[0m";
 
 function renderTable(table: ResolvedTable, color: boolean): string {
   if (table.rows.length === 0) return "";
-  // Truncation applies ONLY to the human table form; machine formats are never truncated (AC-22.4).
-  const cells = table.rows.map((r) =>
+  const cells = tableCells(table);
+  const widths = columnWidths(table.columns, cells);
+  return tableHeader(table.columns, widths, color) + cells.map((r) => tableLine(r, widths)).join("\n") + "\n";
+}
+
+/** The human table's cells. Truncation applies ONLY to this form; machine formats never truncate (AC-22.4). */
+function tableCells(table: ResolvedTable): string[][] {
+  return table.rows.map((r) =>
     r.values.map((v, i) => {
       const s = flatCell(v, i === table.entityIndex);
       return s.length > MAX_CELL ? s.slice(0, MAX_CELL - 1) + "…" : s;
     }),
   );
-  const widths = table.columns.map((c, i) =>
-    Math.max(c.length, ...cells.map((row) => (row[i] ?? "").length)),
-  );
-  const line = (vals: readonly string[]) =>
-    vals.map((v, i) => v.padEnd(widths[i] ?? 0)).join("  ").trimEnd();
-  const headerLine = line(table.columns);
+}
+
+function columnWidths(columns: readonly string[], cells: readonly string[][]): number[] {
+  return columns.map((c, i) => Math.max(c.length, ...cells.map((row) => (row[i] ?? "").length)));
+}
+
+function tableLine(vals: readonly string[], widths: readonly number[]): string {
+  return vals.map((v, i) => v.padEnd(widths[i] ?? 0)).join("  ").trimEnd();
+}
+
+function tableHeader(columns: readonly string[], widths: readonly number[], color: boolean): string {
+  const headerLine = tableLine(columns, widths);
   const sepLine = widths.map((w) => "-".repeat(w)).join("  ");
-  return [
-    color ? `${BOLD}${headerLine}${RESET}` : headerLine,
-    sepLine,
-    ...cells.map(line),
-  ].join("\n") + "\n";
+  return (color ? `${BOLD}${headerLine}${RESET}` : headerLine) + "\n" + sepLine + "\n";
 }
 
 function toObjects(table: ResolvedTable): Array<Record<string, unknown>> {
@@ -265,6 +273,78 @@ function renderRows(table: ResolvedTable, opts: RenderOptions): void {
       break;
     }
   }
+}
+
+/** Rows written as they arrive, page by page (AC-23.3). */
+export interface RowStream {
+  /** One page. Its rows are written whole, so output stopped between pages is valid (AC-23.5). */
+  push(table: ResolvedTable): void;
+  /** Ends the output: closes a JSON array, or says the result was empty. Called after an interrupt too. */
+  end(): void;
+}
+
+/**
+ * The streaming form of `renderResultTable`, for `query --all`. Every format writes each page as it
+ * comes and keeps nothing: json opens its array with the first row and closes it in `end()`, csv and
+ * tsv write their header once, and the human table aligns to the first page's widths — a later, wider
+ * cell pushes its own line out rather than holding every row back to measure them all.
+ */
+export function streamResultTable(opts: RenderOptions): RowStream {
+  assertDataWriter(opts.write);
+  const { format, write } = opts;
+  let first: ResolvedTable | undefined;
+  let widths: number[] | undefined;
+  let rows = 0;
+  let keys = 0;
+  return {
+    push(table) {
+      first ??= table;
+      if (table.rows.length === 0) return;
+      switch (format) {
+        case "table": {
+          const cells = tableCells(table);
+          if (widths === undefined) {
+            widths = columnWidths(table.columns, cells);
+            write(tableHeader(table.columns, widths, opts.color === true));
+          }
+          const w = widths;
+          write(cells.map((r) => tableLine(r, w)).join("\n") + "\n");
+          break;
+        }
+        case "json":
+          // Exactly what JSON.stringify(rows, null, 2) prints, one element at a time.
+          for (const obj of toObjects(table)) {
+            write((rows === 0 ? "[\n" : ",\n") + JSON.stringify(obj, null, 2).replace(/^/gm, "  "));
+            rows++;
+          }
+          return;
+        case "ndjson":
+          for (const obj of toObjects(table)) write(JSON.stringify(obj) + "\n");
+          break;
+        case "csv":
+        case "tsv": {
+          const text = delimited(table, format === "csv" ? "," : "\t");
+          write(rows === 0 ? text : text.slice(text.indexOf("\n") + 1));
+          break;
+        }
+        case "name":
+          for (const row of table.rows) {
+            const key = liteKey(row.entity);
+            if (key !== undefined) { write(key + "\n"); keys++; }
+          }
+          break;
+      }
+      rows += table.rows.length;
+    },
+    end() {
+      if (first === undefined) return; // stopped before the first page: nothing to close
+      if (rows === 0) renderRows(first, opts);
+      else if (format === "json") write("\n]\n");
+      else if (format === "name" && keys === 0) {
+        opts.warn?.("no Lite keys in result — add the 'Entity' column to use -o name");
+      }
+    },
+  };
 }
 
 /**

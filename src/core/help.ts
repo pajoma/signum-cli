@@ -22,6 +22,12 @@ export interface FlagSpec {
   formats?: readonly OutputFormat[];
 }
 
+/** A section of help only the target application can supply (STORY-61), in both renderings. */
+export interface AppHelp {
+  doc: Record<string, unknown>;
+  text: string;
+}
+
 export interface CommandSpec {
   name: string;
   summary: string;
@@ -47,8 +53,9 @@ export const GLOBAL_FLAGS: FlagSpec[] = [
   { name: "instance", alias: "i", arg: "<name>", summary: "Target a registered instance (or SIGNUM_INSTANCE); see `signum instance`" },
   { name: "output", alias: "o", arg: "<fmt>", summary: `Output format: ${OUTPUT_FORMATS.join(", ")}` },
   { name: "json", summary: "Alias for --output json" },
-  { name: "explain", summary: "Print the request instead of sending it (metadata may be fetched)" },
+  { name: "explain", summary: "Print the request instead of sending it, credentials redacted (metadata may be fetched)" },
   { name: "verbose", alias: "v", summary: "HTTP tracing, credentials redacted; an AI caller needs the ack flag" },
+  { name: "trace", summary: "Same as --verbose (REQ-053's name for it)" },
   { name: "no-color", summary: "Disable colour (also honours NO_COLOR)" },
   { name: "timeout", arg: "<seconds>", summary: "Request timeout" },
   { name: "caller-context", arg: "<ctx>", summary: "Override caller detection: interactive|automated|agent" },
@@ -56,6 +63,47 @@ export const GLOBAL_FLAGS: FlagSpec[] = [
   { name: "pseudonymize", arg: "<mode>", summary: "off|heuristic|strict — may tighten; loosening needs the ack flag" },
   { name: "help", alias: "h", summary: "Show help for any command" },
 ];
+
+/** What a profile is beyond its URL (AC-05.1, AC-05.5), as `instance add` and `instance set` take it. */
+const PROFILE_FLAGS: FlagSpec[] = [
+  { name: "protected", summary: "Writes against it are confirmed by typing its name, --yes or not" },
+  { name: "unprotected", summary: "Remove the protection" },
+  { name: "auth-header", arg: "<name>", summary: "The header the token goes in (default: Authorization)" },
+];
+
+/**
+ * What an operation takes besides the global flags. Operations are not built-ins, so they have no
+ * `CommandSpec`; this is their flag list, read by the parser for arity and by `operate.ts` to refuse
+ * an unknown flag (`signum help operations` explains each in prose).
+ */
+export const OPERATION_FLAGS: FlagSpec[] = [
+  { name: "lite", arg: "<Type;id|ref_…|@file|->", summary: "A record by Lite key or handle; repeatable, or a list from a file or stdin" },
+  { name: "id", arg: "<id|@file|->", summary: "A record by id, for the type the command names; repeatable" },
+  { name: "edit", arg: "<Member=value>", summary: "Change a member before an operation that saves the entity; over many records, set it on each" },
+  { name: "setters-json", arg: "<json|@file|->", summary: "The property setters for an operation over many records" },
+  { name: "filename", alias: "f", arg: "<file|@file|->", summary: "An edited entity document to save" },
+  { name: "arg", arg: "<v>", summary: "An argument: true, false, null, a number, a Lite key or a handle; else text" },
+  { name: "arg-string", arg: "<v>", summary: "An argument, always text" },
+  { name: "arg-lite", arg: "<Type;id|ref_…>", summary: "An argument that is a Lite" },
+  { name: "arg-json", arg: "<json>", summary: "An argument as raw JSON" },
+  { name: "allow-custom-arg", summary: "Send an --arg-json object the app converts itself" },
+  { name: "dry-run", summary: "Ask whether this login may run it; send no operation" },
+  { name: "progress", summary: "Run one record through executeLiteWithProgress and show its progress" },
+  { name: "yes", alias: "y", summary: "Confirm without asking (required without a terminal)" },
+];
+
+/** Every flag the CLI knows, global, per command and per operation: where the parser learns each one's arity. */
+export function allFlagSpecs(): FlagSpec[] {
+  const specs: FlagSpec[] = [...GLOBAL_FLAGS, ...OPERATION_FLAGS];
+  const walk = (commands: readonly CommandSpec[]): void => {
+    for (const c of commands) {
+      specs.push(...(c.flags ?? []));
+      walk(c.subcommands ?? []);
+    }
+  };
+  walk(COMMANDS);
+  return specs;
+}
 
 export const COMMANDS: CommandSpec[] = [
   {
@@ -77,13 +125,14 @@ export const COMMANDS: CommandSpec[] = [
   {
     name: "auth",
     summary: "Authenticate against a Signum application",
-    usage: "signum auth <login|status|logout>",
+    usage: "signum auth <login|status|switch|logout>",
     milestone: "m1",
     // A command group needs its own examples too (AC-60.4) — landing on `signum auth --help`
     // and being shown only a list of subcommand names is one step short of useful.
     examples: [
       "signum auth status",
       "signum auth login --url https://app.example",
+      "signum auth switch test",
       "signum auth logout",
     ],
     subcommands: [
@@ -96,6 +145,10 @@ export const COMMANDS: CommandSpec[] = [
           "The target application uses Entra SSO with no Signum.Rest module, so a browser token " +
           "handoff is the only viable mechanism. Sign in to the web app, then in the browser " +
           "console run:\n\n    sessionStorage.getItem(\"authToken\")\n\n" +
+          "At a terminal it also prints a one-line console snippet that sends the token to a " +
+          "listener on 127.0.0.1, so nothing is copied by hand: run it in any tab of the signed-in " +
+          "application. The listener takes the token from that application's origin only, at a " +
+          "random path, and closes on the first one. Pasting at the prompt works all the same.\n\n" +
           "At a terminal you are prompted for it and it is not echoed. Piping works too. It is " +
           "never read from an argument, which would leave it in your shell history and the process " +
           "list — passing one there is refused, not ignored.\n\n" +
@@ -115,8 +168,21 @@ export const COMMANDS: CommandSpec[] = [
         milestone: "m1",
         description:
           "The first thing to run when something is not working: reachability, the target, where the " +
-          "credential comes from, who you are, and the application's version. Never prints a token.",
+          "credential comes from, who you are, and the application's version — then every profile " +
+          "this machine knows, marking the active one and the default. Never prints a token.",
         examples: ["signum auth status", "signum auth status --json"],
+      },
+      {
+        name: "switch",
+        summary: "Make an instance or URL the default target",
+        usage: "signum auth switch <instance|url>",
+        milestone: "m2",
+        description:
+          "The default target is the one a command uses when neither --url/-i nor SIGNUM_URL/" +
+          "SIGNUM_INSTANCE names one; without a switch it is the most recent login. It must have a " +
+          "stored credential. A flag or variable still takes precedence, and `auth status` shows " +
+          "which target is active and which is the default.",
+        examples: ["signum auth switch test", "signum auth switch https://app.example"],
       },
       {
         name: "whoami",
@@ -172,9 +238,9 @@ export const COMMANDS: CommandSpec[] = [
     milestone: "m1",
     formats: OUTPUT_FORMATS,
     description:
-      "Read-only discovery, so it ships in m1 even though invoking an operation is m2. " +
-      "An operation whose verb collides with a built-in is marked SHADOWED and remains " +
-      "reachable by its canonical key.",
+      "Read-only discovery. An operation whose verb collides with a built-in is marked " +
+      "SHADOWED and remains reachable by its canonical key. To run one, see " +
+      "`signum help operations`.",
     examples: ["signum operations", "signum operations Order"],
   },
   {
@@ -214,7 +280,12 @@ export const COMMANDS: CommandSpec[] = [
       "removes the others silently and the response carries no marker that it did, so a result " +
       "is complete for you, not necessarily for the database (AC-08.6). A page that is not the " +
       "whole result says so on stderr in every format (\"50 of 56 rows visible to you\"), and " +
-      "stdout carries only the rows (AC-21.5).",
+      "stdout carries only the rows (AC-21.5).\n\n" +
+      "`signum query <key> --help` adds what this application says about that query: its default " +
+      "columns, the tokens a filter may name, and its ordering, from the cache when it has them.\n\n" +
+      "--all fetches the result a page at a time and writes each page as it arrives, so nothing " +
+      "holds the whole result. At a terminal, more than 10000 rows are confirmed first. Ctrl-C " +
+      "stops between pages and closes the output, so what was written stays valid (exit 130).",
     flags: [
       { name: "filter", arg: "<expr>", summary: "Filter expression; repeatable (AND). See `signum help filter`" },
       { name: "filter-json", arg: "<file|@file|->", summary: "Raw FilterTS[] JSON; combines with --filter (AND)" },
@@ -222,8 +293,9 @@ export const COMMANDS: CommandSpec[] = [
       { name: "order", arg: "<token>", summary: "Sort token; prefix with - for descending" },
       { name: "top", arg: "<n>", summary: "Return only the first n rows" },
       { name: "page", arg: "<n>", summary: "Page number (1-based); use with --page-size" },
-      { name: "page-size", arg: "<n>", summary: "Rows per page; default 50" },
-      { name: "all", summary: "Fetch every row, unbounded — only one of --top/--page/--all at a time" },
+      { name: "page-size", arg: "<n>", summary: "Rows per page; default 50, or 1000 per request with --all" },
+      { name: "all", summary: "Every row, fetched a page at a time and written as it comes — one of --top/--page/--all" },
+      { name: "yes", alias: "y", summary: "With --all: skip the question asked at a terminal before a large result" },
       { name: "group", summary: "Set groupResults; required for aggregate tokens (Total.Sum, …)" },
       { name: "count", summary: "Return only the row count" },
       { name: "lites", summary: "Return matching entity references (api/query/lites); --top/--all set the count",
@@ -246,14 +318,24 @@ export const COMMANDS: CommandSpec[] = [
   },
   {
     name: "get",
-    summary: "Retrieve one entity by type and id, or by Lite key",
-    usage: "signum get <Type> <id> | signum get <Lite>",
+    summary: "Retrieve one entity by type and id, or by Lite key; or every record of a master-data type",
+    usage: "signum get <Type> <id> [--pack] | signum get <Lite> | signum get <Type> [--top <n> | --all]",
     milestone: "m1",
+    description:
+      "With an id, the entity as stored. --pack adds what this login may do to it: canExecute maps " +
+      "each operation key to null (permitted) or the reason it is not, and a key that is absent was " +
+      "withheld for this login — it does not mean the operation does not exist.\n\n" +
+      "Without an id, every record of a master-data type (api/fetchAll), the first 50 unless --top " +
+      "or --all says otherwise. The server sends them all, so the bound limits what is shown; a " +
+      "transactional type is refused, since `signum query <Type> --entities` pages it.",
     flags: [
       { name: "exists", summary: "Check presence only; print nothing" },
+      { name: "pack", summary: "The entity with canExecute: what this login may do to it (AC-30.3)" },
+      { name: "top", arg: "<n>", summary: "Without an id: show at most n records (default 50)" },
+      { name: "all", summary: "Without an id: show every record" },
       { name: "as-command", summary: "Print the command for a human to run; emit no data (REQ-078)" },
     ],
-    examples: ["signum get Order 42", 'signum get "Order;42" --json'],
+    examples: ["signum get Order 42", 'signum get "Order;42" --json', "signum get Order 42 --pack", "signum get Country --top 10"],
   },
   {
     name: "unmask",
@@ -265,7 +347,7 @@ export const COMMANDS: CommandSpec[] = [
       "Type;id, so an agent can act on a record it cannot identify. This resolves them back, for a " +
       "HUMAN auditing what was read or acted on.\n\n" +
       "Nothing here touches the network: the surrogate-to-real mapping is local by construction and " +
-      "never leaves the machine. It is stored 0600 beside the credential, per profile, and is valid " +
+      "never leaves the machine. It is stored 0600 beside the credential, per target application, and is valid " +
       "only for the surrogate secret that produced it.\n\n" +
       "A handle is accepted anywhere a Lite key is, so `signum get ref_7f3a1c2b4d5e` works and is " +
       "resolved locally before the request is built.\n\n" +
@@ -320,7 +402,8 @@ export const COMMANDS: CommandSpec[] = [
     milestone: "m1",
     description:
       "Discovery, dynamic help and pre-flight query validation all read a cached copy of " +
-      "api/reflection/types. This command makes that cache visible and removable — with " +
+      "api/reflection/types, and help reads each query's cached description too (kept whenever " +
+      "a query fetches it). This command makes that cache visible and removable — with " +
       "--offline it is the only thing the CLI will read.\n\n" +
       "Anonymous and authenticated documents are cached separately: reflection answers depend " +
       "on who is asking, so one fetched before login reports nothing as queryable.",
@@ -353,14 +436,18 @@ export const COMMANDS: CommandSpec[] = [
   {
     name: "instance",
     summary: "Register short names for target applications, used as -i <name>",
-    usage: "signum instance <add|list|remove|path>",
+    usage: "signum instance <add|set|list|remove|path>",
     milestone: "m2",
     description:
       "A registered name stands in for --url anywhere: `signum -i renew types`. The name is always " +
       "yours to choose; it is never derived from the URL.\n\n" +
       "Names are stored in instances.json in the config directory, owner-only. A stored login " +
       "is still matched by URL, so -i reaches it exactly when --url with the same address would. " +
-      "Nothing here touches the network.",
+      "Nothing here touches the network.\n\n" +
+      "An instance is a profile: besides its URL it may be protected, so a write is confirmed by " +
+      "typing its name, and may name the header its token goes in. The credential stays where " +
+      "`auth login` put it, matched by URL; the mechanism is the token handed over from a browser " +
+      "session, the only one until API keys.",
     examples: [
       "signum instance add renew https://renew.example.org",
       "signum instance add staging https://staging.example.org",
@@ -370,9 +457,31 @@ export const COMMANDS: CommandSpec[] = [
       {
         name: "add",
         summary: "Register a URL under a name you choose",
-        usage: "signum instance add <name> <url>",
+        usage: "signum instance add <name> <url> [--protected] [--auth-header <name>]",
         milestone: "m2",
-        examples: ["signum instance add renew https://renew.example.org", "signum instance add local http://localhost:5000"],
+        flags: PROFILE_FLAGS,
+        examples: [
+          "signum instance add renew https://renew.example.org",
+          "signum instance add prod https://app.example.org --protected",
+          "signum instance add ad https://ad.example.org --auth-header Signum_Authorization",
+        ],
+      },
+      {
+        name: "set",
+        summary: "Protect a profile, or change the header its token goes in",
+        usage: "signum instance set <name> [--protected | --unprotected] [--auth-header <name|default>]",
+        milestone: "m2",
+        description:
+          "A protected profile is the one a write must not reach by accident. At a terminal, every " +
+          "operation against it asks, and is confirmed only by typing the profile's name back — " +
+          "--yes does not skip that, so a command recalled from the test instance's history stops " +
+          "there. Without a terminal, --yes is required, as for every target.\n\n" +
+          "--auth-header names the header the token goes in, for an application that moved it: a " +
+          "Windows-AD application reads it from Signum_Authorization (AuthTokensServer.cs:57-62). " +
+          "SIGNUM_AUTH_HEADER does the same for a run without a profile. The value is redacted " +
+          "wherever the request is shown, as Authorization is.",
+        flags: PROFILE_FLAGS,
+        examples: ["signum instance set prod --protected", "signum instance set ad --auth-header Signum_Authorization", "signum instance set ad --auth-header default"],
       },
       {
         name: "list",
@@ -526,6 +635,74 @@ export function topicNames(): string[] {
 }
 
 export const TOPICS: Record<string, string> = {
+  operations: [
+    "OPERATIONS — THE ONLY WAY ANYTHING CHANGES",
+    "",
+    "  Every change in a Signum app, saving included, is an operation. Run one as",
+    "  <verb> <Type> <id>, or by its canonical key:",
+    "",
+    "    signum ship order 42 --yes",
+    "    signum OrderOperation.Ship --lite \"Order;42\" --yes",
+    "    signum save order 42 --edit Name=Acme --yes",
+    "    signum save order --edit Name=Acme --yes        a new record, by its Save",
+    "    signum create order --yes                       a constructor operation",
+    "    signum delete order 42 --yes",
+    "",
+    "  `signum ship order --help` adds what this application says about that operation:",
+    "  what it runs on, whether --edit applies, and with a record named (ship order 42",
+    "  --help) whether this login may run it there.",
+    "",
+    "  Verbs and types are case-insensitive and kebab-tolerant. A verb a built-in",
+    "  shadows (get, query, …) is reachable only by its canonical key. An ambiguous",
+    "  verb lists the keys and runs nothing.",
+    "",
+    "  Before anything is sent:",
+    "    --dry-run         ask whether this login may run it; sends no operation.",
+    "                      Exit 0 if permitted, 4 if not. Permission is not success.",
+    "    --explain         print the exact request; sends nothing.",
+    "",
+    "  Confirmation: at a terminal you are asked, naming the operation, the record and",
+    "  the application. Without a terminal (a script, an agent) the command FAILS",
+    "  unless --yes (-y) is given. Every attempt is logged to <config-dir>/audit.log.",
+    "  A detected AI agent also needs --i-understand-an-agent-is-writing (or",
+    "  SIGNUM_ALLOW_AGENT_WRITES=1). The acknowledgement for reading data does not count.",
+    "  A protected instance (signum instance set prod --protected) is asked at a terminal",
+    "  even with --yes, and only its name typed back confirms.",
+    "",
+    "  The record:  positional id, --lite \"Type;id\", --id <id>, or a ref_ handle.",
+    "  Edits:       --edit Member.Path=value, for an operation that takes the entity",
+    "               (a Save). The change is marked so the server applies it.",
+    "               -f <file|@file|->: a whole edited document, as `get -o json` wrote",
+    "               it. Only what you changed is applied, even to a pseudonymized copy;",
+    "               a document with no id creates a record.",
+    "  Arguments:   in the order typed, as one positional array —",
+    "    --arg <v>         true, false, null, a number, a Lite key or a handle; else text",
+    "    --arg-string <v>  always text (a date-shaped one still arrives as a date)",
+    "    --arg-lite <v>    a Lite: \"Customer;7\" or a ref_ handle",
+    "    --arg-json <j>    raw JSON. An object needs EntityType (a Lite) or Type (an",
+    "                      entity): any other arrives as null unless the app registered",
+    "                      a converter for the operation; then pass --allow-custom-arg.",
+    "  Numbers always arrive as decimals.",
+    "",
+    "  A stale record is exit 7: refetch, then retry; signum never retries for you.",
+    "  A constructor's result may be unsaved, and is reported so. A delete asks first and",
+    "  says it cannot be undone; a missing record is a clean not-found (exit 5).",
+    "",
+    "  Many records: name several (signum approve order 42 43 44, or repeat --lite). One",
+    "  request, one outcome per record. Exit 0 if all succeeded, 10 if some failed (the",
+    "  output lists which and why), 1 if none did. From 10 records, and for any delete",
+    "  of several, the count must be typed back to confirm. --dry-run answers per record.",
+    "  Each outcome is shown as it arrives. Ctrl-C stops the batch: what was reported",
+    "  stands, the rest is listed as interrupted, and the exit is 130.",
+    "    --lite @file      the records, one per line or a JSON array; - reads stdin, so",
+    "                      signum query … -o ndjson | signum approve order --lite - works",
+    "    --edit M=v        over many records, set M on every one (a Save, not a delete)",
+    "    --setters-json j  the setter list itself, for MList rows and new entities;",
+    "                      j may be @file or -",
+    "",
+    "  Progress: --progress runs one record through executeLiteWithProgress and shows",
+    "  the server's progress (a line on stderr at a terminal; each step under -o ndjson).",
+  ].join("\n"),
   "exit-codes": [
     "EXIT CODES",
     "",
@@ -603,7 +780,7 @@ export const TOPICS: Record<string, string> = {
     "  detected agent needs --i-understand-data-goes-to-a-model and is logged, because",
     "  the caller asking for weaker protection is the caller that wants the data.",
     "",
-    "  Surrogates are stable per profile, so the same value reads the same across",
+    "  Surrogates are stable per target application, so the same value reads the same across",
     "  commands. Entity identities, a reference or an Id column, become opaque handles",
     "  (ref_...) rather than labels or ids, so an agent can act on a record it cannot",
     "  identify:",
@@ -682,9 +859,20 @@ export const TOPICS: Record<string, string> = {
   contexts: [
     "CONTEXTS",
     "",
-    "  A context bundles a target URL, a credential, and a metadata cache.",
+    "  A profile is a target application: its URL, the credential stored for it, its",
+    "  metadata cache and its handle store. Name one with an instance (signum instance add)",
+    "  or a URL. The target is, in this order:",
     "",
-    "  Named contexts are m2 (REQ-001). In this milestone use --url, or set SIGNUM_URL.",
+    "    --url <url> or -i <instance>          on the command line",
+    "    SIGNUM_URL or SIGNUM_INSTANCE         in the environment",
+    "    the default                           signum auth switch <instance>; else the latest login",
+    "",
+    "  and with none of them, a command that needs one fails, naming the ways to give one.",
+    "  No config file is needed: flags and variables are enough. `signum auth status` lists",
+    "  every profile and marks the active one.",
+    "",
+    "  Handles are kept per target: one minted against one application never resolves",
+    "  against another, so it cannot reach a different record with the same id.",
     "",
     "  The metadata cache is per-target and inspectable:",
     "",

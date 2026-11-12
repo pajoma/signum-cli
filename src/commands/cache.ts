@@ -17,7 +17,7 @@
 import type { Ctx } from "../core/ctx.ts";
 import { ExitCode, UsageError } from "../core/errors.ts";
 import { renderDocument } from "../core/output.ts";
-import { cacheDir, clearMetadataCache, listMetadataCache, type CacheEntry } from "../core/metadata-cache.ts";
+import { cacheDir, clearMetadataCache, countQueryDescriptions, listMetadataCache, type CacheEntry } from "../core/metadata-cache.ts";
 
 /** Anonymous and authenticated documents differ — see the note on `cachePath`. */
 function scope(entry: CacheEntry): string {
@@ -35,6 +35,8 @@ function show(ctx: Ctx): ExitCode {
         fetchedAt: e.fetchedAt,
         lastModified: e.lastModified ?? null,
         types: e.types,
+        // Kept per target, not per scope: a description needs a login, so it is always the auth view.
+        queryDescriptions: e.authenticated ? countQueryDescriptions(e.url, ctx.io.env) : 0,
         sizeBytes: e.sizeBytes,
         path: e.path,
       })),
@@ -52,8 +54,10 @@ function show(ctx: Ctx): ExitCode {
 
   const w = Math.max(...entries.map((e) => e.url.length));
   for (const e of entries) {
+    const described = e.authenticated ? countQueryDescriptions(e.url, ctx.io.env) : 0;
     ctx.io.out(
-      `${e.url.padEnd(w)}  ${scope(e).padEnd(4)}  fetched ${e.fetchedAt}  ${e.types} types\n`,
+      `${e.url.padEnd(w)}  ${scope(e).padEnd(4)}  fetched ${e.fetchedAt}  ${e.types} types` +
+      (described > 0 ? `, ${described} query description${described === 1 ? "" : "s"}` : "") + "\n",
     );
   }
   ctx.io.err(
@@ -65,7 +69,7 @@ function show(ctx: Ctx): ExitCode {
 
 function clear(ctx: Ctx): ExitCode {
   // Scoping to --url is the only filter offered; a target is the unit a user thinks in.
-  const url = ctx.args.flags.url;
+  const url = ctx.named;
   const removed = clearMetadataCache(url, ctx.io.env);
 
   if (ctx.format === "json" || ctx.format === "ndjson") {

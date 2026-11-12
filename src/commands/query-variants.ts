@@ -11,13 +11,12 @@
  * table path: a Lite is an identity and becomes a handle, an entity is walked as a document.
  */
 
+import { emitData } from "../core/emit.ts";
 import type { Ctx } from "../core/ctx.ts";
 import { flag, opt } from "../core/ctx.ts";
 import { ExitCode, UsageError } from "../core/errors.ts";
 import { liteKey, renderDataDocument } from "../core/output.ts";
-import { disclosure, pseudonymizeDocument } from "../core/privacy.ts";
-import { persistHandles } from "../core/handles.ts";
-import type { DataWriter } from "../core/policy.ts";
+import { pseudonymizeDocument } from "../core/privacy.ts";
 import type { Target } from "../core/target.ts";
 
 export type Variant = "lites" | "entities";
@@ -45,8 +44,17 @@ export function requestedVariant(ctx: Ctx): Variant | undefined {
   return variant;
 }
 
+/**
+ * The page a table query gets when no paging flag is given. `Paginate`, not `Firsts`: only
+ * `Paginate` makes the server count (`DQueryable.cs:957-1008`), and without that count a cut-off
+ * page cannot be told from a complete result (AC-21.5, #149). Compared by identity in `countFrom`,
+ * so an explicit `--page 1` is still refused by the variants.
+ */
+export const DEFAULT_PAGE = Object.freeze({ mode: "Paginate", elementsPerPage: 50, currentPage: 1 });
+
 /** `count` from the already-validated pagination: --top n → n, --all → unbounded, default bounded. */
 export function countFrom(pagination: unknown): number | null {
+  if (pagination === DEFAULT_PAGE) return DEFAULT_PAGE.elementsPerPage;
   const p = pagination as { mode: string; elementsPerPage?: number };
   if (p.mode === "All") return null;
   if (p.mode === "Firsts") return p.elementsPerPage ?? 50;
@@ -58,8 +66,27 @@ export function variantRequest(queryKey: string, filters: unknown[], orders: unk
   return { queryKey, filters, orders, ...(count !== null ? { count } : {}) };
 }
 
+/**
+ * A list of entities, each pseudonymized as its own document — the shape `query --entities` and
+ * `get <Type>` both return. Walked as a single array, each whole entity would be judged an identity
+ * and replaced by a handle, contents and all.
+ */
+export function pseudonymizeEntities(ctx: Ctx, items: readonly unknown[]): {
+  values: unknown[]; pseudonymized: string[]; handleDetails: Record<string, { lite: string; label?: string }>;
+} {
+  const pseudonymized = new Set<string>();
+  let handleDetails: Record<string, { lite: string; label?: string }> = {};
+  const values = items.map((e) => {
+    const r = pseudonymizeDocument(e, ctx.privacy);
+    r.pseudonymized.forEach((p) => pseudonymized.add(p));
+    handleDetails = { ...handleDetails, ...r.handleDetails };
+    return r.value;
+  });
+  return { values, pseudonymized: [...pseudonymized], handleDetails };
+}
+
 export async function runVariant(
-  ctx: Ctx, target: Target, variant: Variant, request: Record<string, unknown>, open: () => DataWriter,
+  ctx: Ctx, target: Target, variant: Variant, request: Record<string, unknown>, dataKind: string,
 ): Promise<ExitCode> {
   const res = await target.http.request<unknown>({
     method: "POST",
@@ -69,17 +96,15 @@ export async function runVariant(
   });
   const items = Array.isArray(res.body) ? res.body : [];
 
-  // Each entity is its own document, so each is pseudonymized as one: walked as a single array, the
-  // whole entity would be judged an identity and replaced by a handle, contents and all.
   const pseudonymized = new Set<string>();
   let handleDetails: Record<string, { lite: string; label?: string }> = {};
   const values = variant === "entities"
-    ? items.map((e) => {
-        const r = pseudonymizeDocument(e, ctx.privacy);
+    ? (() => {
+        const r = pseudonymizeEntities(ctx, items);
         r.pseudonymized.forEach((p) => pseudonymized.add(p));
-        handleDetails = { ...handleDetails, ...r.handleDetails };
-        return r.value;
-      })
+        handleDetails = r.handleDetails;
+        return r.values;
+      })()
     : (() => {
         const r = pseudonymizeDocument(items, ctx.privacy);
         r.pseudonymized.forEach((p) => pseudonymized.add(p === "" ? "Entity" : p));
@@ -87,28 +112,27 @@ export async function runVariant(
         return r.value as unknown[];
       })();
 
-  persistHandles(ctx, handleDetails); // before emitting — see the note in query.ts
-  const out = open();
   const format = ctx.format;
-  if (format === "json") {
-    renderDataDocument(values, { format: "json", write: out });
-  } else if (format === "ndjson") {
-    for (const v of values) renderDataDocument(v, { format: "ndjson", write: out });
-  } else if (variant === "entities") {
-    // `table` here is the non-explicit default; an entity is a document (as in `get`).
-    renderDataDocument(values, { format: "json", write: out });
-  } else {
-    // table and name: one reference per line; table adds the display string when one was sent.
-    for (const v of values) {
-      if (typeof v === "string") { out(`${v}\n`); continue; } // a handle
-      const key = liteKey(v) ?? JSON.stringify(v);
-      const model = (v as Record<string, unknown> | null)?.["model"];
-      out(format === "table" && typeof model === "string" ? `${key}  ${model}\n` : `${key}\n`);
+  emitData(ctx, dataKind, { handles: handleDetails, pseudonymized: [...pseudonymized] }, (out) => {
+    if (format === "json") {
+      renderDataDocument(values, { format: "json", write: out });
+    } else if (format === "ndjson") {
+      for (const v of values) renderDataDocument(v, { format: "ndjson", write: out });
+    } else if (variant === "entities") {
+      // `table` here is the non-explicit default; an entity is a document (as in `get`).
+      renderDataDocument(values, { format: "json", write: out });
+    } else {
+      // table and name: one reference per line; table adds the display string when one was sent.
+      for (const v of values) {
+        if (typeof v === "string") { out(`${v}\n`); continue; } // a handle
+        const key = liteKey(v) ?? JSON.stringify(v);
+        const model = (v as Record<string, unknown> | null)?.["model"];
+        out(format === "table" && typeof model === "string" ? `${key}  ${model}\n` : `${key}\n`);
+      }
     }
-  }
+  });
 
-  const note = disclosure(ctx.privacy, [...pseudonymized]);
-  if (note !== "") ctx.io.err("\n" + note);
+
   if (format === "table" && request["count"] !== undefined && items.length === request["count"]) {
     ctx.io.err(`\n${items.length} ${variant} shown, the --top limit; there may be more visible to you (use --all)\n`);
   }

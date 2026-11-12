@@ -16,11 +16,12 @@
  * REQ-058 rather than a server-side lookup: the surrogate→real relationship never leaves the machine.
  */
 
+import { Explained } from "../core/http.ts";
 import type { Ctx } from "../core/ctx.ts";
 import { ExitCode, PolicyError, UsageError } from "../core/errors.ts";
 import { renderDataDocument } from "../core/output.ts";
 import {
-  clearHandles, handlesPath, loadHandleEntries, loadHandles, saveHandles, stripStoredLabels,
+  clearHandles, handleStorePaths, handlesPath, loadAllHandleEntries, loadHandleEntries, saveHandles, stripStoredLabels,
   type HandleEntry,
 } from "../core/handles.ts";
 import { HANDLE_PREFIX } from "../core/privacy.ts";
@@ -181,6 +182,7 @@ async function fetchMissingLabels(
         if (label !== undefined) found[w.handle] = label;
       }
     } catch (err) {
+      if (err instanceof Explained) throw err;
       // One unreadable type must not lose the labels of every other type. Named, never swallowed.
       ctx.io.err(
         `warning: could not fetch labels for ${type} (${err instanceof Error ? err.message : String(err)})\n`,
@@ -542,13 +544,16 @@ async function unmaskFiles(ctx: Ctx, inputs: readonly string[]): Promise<ExitCod
   const inPlace = flag(ctx, "in-place");
   const glob = opt(ctx, "glob");
   const labelMode = parseLabelMode(opt(ctx, "labels"));
-  let entries = loadHandleEntries(ctx.io.env);
+  // Every application's handles: substituting for a person to read addresses no record (#121).
+  let entries = loadAllHandleEntries(ctx.io.env);
   const handles = Object.fromEntries(Object.entries(entries).map(([k, v]) => [k, v.lite]));
 
   // `fetch` fills the gaps BEFORE any file is read, so one round trip per type serves the whole run
   // and a partial failure is reported once rather than per file.
   if (labelMode === "fetch") {
-    const fetched = await fetchMissingLabels(ctx, entries);
+    // Only this application's handles: asking it for another application's `Type;id` would fetch
+    // the label of a different record, and file it as the right one (#121).
+    const fetched = await fetchMissingLabels(ctx, loadHandleEntries(ctx.io.env, ctx.target));
     if (Object.keys(fetched).length > 0) {
       const merged: Record<string, HandleEntry> = {};
       for (const [h, label] of Object.entries(fetched)) {
@@ -557,7 +562,7 @@ async function unmaskFiles(ctx: Ctx, inputs: readonly string[]): Promise<ExitCod
       }
       // Cached, so the next run needs no round trip — unless the profile said not to store labels,
       // in which case they are used for this run and deliberately not written down.
-      saveHandles(merged, ctx.io.env, { storeLabels: ctx.privacy.storeLabels });
+      saveHandles(merged, ctx.io.env, { target: ctx.target, storeLabels: ctx.privacy.storeLabels });
       entries = { ...entries, ...merged };
       ctx.io.err(`note: fetched ${Object.keys(fetched).length} label(s) from the server.\n`);
     }
@@ -573,7 +578,7 @@ async function unmaskFiles(ctx: Ctx, inputs: readonly string[]): Promise<ExitCod
     // them is how someone concludes the documents were clean when the store was simply empty.
     ctx.io.err(
       "note: no handles are stored, so nothing in these files can resolve.\n" +
-      `Store: ${handlesPath(ctx.io.env)} — a \`ref:\` is only valid for the profile and secret that minted it.\n`,
+      `Stores: ${handlesPath(ctx.io.env, ctx.target)} and the other applications' — a \`ref_\` is only valid for the profile and secret that minted it.\n`,
     );
   }
 
@@ -711,7 +716,7 @@ export async function runUnmask(ctx: Ctx): Promise<ExitCode> {
     // mutations and is m2, but the principle does not care where the data lives: this permanently
     // orphans every handle, and it used to do so on a bare `--clear` with no confirmation at all.
     // Non-interactively it proceeds — a script asked for it, and prompting would hang (STORY-09).
-    const stored = Object.keys(loadHandles(ctx.io.env)).length;
+    const stored = Object.keys(loadAllHandleEntries(ctx.io.env)).length;
     if (stored > 0 && !flag(ctx, "yes") && ctx.io.prompt !== undefined && ctx.io.stdoutIsTty) {
       const answer = await ctx.io.prompt(
         `Forget ${stored} handle${stored === 1 ? "" : "s"}? Every outstanding ref: stops resolving. [y/N] `,
@@ -730,17 +735,17 @@ export async function runUnmask(ctx: Ctx): Promise<ExitCode> {
     return ExitCode.Ok;
   }
 
-  const handles = loadHandles(ctx.io.env);
+  const handles = Object.fromEntries(Object.entries(loadAllHandleEntries(ctx.io.env)).map(([k, v]) => [k, v.lite]));
 
   if (flag(ctx, "list")) {
     // Counting is not revealing: it says how many handles exist, never what they mean (AC-53.3).
     const count = Object.keys(handles).length;
     if (ctx.format === "json" || ctx.format === "ndjson") {
-      renderDataDocument({ count, path: handlesPath(ctx.io.env) }, { format: ctx.format, write: ctx.openData("handle count") });
+      renderDataDocument({ count, paths: handleStorePaths(ctx.io.env) }, { format: ctx.format, write: ctx.openData("handle count") });
       return ExitCode.Ok;
     }
     ctx.io.out(`${count} handle${count === 1 ? "" : "s"} stored\n`);
-    ctx.io.err(`${handlesPath(ctx.io.env)}\n`);
+    ctx.io.err(`${handleStorePaths(ctx.io.env).join("\n")}\n`);
     return ExitCode.Ok;
   }
 

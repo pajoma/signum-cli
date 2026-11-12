@@ -89,9 +89,11 @@ describe("flag parsing", () => {
     expect(() => parseArgs(["types", "-i", "renew", "--url", "https://x.example"], {})).toThrow(/pass one/);
   });
 
-  it("falls back to SIGNUM_INSTANCE before SIGNUM_URL, and never over an explicit flag", () => {
+  it("takes SIGNUM_INSTANCE or SIGNUM_URL, refuses both, and never wins over an explicit flag (AC-05.2)", () => {
+    expect(parseArgs(["types"], { SIGNUM_INSTANCE: "renew" } as NodeJS.ProcessEnv).flags).toMatchObject({ instance: "renew", url: undefined });
+    expect(parseArgs(["types"], { SIGNUM_URL: "https://x.example" } as NodeJS.ProcessEnv).flags).toMatchObject({ instance: undefined, url: "https://x.example" });
     const both = { SIGNUM_INSTANCE: "renew", SIGNUM_URL: "https://x.example" } as NodeJS.ProcessEnv;
-    expect(parseArgs(["types"], both).flags).toMatchObject({ instance: "renew", url: undefined });
+    expect(() => parseArgs(["types"], both)).toThrow(/both name a target/);
     expect(parseArgs(["types", "--url", "https://y.example"], both).flags).toMatchObject({ instance: undefined, url: "https://y.example" });
     expect(parseArgs(["types", "-i", "alpha"], both).flags).toMatchObject({ instance: "alpha", url: undefined });
   });

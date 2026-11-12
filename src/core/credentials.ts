@@ -148,6 +148,21 @@ export function defaultCredentialUrl(env?: NodeJS.ProcessEnv): string | undefine
   return file.default !== undefined ? file.credentials[file.default]?.url : undefined;
 }
 
+/**
+ * Make `url` the default target (`auth switch`, AC-05.2): the one a command uses when no flag or
+ * variable names one. Only a target with a stored credential can be the default — the default has
+ * always been "a login", and switching to a URL nobody logged in to is more likely a typo than a
+ * wish. Returns false when there is no credential for it.
+ */
+export function setDefaultTarget(url: string, env?: NodeJS.ProcessEnv): boolean {
+  const file = readFile(env);
+  const key = normalizeUrl(url);
+  if (file.credentials[key] === undefined) return false;
+  file.default = key;
+  writeFile(file, env);
+  return true;
+}
+
 /** Every stored credential's URL, for listing. Tokens are deliberately not part of the answer. */
 export function storedCredentialUrls(env?: NodeJS.ProcessEnv): string[] {
   return Object.values(readFile(env).credentials).map((c) => c.url).sort();

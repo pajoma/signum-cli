@@ -14,8 +14,8 @@
  *     reports success. Every ancestor on the path to a change needs the flag, because each nested
  *     entity is judged by its own.
  *
- * So the shape is: parse losslessly, change values only through `setMember`, and send only what
- * `serializeEntity` produced. `EntityPayload` can be minted nowhere else, which makes the
+ * So the shape is: parse losslessly, change values only through `setMember` (one edit) or
+ * `applyDocument` (an edited document, #120), and send only what `serializeEntity` produced. `EntityPayload` can be minted nowhere else, which makes the
  * propagation impossible to forget (AC-32.2) — the same structural argument as `DataWriter`.
  */
 
@@ -229,6 +229,145 @@ function step(node: unknown, segment: string | number, where: string): unknown {
     return node[segment];
   }
   throw new UsageError(`cannot address '${String(segment)}' in ${where}`);
+}
+
+/** Equal as JSON, whatever the key order: a document edited by hand need not keep it. */
+function sameJson(a: unknown, b: unknown): boolean {
+  const canonical = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(canonical);
+    if (!isObject(v)) return v;
+    return Object.fromEntries(Object.keys(v).sort().map((k) => [k, canonical(v[k])]));
+  };
+  return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+}
+
+/** The same record referenced: a Lite's identity is its type and id, not its display string. */
+function sameValue(next: unknown, current: unknown): boolean {
+  if (isLite(next) && isLite(current)) {
+    return next.EntityType === current.EntityType && String(next.id) === String(current.id);
+  }
+  return sameJson(next, current);
+}
+
+/**
+ * Turns a value from the caller's document into what goes on the wire: a handle into the Lite it
+ * stands for, and so on. `current` is the record's real value at that place, when there is one.
+ */
+export type DocumentValue = (value: unknown, path: string, current: unknown) => unknown;
+
+/**
+ * Apply a document the caller edited to the record as it really is now (#120), and return the paths
+ * that changed. A file carries no `modified` flags, and the server drops every change on an entity
+ * not marked (`EntityJsonConverter.cs:537-549`), so the change has to be FOUND, then marked.
+ *
+ * It is a three-way comparison, because what the caller edited is usually not the record: `get`
+ * pseudonymizes, so their document carries handles and surrogates for everything they left alone.
+ *   - `edited` equal to `shown` (the record as it would be shown now) — left alone; the real value
+ *     stays, whatever surrogate the document holds.
+ *   - otherwise translated by `value`, and if that equals the real value, left alone too (a document
+ *     read with pseudonymization off, edited with it on).
+ *   - otherwise it is a change: assigned onto the real record, and its owner marked.
+ * Embedded and loaded entities are compared member by member, MList rows by `rowId`: a row kept is
+ * updated in place, a row without one is new, a row left out is removed (AC-31.3). A member the
+ * document does not mention is left as it is; one the record does not have is refused (AC-31.4).
+ * `real` is changed in place; serialize it with `serializeEntity`, which marks the ancestors.
+ */
+export function applyDocument(real: EntityJson, shown: unknown, edited: unknown, value: DocumentValue): string[] {
+  const changed: string[] = [];
+  mergeEntity(real, shown, edited, "", changed, value);
+  return changed;
+}
+
+function mergeEntity(real: EntityJson, shown: unknown, edited: unknown, path: string, changed: string[], value: DocumentValue): void {
+  const where = path === "" ? "the record" : path;
+  if (!isObject(edited)) throw new UsageError(`${where} should be an object in the document`);
+  const seen = isObject(shown) ? shown : {};
+  for (const [key, ed] of Object.entries(edited)) {
+    if (READ_ONLY.has(key)) continue;
+    const p = path === "" ? key : `${path}.${key}`;
+    // AC-31.4: the server throws on an unknown member, so adding one is never right.
+    if (!Object.hasOwn(real, key)) throw new UsageError(`${where} has no member '${key}'`);
+    const current = real[key];
+    if (sameJson(ed, seen[key])) continue;
+    if (isEntity(current) && isEntity(ed) && ed.Type === current.Type && sameRecord(current, ed, seen[key])) {
+      mergeEntity(current, seen[key], ed, p, changed, value);
+      continue;
+    }
+    if (isMList(current) || (Array.isArray(current) && Array.isArray(ed) && ed.length > 0 && ed.every(isMListRow))) {
+      mergeRows(real, key, current as MListRow[], seen[key], ed, p, changed, value);
+      continue;
+    }
+    const next = value(ed, p, current);
+    if (sameValue(next, current)) continue;
+    real[key] = next;
+    real.modified = true;
+    changed.push(p);
+  }
+}
+
+/** An embedded entity has no id and is always the same one; a referenced one must keep its id. */
+function sameRecord(current: EntityJson, edited: EntityJson, shown: unknown): boolean {
+  if (current.id === undefined || current.id === null) return true;
+  const shownId = isObject(shown) ? shown["id"] : undefined;
+  return sameJson(edited.id, current.id) || sameJson(edited.id, shownId);
+}
+
+function mergeRows(
+  owner: EntityJson, key: string, rows: MListRow[], shown: unknown, edited: unknown,
+  path: string, changed: string[], value: DocumentValue,
+): void {
+  if (!Array.isArray(edited) || !edited.every(isMListRow)) {
+    throw new UsageError(`${path}: each row needs its rowId and element, as \`signum get\` shows them`, {
+      hint: 'A new row is {"rowId": null, "element": …}.',
+    });
+  }
+  const byId = new Map(rows.map((r) => [String(r.rowId), r]));
+  const shownById = new Map((Array.isArray(shown) ? shown : []).filter(isMListRow).map((r) => [String(r.rowId), r]));
+  const out: MListRow[] = [];
+  edited.forEach((row, i) => {
+    const p = `${path}.${i}`;
+    if (row.rowId === null) {
+      out.push({ rowId: null, element: markAllModified(value(row.element, p, undefined)) });
+      return;
+    }
+    const kept = byId.get(String(row.rowId));
+    if (kept === undefined) throw new UsageError(`${path} has no row with rowId ${String(row.rowId)}`, { hint: "A new row has rowId null." });
+    const was = shownById.get(String(row.rowId))?.element;
+    if (!sameJson(row.element, was)) {
+      if (isEntity(kept.element) && isEntity(row.element) && row.element.Type === kept.element.Type) {
+        mergeEntity(kept.element, was, row.element, p, changed, value);
+      } else {
+        const next = value(row.element, p, kept.element);
+        if (!sameValue(next, kept.element)) {
+          kept.element = next;
+          owner.modified = true;
+          changed.push(p);
+        }
+      }
+    }
+    out.push(kept);
+  });
+  const sameRows = out.length === rows.length && out.every((r, i) => r === rows[i]);
+  if (!sameRows) {
+    owner[key] = out;
+    owner.modified = true;
+    changed.push(`${path} (rows)`);
+  }
+}
+
+/**
+ * Mark every entity in a graph that is new to the record — a new row's element, a whole new
+ * record — so none of its members is dropped. `propagateModified` marks only ancestors of a change,
+ * and a new embedded entity has no change below it to report: every member is new.
+ */
+export function markAllModified<T>(v: T): T {
+  if (Array.isArray(v)) v.forEach(markAllModified);
+  // A Lite is a reference: the record behind it is not being created, and is never marked.
+  else if (isObject(v) && !isLite(v)) {
+    if (isEntity(v)) v.modified = true;
+    for (const [k, child] of Object.entries(v)) if (!SPECIAL.has(k)) markAllModified(child);
+  }
+  return v;
 }
 
 /**

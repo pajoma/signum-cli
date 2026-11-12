@@ -14,7 +14,7 @@
 
 import { UsageError, type ExitCode } from "./errors.ts";
 import { parseOutputFormat, type OutputFormat } from "./output.ts";
-import { COMMANDS, findCommand, formatSupport, knownFlagNames } from "./help.ts";
+import { allFlagSpecs, COMMANDS, findCommand, formatSupport, knownFlagNames, type FlagSpec } from "./help.ts";
 import { nearest } from "./text.ts";
 
 /**
@@ -58,6 +58,12 @@ export interface GlobalFlags {
   /** STORY-51 acknowledgement (AC-51.2). Deliberately unmissable. */
   allowAgentData: boolean;
   /**
+   * A detected agent may CHANGE data (AC-46.7). Separate from `allowAgentData` on purpose: letting a
+   * model read pseudonymized rows and letting it run operations are different decisions, and the
+   * first must not quietly grant the second.
+   */
+  allowAgentWrites: boolean;
+  /**
    * Requested pseudonymization mode (REQ-057). May TIGHTEN freely; loosening under a detected agent
    * needs `allowAgentData` and is logged — see privacy.ts `resolvePolicy` (AC-52.10).
    */
@@ -81,6 +87,12 @@ export interface ParsedArgs {
   flags: GlobalFlags;
   /** Repeatable/unknown flags, kept for command-specific parsing. */
   options: Map<string, string[]>;
+  /**
+   * The same values in the order they were TYPED, across flag names. `options` keeps order only
+   * within one name, and an operation's `--arg`, `--arg-lite` and `--arg-json` together make one
+   * positional array whose order is the order on the command line (AC-42.1).
+   */
+  sequence: ReadonlyArray<readonly [name: string, value: string]>;
   booleans: Set<string>;
   /**
    * Every flag name actually TYPED on the command line, before environment fallbacks are applied.
@@ -92,19 +104,20 @@ export interface ParsedArgs {
   rawFlagNames: Set<string>;
 }
 
-const FLAGS_WITH_VALUE = new Set([
-  "url", "instance", "i", "output", "o", "timeout", "caller-context", "pseudonymize",
-  "filter", "filter-json", "column", "order", "top", "page", "page-size",
-  "context", "pseudonymize", "arg", "arg-string", "arg-lite", "arg-json",
-  "lite", "id", "filename", "f",
-  "in", "glob", "labels", "kind",
-]);
+/** A flag's name and alias, as typed after the dashes. */
+function spellings(f: FlagSpec): string[] {
+  return [f.name, ...(f.alias !== undefined ? [f.alias] : [])].map((n) => n.toLowerCase());
+}
 
-/** Boolean flags — listing one above would make it demand a value. */
-export const BOOLEAN_FLAGS = new Set([
-  "with-token", "exists", "count", "all", "yes", "y", "raw", "group",
-  "resolve", "privacy", "list", "clear", "as-command", "dry-run", "in-place", "forget-labels", "lites", "entities",
-]);
+/**
+ * Which flags take a value, derived from the help registry: a `FlagSpec` with an `arg` takes one.
+ * Declaring a flag there is the only step; a second hand-kept list here drifted twice in m2, and a
+ * flag missing from it parsed its value as a positional.
+ */
+const FLAGS_WITH_VALUE = new Set(allFlagSpecs().filter((f) => f.arg !== undefined).flatMap(spellings));
+
+/** Boolean flags, from the same registry — listing one above would make it demand a value. */
+export const BOOLEAN_FLAGS = new Set(allFlagSpecs().filter((f) => f.arg === undefined).flatMap(spellings));
 
 /** Invariant: a flag cannot need a value and be boolean-only at once. Checked by test. */
 export function flagSetsAreDisjoint(): boolean {
@@ -124,6 +137,7 @@ function emptyFlags(): GlobalFlags {
     callerContext: undefined,
     version: false,
     allowAgentData: false,
+    allowAgentWrites: false,
     pseudonymize: undefined,
     offline: false,
   };
@@ -132,11 +146,13 @@ function emptyFlags(): GlobalFlags {
 export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): ParsedArgs {
   const flags = emptyFlags();
   const options = new Map<string, string[]>();
+  const sequence: Array<readonly [string, string]> = [];
   const booleans = new Set<string>();
   const rawFlagNames = new Set<string>();
   const positionals: string[] = [];
 
   const push = (name: string, value: string) => {
+    sequence.push([name, value]);
     const list = options.get(name);
     if (list === undefined) options.set(name, [value]);
     else list.push(value);
@@ -169,7 +185,8 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
       switch (name) {
         case "help": case "h": flags.help = true; break;
         case "explain": flags.explain = true; break;
-        case "verbose": case "v": flags.verbose = true; break;
+        // `--trace` is REQ-053's name for it; `--verbose`/`-v` came first. One flag, three spellings (#122).
+        case "verbose": case "v": case "trace": flags.verbose = true; break;
         case "no-color": flags.noColor = true; break;
         case "json": flags.output = "json"; break;
         case "url": flags.url = value; break;
@@ -177,6 +194,7 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
         case "output": case "o": flags.output = parseOutputFormat(value as string); break;
         case "caller-context": flags.callerContext = value; break;
         case "i-understand-data-goes-to-a-model": flags.allowAgentData = true; break;
+        case "i-understand-an-agent-is-writing": flags.allowAgentWrites = true; break;
         case "offline": flags.offline = true; break;
         case "version": flags.version = true; break;
         case "pseudonymize": flags.pseudonymize = value; break;
@@ -208,6 +226,7 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
   }
 
   if (env["SIGNUM_ALLOW_AGENT_DATA"] === "1") flags.allowAgentData = true;
+  if (env["SIGNUM_ALLOW_AGENT_WRITES"] === "1") flags.allowAgentWrites = true;
   if (env["SIGNUM_OFFLINE"] === "1") flags.offline = true;
   if (flags.pseudonymize === undefined) {
     const fromEnv = env["SIGNUM_PSEUDONYMIZE"];
@@ -226,6 +245,12 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
   if (flags.url === undefined && flags.instance === undefined) {
     const instance = env["SIGNUM_INSTANCE"];
     const url = env["SIGNUM_URL"];
+    // The same rule for the environment as for the flags (AC-05.2: never a silent choice).
+    if (instance !== undefined && instance !== "" && url !== undefined && url !== "") {
+      throw new UsageError("SIGNUM_URL and SIGNUM_INSTANCE both name a target; unset one", {
+        hint: "Or name the target for this command with --url or -i, which takes precedence over both.",
+      });
+    }
     if (instance !== undefined && instance !== "") flags.instance = instance;
     else if (url !== undefined && url !== "") flags.url = url;
   }
@@ -233,24 +258,24 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
   // `--version` with no command IS the version command. Resolving it here rather than in cli.ts
   // means one implementation, one output shape, and no chance of the two disagreeing.
   if (flags.version && positionals.length === 0) {
-    return { kind: "builtin", command: "version", positionals: [], flags, options, booleans, rawFlagNames };
+    return { kind: "builtin", command: "version", positionals: [], flags, options, sequence, booleans, rawFlagNames };
   }
 
   const first = positionals[0];
   if (first === undefined) {
-    return { kind: "none", command: undefined, positionals: [], flags, options, booleans, rawFlagNames };
+    return { kind: "none", command: undefined, positionals: [], flags, options, sequence, booleans, rawFlagNames };
   }
 
   // 1. dot ⇒ canonical operation key
   if (first.includes(".")) {
-    return { kind: "operation-key", command: first, positionals: positionals.slice(1), flags, options, booleans, rawFlagNames };
+    return { kind: "operation-key", command: first, positionals: positionals.slice(1), flags, options, sequence, booleans, rawFlagNames };
   }
   // 2. built-ins always win
   if (isBuiltIn(first)) {
-    return { kind: "builtin", command: first.toLowerCase(), positionals: positionals.slice(1), flags, options, booleans, rawFlagNames };
+    return { kind: "builtin", command: first.toLowerCase(), positionals: positionals.slice(1), flags, options, sequence, booleans, rawFlagNames };
   }
   // 3. verb-noun operation
-  return { kind: "verb-noun", command: first, positionals: positionals.slice(1), flags, options, booleans, rawFlagNames };
+  return { kind: "verb-noun", command: first, positionals: positionals.slice(1), flags, options, sequence, booleans, rawFlagNames };
 }
 
 /**
@@ -273,6 +298,13 @@ export function flagCheckPath(command: string, sub: string | undefined): string[
     return findCommand([command, sub]) !== undefined ? [command, sub.toLowerCase()] : undefined;
   }
   return [command];
+}
+
+/** What `ctx.ts` checks a command's flag reads against (#124): the built-in's declared flags. */
+export function declaredFlagsFor(args: ParsedArgs): { path: string[]; names: Set<string> } | undefined {
+  if (args.kind !== "builtin" || args.command === undefined) return undefined;
+  const path = flagCheckPath(args.command, args.positionals[0]);
+  return path !== undefined ? { path, names: knownFlagNames(path) } : undefined;
 }
 
 export function assertKnownFlags(args: ParsedArgs, path: readonly string[]): void {

@@ -8,19 +8,24 @@
  * credentials — api/reflection/types is anonymous.
  */
 
+import { Explained } from "../core/http.ts";
 import type { Ctx } from "../core/ctx.ts";
 import { ExitCode, UsageError } from "../core/errors.ts";
 import { listingShape, renderDocument, renderListing } from "../core/output.ts";
 import { isBuiltIn } from "../core/args.ts";
 import {
-  anonymousViewNote, findType, hidesEntities, isEntityTypeInfo, loadMetadata, queryableTypes, queryDenied, TYPE_KINDS,
-  unknownTypeError, type Metadata, type OperationInfo, type TypeInfo,
+  anonymousViewNote, findType, hidesEntities, isEntityTypeInfo, loadMetadata, queryableTypes, queryDenied, resolveQueryKey,
+  TYPE_KINDS, unknownTypeError, type Metadata, type OperationInfo, type TypeInfo,
 } from "../core/metadata.ts";
+import { loadQueryDescription } from "../core/metadata-cache.ts";
+import { operationFacts } from "../core/operations.ts";
+import type { AppHelp } from "../core/help.ts";
 import { loginCommand } from "../core/handoff.ts";
 import { flag, opt } from "../core/ctx.ts";
 import { resolveTarget } from "../core/target.ts";
 import { sensitivity } from "../core/privacy.ts";
-import { fetchSubTokens, validateTokens, type QueryTokenInfo } from "../core/tokens.ts";
+import { defaultColumns, descriptionColumns, filterUnusableReason, type QueryTokenInfo } from "../core/tokens.ts";
+import { fetchQueryDescription, fetchSubTokens, validateTokens } from "../core/token-requests.ts";
 
 async function metadata(ctx: Ctx): Promise<Metadata> {
   const target = resolveTarget(ctx);
@@ -219,6 +224,7 @@ async function tryFetchQueryTokens(
     const target = resolveTarget(ctx);
     return { tokens: await fetchSubTokens(target.http, type.name) };
   } catch (err) {
+    if (err instanceof Explained) throw err;
     // Deliberately broad: no credential, no reachable server, a query key the reflection document
     // claims but the server does not expose. None of them should cost the reader the members list.
     return { unavailable: err instanceof Error ? err.message : String(err) };
@@ -226,23 +232,80 @@ async function tryFetchQueryTokens(
 }
 
 function explainOperation(ctx: Ctx, t: TypeInfo, op: OperationInfo): ExitCode {
-  const shadowed = isBuiltIn(op.verb.toLowerCase());
+  // The same description `<verb> <Type> --help` prints (AC-61.2), so the two cannot disagree.
+  const facts = operationFacts({ key: op.key, type: t, info: op });
   if (ctx.format === "json" || ctx.format === "ndjson") {
-    renderDocument(
-      { kind: "operation", key: op.key, verb: op.verb, type: t.name,
-        command: `signum ${kebab(op.verb)} ${kebab(t.name)}`, shadowed, niceName: op.niceName ?? null,
-        invocable: false, note: "invoking operations is m2" },
-      { format: ctx.format, write: ctx.io.out },
-    );
+    renderDocument(facts.doc, { format: ctx.format, write: ctx.io.out });
     return ExitCode.Ok;
   }
-  ctx.io.out(`${op.key}  (operation on ${t.name})\n`);
-  if (op.niceName !== undefined) ctx.io.out(`  ${op.niceName}\n`);
-  ctx.io.out(`\n  invoke as:  signum ${kebab(op.verb)} ${kebab(t.name)}  (m2)\n`);
-  if (shadowed) {
-    ctx.io.out(`  NOTE: verb '${op.verb.toLowerCase()}' is shadowed by a built-in; use the canonical key.\n`);
-  }
+  ctx.io.out(facts.text);
   return ExitCode.Ok;
+}
+
+/**
+ * `signum query <key> --help` (AC-61.1, AC-61.3): the query's columns, its ordering, and the tokens a
+ * filter may use. Reflection and the query's description both come from the cache when it has them,
+ * so a query that has run once is described offline; the description is fetched live otherwise, and
+ * that needs a login (QueryController is not anonymous). A failure is the caller's to degrade.
+ */
+export async function describeQuery(ctx: Ctx, queryKey: string): Promise<AppHelp> {
+  const target = resolveTarget(ctx);
+  const md = await loadMetadata({
+    url: target.url, http: target.http, offline: ctx.args.flags.offline, preferCache: true,
+    env: ctx.io.env, warn: (line) => ctx.io.err(line),
+  });
+  const type = resolveQueryKey(md, queryKey);
+  const cached = loadQueryDescription(target.url, type.name, ctx.io.env) ?? loadQueryDescription(target.url, queryKey, ctx.io.env);
+  if (cached === undefined && ctx.args.flags.offline) {
+    throw new UsageError(`--offline, and the columns of ${type.name} are not cached yet`, {
+      hint: `Run \`signum query ${type.name} --top 1\` online once; its description is kept.`,
+    });
+  }
+  const columns = descriptionColumns(cached !== undefined ? cached.payload : await fetchQueryDescription(target.http, type.name, ctx.io.env));
+  const shown = defaultColumns(columns);
+  const filterable = columns.filter((c) => c.kind !== "TimeSeries" && filterUnusableReason(c) === undefined);
+
+  const origin = [
+    md.origin.fromCache ? `metadata cached ${md.origin.fetchedAt}` : "",
+    cached !== undefined ? `columns cached ${cached.fetchedAt}` : "",
+  ].filter((x) => x !== "").join(", ");
+  const table = (rows: ReadonlyArray<readonly [string, string]>): string[] => {
+    const w = Math.max(0, ...rows.map(([a]) => a.length));
+    return rows.map(([a, b]) => `  ${a.padEnd(w)}  ${b}`.trimEnd());
+  };
+  const text = [
+    "",
+    `${type.name.toUpperCase()} IN THIS APPLICATION${origin !== "" ? `  (${origin})` : ""}`,
+    ...(type.niceName !== undefined ? [`  ${type.niceName}`] : []),
+    "",
+    "COLUMNS  shown when no --column is given; --column replaces them",
+    ...table(shown.map((c) => [c.fullKey, c.type ?? ""])),
+    "",
+    `FILTER TOKENS  for --filter and --order; \`signum explain ${type.name}.<token>\` walks deeper`,
+    ...table(filterable.map((c) => [c.fullKey, [c.type ?? "", c.kind === "Aggregate" ? "with --group only" : ""].filter((x) => x !== "").join(", ")])),
+    "",
+    "ORDERING",
+    "  The query sets none, and the server adds none: rows come in the database's order unless",
+    "  --order is given. --page and --all order by key as well, so pages do not overlap.",
+    "",
+  ].join("\n");
+  return {
+    doc: {
+      kind: "query", queryKey: type.name, niceName: type.niceName ?? null,
+      columns: shown.map((c) => ({ token: c.fullKey, niceName: c.niceName ?? null, type: c.type ?? null })),
+      filterTokens: filterable.map((c) => ({
+        token: c.fullKey, type: c.type ?? null, filterType: c.filterType ?? null, groupOnly: c.kind === "Aggregate",
+      })),
+      ordering: null,
+      orderingNote: "The query sets none; --page and --all order by key.",
+      source: {
+        url: md.origin.url,
+        metadataCachedAt: md.origin.fromCache ? md.origin.fetchedAt : null,
+        columnsCachedAt: cached?.fetchedAt ?? null,
+      },
+    },
+    text,
+  };
 }
 
 /**
@@ -459,7 +522,7 @@ async function explainToken(ctx: Ctx, queryKey: string, tokenPath: string): Prom
   // Validate first, so a typo is reported as a typo — with the valid continuations at the point
   // it broke — rather than as an empty continuation list that looks like a leaf.
   const [resolved] = await validateTokens(target.http, queryKey, [tokenPath]);
-  const children = await fetchSubTokens(target.http, queryKey, tokenPath);
+  const children = await fetchSubTokens(target.http, queryKey, tokenPath, false); // the answer: shown under --explain
 
   if (ctx.format === "json" || ctx.format === "ndjson") {
     renderDocument(
@@ -524,6 +587,14 @@ export async function runDiscover(
   ctx: Ctx,
   which: "types" | "queries" | "operations" | "explain",
 ): Promise<ExitCode> {
+  const arg0 = ctx.args.positionals[0];
+  // --explain: the request that answers this command, shown and not sent (REQ-053). The reflection
+  // document is what types, queries, operations and `explain <Type>` read. A dotted `explain`
+  // argument reads the reflection document as metadata and, for a token path, asks
+  // api/query/subTokens — which is shown where it is made.
+  if (ctx.args.flags.explain && !(which === "explain" && arg0?.includes(".") === true)) {
+    await resolveTarget(ctx).http.request({ method: "GET", path: "api/reflection/types", allowAnonymous: true });
+  }
   const md = await metadata(ctx);
   noteOrigin(ctx, md);
   const arg = ctx.args.positionals[0];

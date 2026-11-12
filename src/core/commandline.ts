@@ -33,6 +33,7 @@ const OMITTED_GLOBALS = new Set([
   // A human at a terminal needs neither, and echoing them would tell them to assert something
   // about themselves that is not true.
   "i-understand-data-goes-to-a-model",
+  "i-understand-an-agent-is-writing",
   "caller-context",
 ]);
 

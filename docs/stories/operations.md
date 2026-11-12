@@ -129,6 +129,7 @@ the full lifecycle rather than only updates.
 - AC-44.3: `deleteEntity` / `deleteLite` are supported, and delete always requires confirmation per STORY-46.
 - AC-44.4: A constructed entity is rendered so its new id is immediately usable in a following command.
 - AC-44.5: Construct returning `null` (the operation declined to produce an entity) is reported as such, not as a crash.
+- AC-44.6: A type with no constructor operation is created the way the web UI's "new" does it: its `Save`, when reflection marks it `canBeNew` and `canBeModified`, with no record named, sends `{Type, isNew: true}` carrying only the members given with `--edit`. Every other member keeps the server's own default, because the server constructs the instance before it reads the JSON. A constructor whose `resultIsSaved` is false is reported as returning an **unsaved** entity, so `create` is never mistaken for a write.
 
 ---
 
@@ -146,6 +147,8 @@ per-item outcomes, so that I can act at scale and know exactly what happened.
 - AC-45.4: Declarative property setters are supported — `MultiOperationRequest.Setters` is a list of `PropertySetter { Property, Setters, … }` applied via `MultiSetter.SetSetters` (`OperationController.cs:222,304-320`), including nesting for embedded entities and `MList` rows.
 - AC-45.5: Bulk operations always require confirmation on a TTY, always print the target count first, and support `--dry-run` across the whole set.
 - AC-45.6: Interrupting mid-batch leaves already-emitted per-item results valid, and the CLI reports how many were processed.
+- AC-45.7: *(Added with #119.)* Each record's outcome is matched back to it by `Type;id` and reported under the name the caller used, a handle included; a record the server's stream never mentions is reported as **failed**, never as done. A partial failure is exit **10**, all failing exit 1 (cli-surface §5). `--dry-run` asks each record's entity pack, because `stateCanExecutes` answers for the set as a whole.
+- AC-45.8: *(Added when #119 was completed.)* Over many records, `--edit Member.Path=value` becomes a `Set` setter, spelled as reflection spells the member, a dotted path reaching into an embedded entity and a handle or a Lite key in a Lite member becoming a Lite; `--setters-json` (literal, `@file` or `-`) takes the setter list itself for MList rows and new entities, checked for shape before anything is sent. Both go only to an `executeMultiple` whose operation takes the entity (`canBeModified`, the web UI's own rule), and are named in the confirmation. Outcomes are shown and logged as each NDJSON line arrives; Ctrl-C stops the request, every record not reported is listed and logged as interrupted, and the exit is **130**. `--lite` and `--id` take `@file` and `-`, one record per line or a JSON array, including the rows of `query -o ndjson`. `--progress` sends one record to `executeLiteWithProgress` (which operations report progress is the application's choice, so it is the caller's flag): a line on stderr at a terminal, each step under `-o ndjson` with its free text judged like any member, the last step's error reported as the error its type maps to, and a stream that ends without a last step a transport error.
 
 ---
 
@@ -163,6 +166,7 @@ deliberate, so that a mistyped command cannot quietly cause damage.
 - AC-46.4: A profile marked *protected* (AC-05.5) requires `--yes` even non-interactively.
 - AC-46.5: Deletes and bulk operations require typed confirmation, not a bare y/n, when the target count exceeds a threshold.
 - AC-46.6: Every mutation is logged locally — operation, target, profile, timestamp, outcome — with no credentials, so an operator can reconstruct what they did.
+- AC-46.7: Under a detected AI caller (STORY-50), a mutation needs its **own** acknowledgement — `--i-understand-an-agent-is-writing` or `SIGNUM_ALLOW_AGENT_WRITES=1` — in addition to `--yes`, and is refused with exit 9 without it. `--yes` is something an agent types, and text planted in a row can talk it into typing it. The data acknowledgement (AC-51.2) does **not** stand in for it: letting a model read pseudonymized rows and letting it change records are different decisions. `--dry-run` and `--explain` need neither. Like every detection-based rule this is a stricter default, not a boundary (AC-50.6); the audit log records the caller context of every attempt.
 
 ---
 

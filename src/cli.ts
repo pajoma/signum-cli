@@ -4,16 +4,17 @@
  * STORY-09 (non-interactive by construction) · STORY-51 (agent gate) · STORY-63 (errors route to help)
  */
 
-import { assertFormatSupported, assertKnownFlags, BUILT_INS, flagCheckPath, parseArgs, type ParsedArgs } from "./core/args.ts";
+import { assertFormatSupported, assertKnownFlags, BUILT_INS, declaredFlagsFor, flagCheckPath, parseArgs, type ParsedArgs } from "./core/args.ts";
 import { nearest } from "./core/text.ts";
-import { CliError, ExitCode, UsageError, exitCodeOf } from "./core/errors.ts";
+import { CliError, ExitCode, NotFoundError, UsageError, exitCodeOf } from "./core/errors.ts";
 import { detectCallerContext } from "./core/caller.ts";
 import { assertMayTrace, makeDataOpener } from "./core/policy.ts";
 import { parseMode, resolvePolicy } from "./core/privacy.ts";
-import { colorEnabled, effectiveFormat, renderDocument, type OutputFormat } from "./core/output.ts";
-import {
-  COMMANDS, TOPICS, findCommand, helpAsJson, renderCommand, renderOverview, topicNames,
-} from "./core/help.ts";
+import { colorEnabled, effectiveFormat, type OutputFormat } from "./core/output.ts";
+import { assertNoUserInfo, resolveInstance } from "./core/instances.ts";
+import { defaultCredentialUrl } from "./core/credentials.ts";
+import { Explained } from "./core/http.ts";
+import { applicationSubject, showApplicationHelp, showHelp } from "./commands/help.ts";
 import { runVersion } from "./commands/version.ts";
 import { runAuth } from "./commands/auth.ts";
 import { runDiscover } from "./commands/discover.ts";
@@ -21,98 +22,19 @@ import { runQuery } from "./commands/query.ts";
 import { runGet } from "./commands/get.ts";
 import { runCache } from "./commands/cache.ts";
 import { runInstance } from "./commands/instance.ts";
-import { assertNoUserInfo, resolveInstance } from "./core/instances.ts";
 import { runUnmask } from "./commands/unmask.ts";
+import { runOperation } from "./commands/operate.ts";
+import { terminalIo } from "./terminal.ts";
 import type { Ctx, Io } from "./core/ctx.ts";
 
-function showHelp(args: ParsedArgs, io: Io): ExitCode {
-  // Help is human-facing text, so prose is the default even when piped — unlike data
-  // output, which switches to JSON off a TTY. Structured help must be asked for (AC-62.1).
-  // Help is a document whatever it describes, so csv, tsv and name are refused as anywhere else.
-  assertFormatSupported(args, ["help"]);
-  const explicit = args.flags.output;
-  const asJson = explicit === "json" || explicit === "ndjson";
-  const format: OutputFormat = asJson ? explicit : "table";
-
-  const path = args.kind === "builtin" && args.command !== undefined && args.command !== "help"
-    ? [args.command, ...args.positionals]
-    : args.positionals;
-
-  if (path.length > 0) {
-    // QA fix: a multi-segment path (e.g. "auth login") can only mean a subcommand — topics
-    // are always a single word — so try exact subcommand resolution FIRST. Previously topic
-    // lookup used only path[0] and ran unconditionally, so "help auth login" silently dropped
-    // "login" and rendered the "auth" topic instead of the login subcommand's own help, while
-    // "auth login --help" (the other route to the same intent) worked correctly. The two
-    // phrasings must agree.
-    if (path.length > 1) {
-      const exact = findCommand(path);
-      if (exact !== undefined) {
-        if (asJson) {
-          renderDocument({ schemaVersion: 1, command: helpAsJson(exact) }, { format, write: io.out });
-        } else {
-          io.out(renderCommand(exact, path));
-        }
-        return ExitCode.Ok;
-      }
-    }
-
-    const topicKey = (path[0] as string).toLowerCase();
-    const topic = TOPICS[topicKey];
-    if (topic !== undefined) {
-      // A name can be BOTH a topic and a command — `auth` is. Render both, topic first: the
-      // prose is the more useful lead, but stopping there meant `signum auth --help` showed no
-      // subcommands, flags or examples, while `signum query --help` showed all three. AC-60.4
-      // asks every command's help to carry runnable examples, so the command half is not
-      // optional just because a topic outranks it.
-      const alsoCommand = findCommand([topicKey]);
-      if (asJson) {
-        renderDocument(
-          {
-            schemaVersion: 1,
-            topic: topicKey,
-            text: topic,
-            ...(alsoCommand !== undefined ? { command: helpAsJson(alsoCommand) } : {}),
-          },
-          { format, write: io.out },
-        );
-      } else {
-        io.out(topic + "\n");
-        if (alsoCommand !== undefined) io.out("\n" + renderCommand(alsoCommand, [topicKey]));
-      }
-      return ExitCode.Ok;
-    }
-    const spec = findCommand([path[0] as string]);
-    if (spec !== undefined) {
-      if (asJson) {
-        // Structured help is SCOPED to what was asked for, not the whole tree.
-        renderDocument({ schemaVersion: 1, command: helpAsJson(spec) }, { format, write: io.out });
-      } else {
-        io.out(renderCommand(spec, [path[0] as string]));
-      }
-      return ExitCode.Ok;
-    }
-    // Unknown topic/command asked of `help` is still a usage error (AC-60.3).
-    throw new UsageError(`no help topic or command '${path.join(" ")}'`, {
-      hint:
-        "Commands: " + COMMANDS.map((c) => c.name).join(", ") + "\n" +
-        "Topics:   " + topicNames().join(", "),
-    });
-  }
-
-  if (asJson) {
-    renderDocument(helpAsJson(), { format, write: io.out });
-    return ExitCode.Ok;
-  }
-  io.out(renderOverview());
-  return ExitCode.Ok;
-}
 
 export async function run(argv: readonly string[], io: Io): Promise<ExitCode> {
   const args = parseArgs(argv, io.env);
   try {
     return await runParsed(args, io);
   } catch (err) {
+    // `--explain` showed the request the command was about to send, and nothing was sent (REQ-053).
+    if (err instanceof Explained) return ExitCode.Ok;
     // The one place that knows how the user named the target, so a login hint raised anywhere
     // below is worded for it here (`-i <name>` when an instance was given).
     if (err instanceof CliError) err.namingInstance(args.flags.instance);
@@ -138,35 +60,20 @@ async function runParsed(args: ParsedArgs, io: Io): Promise<ExitCode> {
   // privacy.json — and a malformed one printed "warning: could not read …" over plain help.
   // Nothing above this line touches the filesystem.
   if (args.kind === "none" || args.flags.help || args.command === "help") {
-    return showHelp(args, io);
+    // A query or an operation is described from the application too (STORY-61); the rest of help
+    // reads nothing, and only naming a subject makes it look further.
+    const subject = applicationSubject(args);
+    if (subject === undefined) return showHelp(args, io);
+    // Describing a subject sends requests, and one carries the real id behind a handle (an operation's
+    // entity pack), so its trace is gated as any command's is (#128).
+    if (args.flags.verbose) assertMayTrace(caller, args.flags.allowAgentData);
+    return await showApplicationHelp(args, io, subject, (helpArgs) => contextFor(helpArgs, io, caller, format));
   }
 
   // Before any request is made, so a refused trace never prints a line (#128).
   if (args.flags.verbose) assertMayTrace(caller, args.flags.allowAgentData);
 
-  // After help, which must not read configuration (AC-60.2); before any command reads `url`.
-  if (args.flags.instance !== undefined) args.flags.url = resolveInstance(args.flags.instance, io.env);
-  // --url, SIGNUM_URL and a registered instance alike: a credential in the URL leaks everywhere.
-  if (args.flags.url !== undefined) assertNoUserInfo(args.flags.url);
-
-  const privacy = resolvePolicy({
-    callerIsAgent: caller.context === "agent",
-    requested: args.flags.pseudonymize !== undefined ? parseMode(args.flags.pseudonymize) : undefined,
-    acknowledged: args.flags.allowAgentData,
-    env: io.env,
-    warn: (line) => io.err(line),
-  });
-
-  const ctx: Ctx = {
-    args,
-    io,
-    format,
-    color: colorEnabled(io.stdoutIsTty, args.flags.noColor, io.env),
-    caller,
-    // Pseudonymization active means an agent gets surrogates rather than a refusal (AC-51.4).
-    openData: makeDataOpener(caller, args.flags.allowAgentData, io.out, privacy.mode !== "off"),
-    privacy,
-  };
+  const ctx = contextFor(args, io, caller, format);
 
   switch (args.kind) {
     case "builtin": {
@@ -200,23 +107,21 @@ async function runParsed(args: ParsedArgs, io: Io): Promise<ExitCode> {
         });
       }
 
-      const near = nearest(typed, BUILT_INS);
-      if (near !== undefined) {
-        throw new UsageError(`unknown command '${String(args.command)}'`, {
-          hint: `Did you mean \`signum ${near}\`?\nRun \`signum help\` to see every command.`,
-        });
+      // An operation (REQ-040, REQ-041): resolved against metadata, confirmed, then sent. A near
+      // built-in is the fallback, not the first answer: `set` is one edit from `get`, and an app's
+      // `Set` operation must not be refused as a typo before metadata is even read.
+      const near = args.kind === "verb-noun" ? nearest(typed, BUILT_INS) : undefined;
+      const typo = near === undefined ? undefined : new UsageError(`unknown command '${String(args.command)}'`, {
+        hint: `Did you mean \`signum ${near}\`?\nRun \`signum help\` to see every command.`,
+      });
+      // With no noun it cannot be an operation, so answer at once, without a network round trip.
+      if (typo !== undefined && args.positionals.length === 0) throw typo;
+      try {
+        return await runOperation(ctx);
+      } catch (err) {
+        if (typo !== undefined && (err instanceof UsageError || err instanceof NotFoundError)) throw typo;
+        throw err;
       }
-
-      throw new UsageError(
-        `operations are not available in this milestone (m1 is read-only)`,
-        {
-          hint:
-            `'${args.command}' looks like an operation. Invoking operations is m2 (REQ-040).\n` +
-            "You can already discover them:\n" +
-            "  signum operations [<Type>]      list invokable operations\n" +
-            "  signum explain <OperationKey>   arguments and target kind",
-        },
-      );
     }
   }
 
@@ -224,6 +129,45 @@ async function runParsed(args: ParsedArgs, io: Io): Promise<ExitCode> {
     hint: "Run `signum help` to see available commands.",
   });
 }
+
+/** Everything a command reads: the target, the privacy policy, the data gate. Reads configuration. */
+function contextFor(args: ParsedArgs, io: Io, caller: Ctx["caller"], format: OutputFormat): Ctx {
+  // After help, which must not read configuration (AC-60.2). The parsed flags stay as typed; the
+  // resolved URL goes into the context, where commands read it.
+  const named = args.flags.instance !== undefined ? resolveInstance(args.flags.instance, io.env) : args.flags.url;
+  // --url, SIGNUM_URL and a registered instance alike: a credential in the URL leaks everywhere.
+  if (named !== undefined) assertNoUserInfo(named);
+
+  // The target, once, before anything that is kept per target is read (#121).
+  const target = named ?? defaultCredentialUrl(io.env);
+
+  const privacy = resolvePolicy({
+    callerIsAgent: caller.context === "agent",
+    target,
+    requested: args.flags.pseudonymize !== undefined ? parseMode(args.flags.pseudonymize) : undefined,
+    acknowledged: args.flags.allowAgentData,
+    env: io.env,
+    warn: (line) => io.err(line),
+  });
+
+  return {
+    args,
+    io,
+    named,
+    target,
+    format,
+    color: colorEnabled(io.stdoutIsTty, args.flags.noColor, io.env),
+    caller,
+    // Pseudonymization active means an agent gets surrogates rather than a refusal (AC-51.4).
+    openData: makeDataOpener(caller, args.flags.allowAgentData, io.out, privacy.mode !== "off"),
+    privacy,
+    declaredFlags: declaredFlagsFor(args),
+  };
+}
+
+
+
+
 
 type Handler = (ctx: Ctx, command: string) => Promise<ExitCode> | ExitCode;
 
@@ -269,64 +213,10 @@ function report(err: unknown, io: Io): ExitCode {
   return code;
 }
 
-/**
- * Read one line from the terminal, optionally without echoing it.
- *
- * Only offered when stdin is a TTY, so it can never hang a pipeline. A hidden read uses raw mode and
- * writes nothing back, so a pasted credential reaches neither the screen nor the shell's history —
- * which is what AC-12.1 is protecting, and why refusing to prompt at all was the wrong reading of it.
- *
- * The prompt goes to STDERR: stdout is reserved for data (AC-22.2), and a prompt is not data.
- */
-async function promptAtTerminal(question: string, opts: { hidden?: boolean } = {}): Promise<string> {
-  const stdin = process.stdin;
-  process.stderr.write(question);
 
-  const hidden = opts.hidden === true;
-  const wasRaw = stdin.isRaw === true;
-  if (hidden) stdin.setRawMode(true);
-  stdin.resume();
-
-  try {
-    return await new Promise<string>((resolve, reject) => {
-      let buffer = "";
-      const onData = (chunk: Buffer | string): void => {
-        for (const ch of chunk.toString("utf8")) {
-          if (ch === "\r" || ch === "\n") { cleanup(); resolve(buffer); return; }
-          if (ch === "\u0003") { cleanup(); reject(new UsageError("cancelled")); return; } // Ctrl-C
-          if (ch === "\u007f" || ch === "\b") { buffer = buffer.slice(0, -1); continue; }
-          if (ch < " ") continue; // ignore other control characters rather than storing them
-          buffer += ch;
-        }
-        // Not raw: the terminal delivers whole lines, so anything here is already complete.
-        if (!hidden) { cleanup(); resolve(buffer); }
-      };
-      const cleanup = (): void => {
-        stdin.off("data", onData);
-        if (hidden) { stdin.setRawMode(wasRaw); process.stderr.write("\n"); }
-        stdin.pause();
-      };
-      stdin.on("data", onData);
-    });
-  } finally {
-    if (hidden && stdin.isRaw !== wasRaw) stdin.setRawMode(wasRaw);
-  }
-}
 
 export async function main(argv: readonly string[]): Promise<number> {
-  const io: Io = {
-    out: (s) => process.stdout.write(s),
-    err: (s) => process.stderr.write(s),
-    stdoutIsTty: process.stdout.isTTY === true,
-    stdinIsTty: process.stdin.isTTY === true,
-    env: process.env,
-    readStdin: async () => {
-      const chunks: Buffer[] = [];
-      for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
-      return Buffer.concat(chunks).toString("utf8");
-    },
-    ...(process.stdin.isTTY === true ? { prompt: promptAtTerminal } : {}),
-  };
+  const io = terminalIo();
   try {
     return await run(argv, io);
   } catch (err) {
