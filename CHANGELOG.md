@@ -3,6 +3,29 @@
 Notable changes to signum-cli. Versions are [SemVer](https://semver.org/), and `package.json` is the
 source of truth: a release tag `v<version>` must match it (see the README's release section).
 
+## Unreleased
+
+### Added
+
+- **Writes: operations can be executed** (milestone m2; #112, #113, #114, #115, #116, #117). Every
+  change in a Signum app, saving included, is an operation, run as `signum ship order 42` or by its
+  canonical key, `signum OrderOperation.Ship --lite "Order;42"`. See `signum help operations`.
+  - The server decides the route: an operation that takes the entity (`canBeModified`, e.g. a Save)
+    gets the freshly fetched entity, with `--edit Member=value` applied and marked; any other gets
+    only the record's identity. An edit on an identity-only operation is refused, never dropped.
+  - Nothing changes without confirmation: at a terminal you are asked, naming the operation, the
+    record and the application; without one (a script, an agent) the command fails unless `--yes` is
+    given. Every attempt is recorded in `<config-dir>/audit.log`, with the real record behind a handle.
+  - `--dry-run` asks the server whether this login may run it (exit 0 or 4) and sends no operation;
+    `--explain` prints the exact request.
+  - `--arg`, `--arg-string`, `--arg-lite` and `--arg-json` build the arguments in the order typed.
+    An object the server would silently receive as `null` is refused, and a date-shaped string, which
+    the server reads as a date, is warned about.
+  - A validation failure is exit 6 with the server's field messages; a stale record is exit 7, with
+    `ticks` sent back exactly as fetched; a refusal is exit 4, noting that the API runs only what the
+    UI may.
+  - Construct and delete operations (#118) and bulk operations (#119) are not invokable yet.
+
 ## 0.2.1 — 2026-10-23
 
 A patch release of the read-only core. Four of the fixes come from using 0.2.0 against a live

@@ -81,6 +81,12 @@ export interface ParsedArgs {
   flags: GlobalFlags;
   /** Repeatable/unknown flags, kept for command-specific parsing. */
   options: Map<string, string[]>;
+  /**
+   * The same values in the order they were TYPED, across flag names. `options` keeps order only
+   * within one name, and an operation's `--arg`, `--arg-lite` and `--arg-json` together make one
+   * positional array whose order is the order on the command line (AC-42.1).
+   */
+  sequence: ReadonlyArray<readonly [name: string, value: string]>;
   booleans: Set<string>;
   /**
    * Every flag name actually TYPED on the command line, before environment fallbacks are applied.
@@ -96,7 +102,7 @@ const FLAGS_WITH_VALUE = new Set([
   "url", "instance", "i", "output", "o", "timeout", "caller-context", "pseudonymize",
   "filter", "filter-json", "column", "order", "top", "page", "page-size",
   "context", "pseudonymize", "arg", "arg-string", "arg-lite", "arg-json",
-  "lite", "id", "filename", "f",
+  "lite", "id", "filename", "f", "edit",
   "in", "glob", "labels", "kind",
 ]);
 
@@ -104,6 +110,7 @@ const FLAGS_WITH_VALUE = new Set([
 export const BOOLEAN_FLAGS = new Set([
   "with-token", "exists", "count", "all", "yes", "y", "raw", "group",
   "resolve", "privacy", "list", "clear", "as-command", "dry-run", "in-place", "forget-labels", "lites", "entities",
+  "allow-custom-arg",
 ]);
 
 /** Invariant: a flag cannot need a value and be boolean-only at once. Checked by test. */
@@ -132,11 +139,13 @@ function emptyFlags(): GlobalFlags {
 export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): ParsedArgs {
   const flags = emptyFlags();
   const options = new Map<string, string[]>();
+  const sequence: Array<readonly [string, string]> = [];
   const booleans = new Set<string>();
   const rawFlagNames = new Set<string>();
   const positionals: string[] = [];
 
   const push = (name: string, value: string) => {
+    sequence.push([name, value]);
     const list = options.get(name);
     if (list === undefined) options.set(name, [value]);
     else list.push(value);
@@ -233,24 +242,24 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
   // `--version` with no command IS the version command. Resolving it here rather than in cli.ts
   // means one implementation, one output shape, and no chance of the two disagreeing.
   if (flags.version && positionals.length === 0) {
-    return { kind: "builtin", command: "version", positionals: [], flags, options, booleans, rawFlagNames };
+    return { kind: "builtin", command: "version", positionals: [], flags, options, sequence, booleans, rawFlagNames };
   }
 
   const first = positionals[0];
   if (first === undefined) {
-    return { kind: "none", command: undefined, positionals: [], flags, options, booleans, rawFlagNames };
+    return { kind: "none", command: undefined, positionals: [], flags, options, sequence, booleans, rawFlagNames };
   }
 
   // 1. dot ⇒ canonical operation key
   if (first.includes(".")) {
-    return { kind: "operation-key", command: first, positionals: positionals.slice(1), flags, options, booleans, rawFlagNames };
+    return { kind: "operation-key", command: first, positionals: positionals.slice(1), flags, options, sequence, booleans, rawFlagNames };
   }
   // 2. built-ins always win
   if (isBuiltIn(first)) {
-    return { kind: "builtin", command: first.toLowerCase(), positionals: positionals.slice(1), flags, options, booleans, rawFlagNames };
+    return { kind: "builtin", command: first.toLowerCase(), positionals: positionals.slice(1), flags, options, sequence, booleans, rawFlagNames };
   }
   // 3. verb-noun operation
-  return { kind: "verb-noun", command: first, positionals: positionals.slice(1), flags, options, booleans, rawFlagNames };
+  return { kind: "verb-noun", command: first, positionals: positionals.slice(1), flags, options, sequence, booleans, rawFlagNames };
 }
 
 /**

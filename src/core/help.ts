@@ -172,9 +172,9 @@ export const COMMANDS: CommandSpec[] = [
     milestone: "m1",
     formats: OUTPUT_FORMATS,
     description:
-      "Read-only discovery, so it ships in m1 even though invoking an operation is m2. " +
-      "An operation whose verb collides with a built-in is marked SHADOWED and remains " +
-      "reachable by its canonical key.",
+      "Read-only discovery. An operation whose verb collides with a built-in is marked " +
+      "SHADOWED and remains reachable by its canonical key. To run one, see " +
+      "`signum help operations`.",
     examples: ["signum operations", "signum operations Order"],
   },
   {
@@ -526,6 +526,44 @@ export function topicNames(): string[] {
 }
 
 export const TOPICS: Record<string, string> = {
+  operations: [
+    "OPERATIONS — THE ONLY WAY ANYTHING CHANGES",
+    "",
+    "  Every change in a Signum app, saving included, is an operation. Run one as",
+    "  <verb> <Type> <id>, or by its canonical key:",
+    "",
+    "    signum ship order 42 --yes",
+    "    signum OrderOperation.Ship --lite \"Order;42\" --yes",
+    "    signum save order 42 --edit Name=Acme --yes",
+    "",
+    "  Verbs and types are case-insensitive and kebab-tolerant. A verb a built-in",
+    "  shadows (get, query, …) is reachable only by its canonical key. An ambiguous",
+    "  verb lists the keys and runs nothing.",
+    "",
+    "  Before anything is sent:",
+    "    --dry-run         ask whether this login may run it; sends no operation.",
+    "                      Exit 0 if permitted, 4 if not. Permission is not success.",
+    "    --explain         print the exact request; sends nothing.",
+    "",
+    "  Confirmation: at a terminal you are asked, naming the operation, the record and",
+    "  the application. Without a terminal (a script, an agent) the command FAILS",
+    "  unless --yes (-y) is given. Every attempt is logged to <config-dir>/audit.log.",
+    "",
+    "  The record:  positional id, --lite \"Type;id\", --id <id>, or a ref_ handle.",
+    "  Edits:       --edit Member.Path=value, for an operation that takes the entity",
+    "               (a Save). The change is marked so the server applies it.",
+    "  Arguments:   in the order typed, as one positional array —",
+    "    --arg <v>         true, false, null, a number, a Lite key or a handle; else text",
+    "    --arg-string <v>  always text (a date-shaped one still arrives as a date)",
+    "    --arg-lite <v>    a Lite: \"Customer;7\" or a ref_ handle",
+    "    --arg-json <j>    raw JSON. An object needs EntityType (a Lite) or Type (an",
+    "                      entity): any other arrives as null unless the app registered",
+    "                      a converter for the operation; then pass --allow-custom-arg.",
+    "  Numbers always arrive as decimals.",
+    "",
+    "  A stale record is exit 7: refetch, then retry; signum never retries for you.",
+    "  Construct and delete operations are not invokable yet (#118).",
+  ].join("\n"),
   "exit-codes": [
     "EXIT CODES",
     "",
