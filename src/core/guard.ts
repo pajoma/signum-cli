@@ -45,11 +45,15 @@ export interface MutationDescription {
   target: string;
   realTarget: string;
   url: string;
+  /** A delete: the least reversible thing the CLI does, and the prompt says so (#118). */
+  destructive?: boolean;
 }
 
 /** Ask, or refuse, before anything that changes the application. */
 export async function confirmMutation(ctx: Ctx, m: MutationDescription): Promise<MutationPermit> {
-  const permit: MutationPermit = { ...m, [PERMIT]: true };
+  const permit: MutationPermit = {
+    operation: m.operation, target: m.target, realTarget: m.realTarget, url: m.url, [PERMIT]: true,
+  };
 
   // Before --yes, so an agent is told what it is missing whichever flags it passed.
   if (ctx.caller.context === "agent" && !ctx.args.flags.allowAgentWrites) {
@@ -75,7 +79,9 @@ export async function confirmMutation(ctx: Ctx, m: MutationDescription): Promise
 
   // Show the real target: this is a person at their own terminal, and the wrong record is the
   // mistake a confirmation exists to catch. The URL is there for the wrong-environment mistake.
-  const answer = await ctx.io.prompt(`Run ${m.operation} on ${m.realTarget} at ${m.url}? [y/N] `);
+  const answer = await ctx.io.prompt(m.destructive === true
+    ? `DELETE ${m.realTarget} with ${m.operation} at ${m.url}? This cannot be undone. [y/N] `
+    : `Run ${m.operation} on ${m.realTarget} at ${m.url}? [y/N] `);
   if (!/^y(es)?$/i.test(answer.trim())) {
     throw new CliError("not confirmed; nothing was sent", ExitCode.Usage);
   }

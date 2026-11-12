@@ -13,6 +13,10 @@
  *   SIGNUM_LIVE_WRITE_NESTED_SAVE  its save operation
  *   SIGNUM_LIVE_WRITE_NESTED_PATH  a text member inside the first row, e.g. "Roles.0.RASCI"
  *   SIGNUM_LIVE_WRITE_NESTED_VALUE a valid value different from the current one, e.g. "A"
+ *   SIGNUM_LIVE_WRITE_CREATE       optional: a type to create one record of and delete again, e.g. "ProjectArtifactGroup"
+ *   SIGNUM_LIVE_WRITE_CREATE_SAVE  its save operation (one that may run on a new entity)
+ *   SIGNUM_LIVE_WRITE_CREATE_DELETE its delete operation
+ *   SIGNUM_LIVE_WRITE_CREATE_MEMBER a text member to give the new record, e.g. "Name"
  *
  * Point it at a NON-production instance. Every edit is reverted in a `finally`; values stay in memory
  * and are never printed. The audit log goes to a throwaway config dir.
@@ -39,8 +43,13 @@ const nested = parseLiteKey(env["SIGNUM_LIVE_WRITE_NESTED"] ?? "");
 const nestedSave = env["SIGNUM_LIVE_WRITE_NESTED_SAVE"] || undefined;
 const nestedPath = env["SIGNUM_LIVE_WRITE_NESTED_PATH"] || undefined;
 const nestedValue = env["SIGNUM_LIVE_WRITE_NESTED_VALUE"] || undefined;
+const createType = env["SIGNUM_LIVE_WRITE_CREATE"] || undefined;
+const createSave = env["SIGNUM_LIVE_WRITE_CREATE_SAVE"] || undefined;
+const createDelete = env["SIGNUM_LIVE_WRITE_CREATE_DELETE"] || undefined;
+const createMember = env["SIGNUM_LIVE_WRITE_CREATE_MEMBER"] || undefined;
 
 const writes = live !== undefined && entity !== undefined && save !== undefined && member !== undefined;
+const createWrites = live !== undefined && createType !== undefined && createSave !== undefined && createDelete !== undefined && createMember !== undefined;
 const nestedWrites = writes && nested !== undefined && nestedSave !== undefined && nestedPath !== undefined && nestedValue !== undefined;
 
 const configDir = mkdtempSync(join(tmpdir(), "signum-live-write-"));
@@ -207,5 +216,34 @@ describe.skipIf(!nestedWrites)("live nested writes (AC-32.3)", () => {
     }
     // Restored whole: the rows kept their rowIds, so they were updated, not recreated (AC-31.3).
     expect(withoutTicks(await read(lite))).toBe(withoutTicks(before));
+  });
+});
+
+describe.skipIf(!createWrites)("live create and delete (#118)", () => {
+  it("creates a record with a Save, deletes it, and a second delete is a clean not-found", async () => {
+    const type = createType as string;
+    const label = `signum live test ${new Date().toISOString()}`;
+    const dry = await cli([createSave as string, "--edit", `${createMember}=${label}`, "--dry-run", "-o", "json"]);
+    expect(dry.code).toBe(ExitCode.Ok);
+
+    const made = await cli([createSave as string, "--edit", `${createMember}=${label}`, "--yes", "-o", "json"]);
+    expect(made.code).toBe(ExitCode.Ok);
+    const id = String((JSON.parse(made.out) as { entity: { id: unknown } }).entity.id);
+    let deleted = false;
+    try {
+      const fetched = await read({ type, id });
+      expect((fetched as Record<string, unknown>)[wireKey(fetched as Record<string, unknown>, createMember as string)]).toBe(label);
+
+      const gone = await cli([createDelete as string, "--lite", `${type};${id}`, "--yes", "-o", "json"]);
+      expect(gone.code).toBe(ExitCode.Ok);
+      deleted = true;
+      expect(JSON.parse(gone.out)).toEqual({ deleted: `${type.replace(/Entity$/, "")};${id}` });
+
+      const again = await cli([createDelete as string, "--lite", `${type};${id}`, "--yes"]);
+      expect(again.code).toBe(ExitCode.NotFound);
+    } finally {
+      // Never leave the test's record behind, whatever failed above.
+      if (!deleted) await cli([createDelete as string, "--lite", `${type};${id}`, "--yes"]);
+    }
   });
 });

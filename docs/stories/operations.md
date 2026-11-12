@@ -129,6 +129,7 @@ the full lifecycle rather than only updates.
 - AC-44.3: `deleteEntity` / `deleteLite` are supported, and delete always requires confirmation per STORY-46.
 - AC-44.4: A constructed entity is rendered so its new id is immediately usable in a following command.
 - AC-44.5: Construct returning `null` (the operation declined to produce an entity) is reported as such, not as a crash.
+- AC-44.6: A type with no constructor operation is created the way the web UI's "new" does it: its `Save`, when reflection marks it `canBeNew` and `canBeModified`, with no record named, sends `{Type, isNew: true}` carrying only the members given with `--edit`. Every other member keeps the server's own default, because the server constructs the instance before it reads the JSON. A constructor whose `resultIsSaved` is false is reported as returning an **unsaved** entity, so `create` is never mistaken for a write.
 
 ---
 

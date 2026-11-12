@@ -13,7 +13,9 @@
  * (`EntityOperations.tsx:133-149`). An edited graph must never go out as a Lite — the edits would be
  * dropped without a word — so `--edit` on an operation that takes only a Lite is refused.
  *
- * Construct and delete (#118) and bulk operations (#119) are not here yet, and say so.
+ * Construct, construct-from and delete (#118) go to their own endpoints. A Save that may run on a
+ * new entity, with no record named, creates one from `--edit` values, as the web UI's "new" does.
+ * Bulk operations (#119) are not here yet, and say so.
  */
 
 import type { Ctx } from "../core/ctx.ts";
@@ -139,11 +141,22 @@ function wirePath(entity: EntityJson, path: MemberPath): MemberPath {
   return out;
 }
 
+/**
+ * Which endpoint an operation goes to. The server's own metadata decides: `operationType` picks the
+ * family, `canBeModified` picks entity-or-Lite (`EntityOperations.tsx:133-149`), and a Save that may
+ * run on a new entity (`canBeNew`) with no record named creates one, as the web UI's "new" does.
+ */
+type Route =
+  | "executeEntity" | "executeLite" | "saveNew"
+  | "construct" | "constructFromEntity" | "constructFromLite"
+  | "deleteEntity" | "deleteLite";
+
 /** The `--explain` / request body, built once for both. */
 interface Plan {
   op: ResolvedOperation;
-  target: OperationTarget;
-  route: "executeEntity" | "executeLite";
+  /** Undefined for a constructor and for a Save that creates. */
+  target: OperationTarget | undefined;
+  route: Route;
   args: ArgValue[] | null;
   edits: ReturnType<typeof parseEdits>;
 }
@@ -154,6 +167,29 @@ function cleanName(typeName: string): string {
 
 function liteJson(t: OperationTarget): Record<string, unknown> {
   return { EntityType: cleanName(t.type), id: /^\d+$/.test(t.id) ? new JsonNumber("identifier", t.id) : t.id };
+}
+
+const WIRE_ENDPOINT: Record<Route, string> = {
+  executeEntity: "executeEntity", executeLite: "executeLite", saveNew: "executeEntity",
+  construct: "construct", constructFromEntity: "constructFromEntity", constructFromLite: "constructFromLite",
+  deleteEntity: "deleteEntity", deleteLite: "deleteLite",
+};
+
+function routeOf(op: ResolvedOperation, hasTarget: boolean): Route {
+  const kind = op.info.kind ?? "Execute";
+  const entity = op.info.canBeModified;
+  switch (kind) {
+    case "Execute":
+      if (!hasTarget && entity && op.info.canBeNew) return "saveNew";
+      return entity ? "executeEntity" : "executeLite";
+    case "Constructor": return "construct";
+    case "ConstructorFrom": return entity ? "constructFromEntity" : "constructFromLite";
+    case "Delete": return entity ? "deleteEntity" : "deleteLite";
+    case "ConstructorFromMany":
+      throw new UsageError(`${op.key} constructs from many records, which this version cannot invoke yet`, {
+        hint: "Operations over many records are #119.",
+      });
+  }
 }
 
 function plan(ctx: Ctx, md: Metadata): Plan {
@@ -173,33 +209,42 @@ function plan(ctx: Ctx, md: Metadata): Plan {
   }
 
   const target = targetOf(ctx, noun, positional);
+  // A key alone names no type; for a constructor the noun or the key's only type does (AC-44.1).
   const op = isKey
     ? resolveKey(md, command, target?.type)
     : resolveVerbNoun(md, command, noun as string);
+  const route = routeOf(op, target !== undefined);
 
-  // Construct, construct-from and delete are #118; a constructor takes no target at all.
-  if (op.info.kind !== undefined && op.info.kind !== "Execute") {
-    throw new UsageError(`${op.key} is a ${op.info.kind} operation, which this version cannot invoke yet`, {
-      hint: "Construct and delete operations are #118. Execute operations work today.",
+  if (route === "construct" && target !== undefined) {
+    throw new UsageError(`${op.key} constructs from nothing, so it takes no record`, {
+      hint: `signum ${kebab(op.info.verb)} ${kebab(op.type.name)}`,
     });
   }
-  if (target === undefined) {
+  if (target === undefined && route !== "construct" && route !== "saveNew") {
     throw new UsageError(`${op.key} needs the record to run on`, {
       hint: `signum ${kebab(op.info.verb)} ${kebab(op.type.name)} <id>   or   signum ${op.key} --lite "${op.type.name};<id>"`,
     });
   }
-  if (cleanName(target.type).toLowerCase() !== cleanName(op.type.name).toLowerCase()) {
-    throw new UsageError(`${target.shown} is not a ${op.type.name}`, { hint: `${op.key} runs on ${op.type.name}.` });
+  if (target !== undefined) {
+    if (cleanName(target.type).toLowerCase() !== cleanName(op.type.name).toLowerCase()) {
+      throw new UsageError(`${target.shown} is not a ${op.type.name}`, { hint: `${op.key} runs on ${op.type.name}.` });
+    }
+    target.type = op.type.name;
   }
-  target.type = op.type.name;
 
   const edits = parseEdits(ctx);
-  // An edited graph must never go out as a Lite: the server would receive only the identity and
-  // drop every edit without an error (#114).
-  if (edits.length > 0 && !op.info.canBeModified) {
-    throw new UsageError(`${op.key} takes only the record's identity, so --edit would be discarded`, {
-      hint: "Edit with an operation that takes the entity, such as its Save.",
-    });
+  if (edits.length > 0) {
+    // An edited graph must never go out as a Lite, and an edit before a delete or a construct-from
+    // would be applied to something that is then thrown away: both are dropped without an error (#114).
+    if (route !== "executeEntity" && route !== "saveNew") {
+      throw new UsageError(`${op.key} does not save the record it is given, so --edit would be discarded`, {
+        hint: "Edit with an operation that takes the entity, such as its Save.",
+      });
+    }
+    // A new entity is built from top-level members only: there is no nested object to step into yet.
+    if (route === "saveNew" && edits.some((e) => e.path.length !== 1)) {
+      throw new UsageError("a new record takes top-level members only, e.g. --edit Name=Acme");
+    }
   }
 
   const args = encodeArgs(ctx.args.sequence, {
@@ -208,96 +253,159 @@ function plan(ctx: Ctx, md: Metadata): Plan {
     warn: (line) => ctx.io.err(line),
   });
 
-  return { op, target, route: op.info.canBeModified ? "executeEntity" : "executeLite", args, edits };
+  return { op, target, route, args, edits };
 }
 
 function operationPath(p: Plan): string {
-  return `api/operation/${p.route}/${encodeURIComponent(p.op.key)}`;
+  return `api/operation/${WIRE_ENDPOINT[p.route]}/${encodeURIComponent(p.op.key)}`;
+}
+
+/**
+ * A record that does not exist yet, as the web UI's "new" builds one: `isNew`, and only the members
+ * the caller set. Every other member keeps the server's own default, because the server constructs
+ * the instance before it reads the JSON (`EntityJsonConverter`). Member names come from reflection and
+ * go on the wire camelCased, as Signum writes them (`RASCI` → `rASCI`).
+ */
+function newEntity(p: Plan): EntityJson {
+  const members = new Map(p.op.type.members.map((m) => [m.name.toLowerCase(), m.name]));
+  const e: Record<string, unknown> = { Type: cleanName(p.op.type.name), isNew: true, modified: true };
+  for (const edit of p.edits) {
+    const written = String(edit.path[0]);
+    const name = members.get(written.toLowerCase());
+    if (name === undefined || name.includes("/") || name === "Id") {
+      throw new UsageError(`${p.op.type.name} has no member '${written}' a new record can set`, {
+        hint: `Run \`signum explain ${p.op.type.name}\` to see its members.`,
+      });
+    }
+    e[name.charAt(0).toLowerCase() + name.slice(1)] = edit.value;
+  }
+  return e as EntityJson;
+}
+
+/** What the target looks like in the request, with a handle in place of the id it stands for. */
+function shownTarget(t: OperationTarget): Record<string, unknown> {
+  return { ...liteJson(t), ...(isHandle(t.shown) ? { id: t.shown } : {}) };
 }
 
 /** `--explain`: the exact request, sending nothing (REQ-053, AC-42.7). */
 function explainPlan(ctx: Ctx, target: Target, p: Plan): ExitCode {
-  const shownLite = { ...liteJson(p.target), ...(p.target.shown !== `${p.target.type};${p.target.id}` && isHandle(p.target.shown) ? { id: p.target.shown } : {}) };
-  const body = p.route === "executeLite"
-    ? { lite: shownLite, args: p.args }
-    : {
-      entity: `${p.target.shown}, as fetched from api/entity when sent` +
-        (p.edits.length > 0 ? `, with ${p.edits.map((e) => e.written).join(", ")} applied` : ""),
-      args: p.args,
-    };
+  const fetched = (t: OperationTarget | undefined): string =>
+    `${t?.shown}, as fetched from api/entity when sent` +
+    (p.edits.length > 0 ? `, with ${p.edits.map((e) => e.written).join(", ")} applied` : "");
+  const body: Record<string, unknown> =
+    p.route === "construct" ? { Type: cleanName(p.op.type.name), args: p.args }
+    : p.route === "saveNew" ? { entity: newEntity(p), args: p.args }
+    : p.route === "executeLite" || p.route === "constructFromLite" || p.route === "deleteLite"
+      ? { lite: shownTarget(p.target as OperationTarget), args: p.args }
+      : { entity: fetched(p.target), args: p.args };
   renderDocument({ method: "POST", url: `${target.url}/${operationPath(p)}`, body },
     { format: ctx.format === "table" ? "json" : ctx.format, write: ctx.io.out });
   return ExitCode.Ok;
 }
 
 /**
- * `--dry-run`: would this login be permitted, and why not (REQ-043). One GET of the entity pack,
- * whose `canExecute` maps each operation key to null (permitted) or a reason. A key that is ABSENT
- * was withheld for this login (`OperationLogic.cs:456`): not permitted, reason not given — never
- * "unknown operation". Sends no `api/operation/*` request.
+ * `--dry-run`: would this login be permitted, and why not (REQ-043). Never an `api/operation/*` call.
+ *
+ * For a record, `canExecute` from its entity pack maps each operation key to null (permitted) or a
+ * reason; a key ABSENT was withheld for this login (`OperationLogic.cs:456`) — not permitted, no reason
+ * given, never "unknown operation". A new record is asked the same of `api/entityPackEntity`, which
+ * builds a pack for an entity without saving it. A constructor has no record to ask about: reflection
+ * lists it only for a login that may run it, which is all the server will say before it runs.
  */
 async function dryRun(ctx: Ctx, target: Target, p: Plan): Promise<ExitCode> {
-  const res = await target.http.request<unknown>({
-    method: "GET",
-    path: `api/entityPack/${encodeURIComponent(cleanName(p.target.type))}/${encodeURIComponent(p.target.id)}`,
-    lossless: true,
-  });
-  const pack = (res.body ?? {}) as Record<string, unknown>;
-  const canExecute = (pack["canExecute"] ?? {}) as Record<string, unknown>;
-  const present = Object.hasOwn(canExecute, p.op.key);
-  const reason = present ? canExecute[p.op.key] : undefined;
-  const permitted = present && (reason === null || reason === undefined || reason === "");
+  let canExecute: Record<string, unknown> | undefined;
+  if (p.route === "saveNew") {
+    const payload = serializeEntity(newEntity(p));
+    const res = await target.http.request<unknown>({ method: "POST", path: "api/entityPackEntity", rawBody: payload.json, lossless: true });
+    canExecute = ((res.body ?? {}) as Record<string, unknown>)["canExecute"] as Record<string, unknown> | undefined;
+  } else if (p.target !== undefined) {
+    const res = await target.http.request<unknown>({
+      method: "GET",
+      path: `api/entityPack/${encodeURIComponent(cleanName(p.target.type))}/${encodeURIComponent(p.target.id)}`,
+      lossless: true,
+    });
+    canExecute = ((res.body ?? {}) as Record<string, unknown>)["canExecute"] as Record<string, unknown> | undefined;
+  }
 
+  const shown = p.target?.shown ?? `a new ${p.op.type.name}`;
+  let permitted: boolean;
+  let reason: string | undefined;
+  if (canExecute === undefined) {
+    permitted = true;
+    reason = undefined;
+  } else {
+    const present = Object.hasOwn(canExecute, p.op.key);
+    const r = present ? canExecute[p.op.key] : undefined;
+    permitted = present && (r === null || r === undefined || r === "");
+    reason = !present ? "not permitted for this login; the server gives no reason" : typeof r === "string" && r !== "" ? r : undefined;
+  }
+
+  const note = canExecute === undefined
+    ? "A constructor has no record to check: it is listed only for a login that may run it, and the server checks the rest when it runs."
+    : "A dry run checks permission, not success: a permitted operation can still fail when run.";
   const verdict: Record<string, unknown> = {
-    operation: p.op.key,
-    target: p.target.shown,
-    permitted,
-    ...(typeof reason === "string" && reason !== "" ? { reason } : {}),
-    ...(!present ? { reason: "not permitted for this login; the server gives no reason" } : {}),
-    note: "A dry run checks permission, not success: a permitted operation can still fail when run.",
+    operation: p.op.key, target: shown, permitted, ...(reason !== undefined ? { reason } : {}), note,
   };
   if (ctx.format === "json" || ctx.format === "ndjson") {
     renderDocument(verdict, { format: ctx.format, write: ctx.io.out });
   } else {
-    ctx.io.out(permitted
-      ? `${p.op.key} on ${p.target.shown}: permitted\n`
-      : `${p.op.key} on ${p.target.shown}: not permitted — ${String(verdict["reason"])}\n`);
-    ctx.io.err(`note: ${String(verdict["note"]).replace(/^A dry run/, "a dry run")}\n`);
+    ctx.io.out(permitted ? `${p.op.key} on ${shown}: permitted\n` : `${p.op.key} on ${shown}: not permitted — ${reason}\n`);
+    ctx.io.err(`note: ${note.charAt(0).toLowerCase()}${note.slice(1)}\n`);
   }
   // Scripts gate on it (AC-43.4): 0 would be permitted, 4 would not.
   return permitted ? ExitCode.Ok : ExitCode.NotAuthorized;
 }
 
-/** The request body. For the entity route the entity is fetched fresh and the edits applied to it. */
-async function body(target: Target, p: Plan): Promise<string> {
-  if (p.route === "executeLite") return JSON.stringify({ lite: liteJson(p.target), args: p.args });
-
+/** The fetched record with the edits applied, as its `serializeEntity` payload. */
+async function fetchedPayload(target: Target, p: Plan): Promise<string> {
+  const t = p.target as OperationTarget;
   // Fetched now, so its `ticks` is the one the server last issued and travels back verbatim as a
   // string: a stale one is the server's concurrency check, never something to refresh away (#117).
-  const entity: EntityJson = await fetchEntity(target.http, cleanName(p.target.type), p.target.id);
+  const entity: EntityJson = await fetchEntity(target.http, cleanName(t.type), t.id);
   let changed = false;
   for (const e of p.edits) changed = setMember(entity, wirePath(entity, e.path), e.value) || changed;
   if (p.edits.length > 0 && !changed) {
     // Saving nothing is not a save (AC-32.4): say so and send nothing.
     throw new CliError("every --edit already holds that value; nothing was sent", ExitCode.Usage);
   }
-  const payload = serializeEntity(entity);
-  return `{"entity":${payload.json},"args":${JSON.stringify(p.args)}}`;
+  return serializeEntity(entity).json;
+}
+
+/** The request body for each route. */
+async function body(target: Target, p: Plan): Promise<string> {
+  const args = JSON.stringify(p.args);
+  switch (p.route) {
+    case "construct":
+      // `ConstructOperationRequest.Type` is required: there is no entity to infer it from (AC-44.1).
+      return JSON.stringify({ Type: cleanName(p.op.type.name), args: p.args });
+    case "saveNew":
+      return `{"entity":${serializeEntity(newEntity(p)).json},"args":${args}}`;
+    case "executeLite": case "constructFromLite": case "deleteLite":
+      return JSON.stringify({ lite: liteJson(p.target as OperationTarget), args: p.args });
+    case "executeEntity": case "constructFromEntity": case "deleteEntity":
+      return `{"entity":${await fetchedPayload(target, p)},"args":${args}}`;
+  }
 }
 
 /** The only place a mutation leaves the CLI. */
 async function send(target: Target, p: Plan, permit: MutationPermit): Promise<unknown> {
   assertPermit(permit);
+  if (p.route === "deleteLite") {
+    // The Lite route retrieves the record server-side; a missing one would be its error, so it is
+    // asked first, and a record that is not there is a clean not-found (#118).
+    const t = p.target as OperationTarget;
+    const exists = await target.http.request<unknown>({
+      method: "GET", path: `api/exists/${encodeURIComponent(cleanName(t.type))}/${encodeURIComponent(t.id)}`,
+    });
+    if (!(exists.body === true || exists.body === "true")) throw new NotFoundError(`${t.shown} not found`);
+  }
   const res = await target.http.request<unknown>({
-    method: "POST",
-    path: operationPath(p),
-    rawBody: await body(target, p),
-    lossless: true,
+    method: "POST", path: operationPath(p), rawBody: await body(target, p), lossless: true,
   });
   return res.body;
 }
 
-/** `EntityPackTS` → the refreshed entity, pseudonymized like `get`, beside its new `canExecute`. */
+/** `EntityPackTS` → the entity, pseudonymized like `get`, beside its new `canExecute`. */
 function renderPack(ctx: Ctx, pack: unknown): void {
   const o = (pack ?? {}) as Record<string, unknown>;
   const entity = o["entity"] !== undefined && o["entity"] !== null ? asEntity(o["entity"]) : null;
@@ -311,12 +419,26 @@ function renderPack(ctx: Ctx, pack: unknown): void {
   if (note !== "") ctx.io.err("\n" + note);
 }
 
+/** What the result is, said plainly: a constructed entity is not a stored one (#118). */
+function describeResult(ctx: Ctx, p: Plan, pack: unknown): void {
+  const isConstruct = p.route === "construct" || p.route === "constructFromEntity" || p.route === "constructFromLite";
+  if (isConstruct && !p.op.info.resultIsSaved) {
+    ctx.io.err(`note: ${p.op.key} returned a new ${p.op.type.name} that is NOT saved; nothing was stored.\n` +
+      "Saving it needs the entity as input, which is #120.\n");
+  }
+  if (p.route === "saveNew") {
+    const id = ((pack ?? {}) as Record<string, unknown>)["entity"];
+    if (id === null || id === undefined) return;
+    ctx.io.err(`note: created a new ${p.op.type.name}; its id is in entity.id.\n`);
+  }
+}
+
 export async function runOperation(ctx: Ctx): Promise<ExitCode> {
   assertOperationFlags(ctx);
 
   const explain = ctx.args.flags.explain;
   const dry = flag(ctx, "dry-run");
-  // The result is the record, so it is data (AC-51.1); a preview and a dry run emit none.
+  // The result is a record, so it is data (AC-51.1); a preview and a dry run emit none.
   if (!explain && !dry) ctx.openData(DATA_KIND);
 
   const target = resolveTarget(ctx, { requireAuth: !explain });
@@ -333,17 +455,21 @@ export async function runOperation(ctx: Ctx): Promise<ExitCode> {
     return await dryRun(ctx, target, p);
   }
 
+  const isDelete = p.route === "deleteEntity" || p.route === "deleteLite";
+  const realTarget = p.target !== undefined ? `${cleanName(p.target.type)};${p.target.id}` : `new ${cleanName(p.op.type.name)}`;
   const permit = await confirmMutation(ctx, {
     operation: p.op.key,
-    target: p.target.shown,
-    realTarget: `${cleanName(p.target.type)};${p.target.id}`,
+    target: p.target?.shown ?? realTarget,
+    realTarget,
     url: target.url,
+    destructive: isDelete,
   });
 
   let pack: unknown;
   try {
     pack = await send(target, p, permit);
   } catch (err) {
+    const viaHandle = p.target !== undefined && p.target.shown !== realTarget;
     const failure = err instanceof NotAuthorizedError
       // The server judges every call as if the UI made it (`OperationController.cs:137`), so an
       // operation hidden from the UI cannot be invoked over the API at all (AC-40.5).
@@ -351,8 +477,8 @@ export async function runOperation(ctx: Ctx): Promise<ExitCode> {
         hint: "This login may not run it on this record, or the operation is hidden from the UI —\n" +
           "the API invokes only what the UI may (OperationController.cs:137). Check with --dry-run.",
       })
-      : err instanceof NotFoundError && p.target.shown !== `${cleanName(p.target.type)};${p.target.id}`
-        ? new NotFoundError(`${p.target.shown} not found`) // a not-found must not spell out the id behind a handle
+      : err instanceof NotFoundError && viaHandle
+        ? new NotFoundError(`${p.target?.shown} not found`) // a not-found must not spell out the id behind a handle
         : err;
     recordMutation(ctx, permit, {
       ok: false,
@@ -362,6 +488,20 @@ export async function runOperation(ctx: Ctx): Promise<ExitCode> {
     throw failure;
   }
   recordMutation(ctx, permit, { ok: true });
+
+  if (isDelete) {
+    // Delete answers with nothing; the record it named is gone, and that is the whole result.
+    // Named as Type;id, or by the handle the caller used — never the id behind one.
+    const gone = p.target !== undefined && isHandle(p.target.shown) ? p.target.shown : realTarget;
+    renderDocument({ deleted: gone }, { format: ctx.format === "table" ? "json" : ctx.format, write: ctx.io.out });
+    return ExitCode.Ok;
+  }
+  if ((pack === null || pack === undefined || pack === "") && p.route.startsWith("construct")) {
+    // A constructor may decline and return nothing (AC-44.5): that is an answer, not a crash.
+    ctx.io.err(`note: ${p.op.key} declined to construct anything; nothing was returned.\n`);
+    return ExitCode.Ok;
+  }
+  describeResult(ctx, p, pack);
   renderPack(ctx, pack);
   return ExitCode.Ok;
 }

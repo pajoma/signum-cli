@@ -36,6 +36,10 @@ const REFLECTION = {
       "OrderOperation.ImportPublicHolidays": { operationType: "Execute" },
       "LegacyOrderOperation.Ship": { operationType: "Execute" },     // a second `Ship` on Order
       "OrderOperation.Approve": { operationType: "Execute" },
+      "OrderOperation.Delete": { operationType: "Delete" },
+      "OrderOperation.Clone": { operationType: "ConstructorFrom" },
+      "OrderOperation.Generate": { operationType: "Constructor", resultIsSaved: true },
+      "OrderOperation.Decline": { operationType: "Constructor" },
     },
   },
   HolidayCalendar: {
@@ -168,6 +172,19 @@ beforeAll(() => {
       const headers = { "content-type": "application/json" };
       if (url.pathname === "/api/reflection/types") return new Response(JSON.stringify(REFLECTION), { headers });
       if (url.pathname === "/api/entity/Order/42") return new Response(ORDER_42, { headers });
+      if (url.pathname === "/api/exists/Order/42") return new Response("true", { headers });
+      if (url.pathname === "/api/exists/Order/99") return new Response("false", { headers });
+      if (url.pathname === "/api/entityPackEntity") {
+        return new Response(`{"entity":${body},"canExecute":${JSON.stringify(canExecute)}}`, { headers });
+      }
+      if (url.pathname === "/api/operation/deleteLite/OrderOperation.Delete") return new Response(null, { status: 204 });
+      if (url.pathname === "/api/operation/construct/OrderOperation.Decline") return new Response("null", { headers });
+      if (url.pathname.startsWith("/api/operation/construct/")) {
+        return new Response(`{"entity":{"Type":"Order","id":null,"isNew":true,"toStr":"","modified":true,"name":null},"canExecute":{}}`, { headers });
+      }
+      if (url.pathname === "/api/operation/executeEntity/OrderOperation.Save" && body.includes('"isNew":true')) {
+        return new Response(`{"entity":{"Type":"Order","id":77,"ticks":"1","toStr":"New","modified":false,"name":"New"},"canExecute":{}}`, { headers });
+      }
       if (url.pathname === "/api/entityPack/Order/42") {
         return new Response(`{"entity":${ORDER_42},"canExecute":${JSON.stringify(canExecute)}}`, { headers });
       }
@@ -308,12 +325,6 @@ describe("executing an operation (STORY-40, #114)", () => {
     expect(seen).toEqual([]);
   });
 
-  it("refuses construct and delete for now, naming where they land", async () => {
-    const r = await cli(["OrderOperation.Create", "--yes"]);
-    expect(r.code).toBe(ExitCode.Usage);
-    expect(r.err).toContain("#118");
-    expect(operationCalls()).toEqual([]);
-  });
 
   it("--explain prints the exact request and sends nothing (AC-42.7)", async () => {
     const r = await cli(["OrderOperation.Ship", "--lite", "Order;42", "--arg-string", "x", "--explain"]);
@@ -472,5 +483,100 @@ describe("writes by a detected AI agent (AC-46.7)", () => {
 
   it("does not apply to a script or a person", async () => {
     expect((await cli(["OrderOperation.Ship", "--lite", "Order;42", "--yes"])).code).toBe(ExitCode.Ok);
+  });
+});
+
+describe("construct and delete (STORY-44, #118)", () => {
+  it("constructs from nothing with an explicit Type, and says the result is NOT saved (AC-44.1)", async () => {
+    const r = await cli(["create", "order", "--yes", "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const [call] = operationCalls();
+    expect(call?.path).toBe("/api/operation/construct/OrderOperation.Create");
+    expect(call?.body).toBe(`{"Type":"Order","args":null}`);
+    expect(r.err).toContain("NOT saved");
+  });
+
+  it("does not call a constructor whose result is saved unsaved", async () => {
+    const r = await cli(["OrderOperation.Generate", "--yes", "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.err).not.toContain("NOT saved");
+  });
+
+  it("reports a constructor that declines as an answer, not a crash (AC-44.5)", async () => {
+    const r = await cli(["OrderOperation.Decline", "--yes"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.err).toContain("declined");
+  });
+
+  it("refuses a record for a constructor, which takes none", async () => {
+    const r = await cli(["OrderOperation.Create", "--lite", "Order;42", "--yes"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(operationCalls()).toEqual([]);
+  });
+
+  it("creates a record with a Save and no target, from --edit values only (AC-44.4)", async () => {
+    const r = await cli(["save", "order", "--edit", "Name=New", "--yes", "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const [call] = operationCalls();
+    expect(call?.path).toBe("/api/operation/executeEntity/OrderOperation.Save");
+    expect(call?.body).toBe(`{"entity":{"Type":"Order","isNew":true,"modified":true,"name":"New"},"args":null}`);
+    expect((JSON.parse(r.out) as { entity: { id: number } }).entity.id).toBe(77);
+    expect(r.err).toContain("created a new Order");
+  });
+
+  it("refuses a member the type does not have, for a new record", async () => {
+    const r = await cli(["save", "order", "--edit", "Nmae=New", "--yes"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("no member 'Nmae'");
+    expect(operationCalls()).toEqual([]);
+  });
+
+  it("constructs from a record by its Lite (AC-44.2)", async () => {
+    const r = await cli(["clone", "order", "42", "--yes", "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(operationCalls()[0]?.path).toBe("/api/operation/constructFromLite/OrderOperation.Clone");
+    expect(operationCalls()[0]?.body).toBe(`{"lite":{"EntityType":"Order","id":42},"args":null}`);
+  });
+
+  it("deletes behind the guard, saying it cannot be undone, and reports what is gone (AC-44.3)", async () => {
+    const refused = await cli(["delete", "order", "42"]);
+    expect(refused.code).toBe(ExitCode.Usage);
+    const asked = await cli(["delete", "order", "42"], { tty: true, reply: "n" });
+    expect(asked.prompts[0]).toContain("cannot be undone");
+    expect(operationCalls()).toEqual([]);
+
+    const r = await cli(["delete", "order", "42", "--yes", "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(operationCalls()[0]?.path).toBe("/api/operation/deleteLite/OrderOperation.Delete");
+    expect(JSON.parse(r.out)).toEqual({ deleted: "Order;42" });
+  });
+
+  it("a delete of a record that does not exist is a clean not-found, and sends no delete (#118)", async () => {
+    const r = await cli(["delete", "order", "99", "--yes"]);
+    expect(r.code).toBe(ExitCode.NotFound);
+    expect(operationCalls()).toEqual([]);
+  });
+
+  it("refuses --edit on a delete, which would apply it to a record that is then removed", async () => {
+    const r = await cli(["delete", "order", "42", "--edit", "Name=X", "--yes"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(operationCalls()).toEqual([]);
+  });
+
+  it("answers --dry-run for delete, for a constructor and for a new record, sending no operation", async () => {
+    canExecute = { "OrderOperation.Delete": "The order has lines" };
+    const del = await cli(["delete", "order", "42", "--dry-run", "--json"]);
+    expect(del.code).toBe(ExitCode.NotAuthorized);
+    expect(del.out).toContain("The order has lines");
+
+    const ctor = await cli(["create", "order", "--dry-run", "--json"]);
+    expect(ctor.code).toBe(ExitCode.Ok);
+    expect(ctor.out).toContain("constructor has no record to check");
+
+    canExecute = { "OrderOperation.Save": null };
+    const fresh = await cli(["save", "order", "--edit", "Name=New", "--dry-run", "--json"]);
+    expect(fresh.code).toBe(ExitCode.Ok);
+    expect(seen.map((s) => s.path)).toContain("/api/entityPackEntity");
+    expect(operationCalls()).toEqual([]);
   });
 });

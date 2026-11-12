@@ -27,7 +27,11 @@ source of truth: a release tag `v<version>` must match it (see the README's rele
   - A detected AI agent needs its own acknowledgement to change data,
     `--i-understand-an-agent-is-writing` or `SIGNUM_ALLOW_AGENT_WRITES=1`, besides `--yes`; the one
     for reading data does not count. Without it the write is refused with exit 9 (AC-46.7).
-  - Construct and delete operations (#118) and bulk operations (#119) are not invokable yet.
+  - Construct, construct-from and delete operations (#118). A Save that may run on a new record
+    creates one when no record is named: `signum save order --edit Name=Acme --yes`. A constructor's
+    result is reported as unsaved when it is; a delete's prompt says it cannot be undone, and a
+    missing record is a clean not-found.
+  - Bulk operations (#119) are not invokable yet.
 
 ## 0.2.1 — 2026-10-23
 

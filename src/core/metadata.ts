@@ -53,6 +53,11 @@ export interface OperationInfo {
   canBeModified: boolean;
   /** `canBeNew`: the operation may run on an entity that was never saved. */
   canBeNew: boolean;
+  /**
+   * `resultIsSaved`: a constructor's result is already in the database. When false the server hands
+   * back an entity that does not exist yet, and saying "created" would be a lie (#118).
+   */
+  resultIsSaved: boolean;
 }
 
 export interface TypeInfo {
@@ -124,6 +129,7 @@ function parseOperations(raw: unknown): OperationInfo[] {
       kind: kind !== undefined && OPERATION_KINDS.has(kind) ? kind as OperationKind : undefined,
       canBeModified: i["canBeModified"] === true,
       canBeNew: i["canBeNew"] === true,
+      resultIsSaved: i["resultIsSaved"] === true,
     };
   });
 }
