@@ -27,7 +27,12 @@ const TOKEN = "test-token-ops";
 const REFLECTION = {
   Order: {
     kind: "Entity", entityKind: "Main", niceName: "Order", queryDefined: true,
-    members: { Id: { type: { name: "number" } }, Name: { type: { name: "string" } } },
+    members: {
+      Id: { type: { name: "number" } }, Name: { type: { name: "string" } },
+      Customer: { type: { name: "Customer", isLite: true } },
+      Address: { type: { name: "AddressEmbedded", isEmbedded: true } }, "Address.City": { type: { name: "string" } },
+      Lines: { type: { name: "OrderLineEmbedded", isCollection: true } }, "Lines/Quantity": { type: { name: "number" } },
+    },
     operations: {
       "OrderOperation.Ship": { operationType: "Execute", canBeModified: false },
       "OrderOperation.Save": { operationType: "Execute", canBeModified: true, canBeNew: true },
@@ -167,6 +172,12 @@ let failIds: string[] = [];
 let silentIds: string[] = [];
 /** Cut the multi endpoints' last NDJSON line in half, as a stream that broke off would. */
 let truncateStream = false;
+/** Send the multi endpoints' first line, then press Ctrl-C and never send the rest. */
+let hangAfterFirst = false;
+/** The interrupt handler the CLI registered through `io.onInterrupt`, if any. */
+let interruptHandler: (() => void) | undefined;
+/** What `executeLiteWithProgress` answers: a result, an error step, or a stream that stops early. */
+let progressMode: "ok" | "error" | "cut" = "ok";
 
 const ORDER_42 = `{"Type":"Order","id":42,"ticks":"638500000000000017","toStr":"Order 42","modified":false,"name":"Acme","customer":{"EntityType":"Customer","id":9,"model":"Erika Mustermann"}}`;
 
@@ -189,9 +200,26 @@ beforeAll(() => {
         const lines = lites
           .filter((l) => !silentIds.includes(String(l.id)))
           .map((l) => JSON.stringify({ entity: { EntityType: l.EntityType, id: l.id, model: `Order ${l.id}` }, error: failIds.includes(String(l.id)) ? `Order ${l.id} cannot be approved` : null }));
+        if (hangAfterFirst) {
+          return new Response(new ReadableStream({
+            start(c) {
+              c.enqueue(new TextEncoder().encode((lines[0] ?? "") + "\n"));
+              setTimeout(() => interruptHandler?.(), 30);
+            },
+          }), { headers: { "content-type": "application/x-ndjson" } });
+        }
         const text = lines.join("\n") + "\n";
         return new Response(truncateStream ? text.slice(0, text.length - Math.floor((lines.at(-1)?.length ?? 0) / 2)) : text,
           { headers: { "content-type": "application/x-ndjson" } });
+      }
+      if (url.pathname.startsWith("/api/operation/executeLiteWithProgress/")) {
+        const steps = [
+          `{"currentTask":"Shipping Acme","min":0,"max":2,"position":1,"isFinished":false}`,
+          progressMode === "ok" ? `{"isFinished":true,"result":{"entity":${ORDER_42},"canExecute":{}}}`
+          : progressMode === "error" ? `{"isFinished":true,"error":{"exceptionType":"Signum.Engine.ConcurrencyException","exceptionMessage":"changed"}}`
+          : "",
+        ].filter((l) => l !== "");
+        return new Response(steps.join("\n") + "\n", { headers: { "content-type": "application/x-ndjson" } });
       }
       if (url.pathname === "/api/operation/constructFromMany/OrderOperation.Merge") {
         return new Response(`{"entity":{"Type":"Order","id":null,"isNew":true,"toStr":"","modified":true,"name":null},"canExecute":{}}`, { headers });
@@ -245,12 +273,15 @@ beforeEach(() => {
   failIds = [];
   silentIds = [];
   truncateStream = false;
+  hangAfterFirst = false;
+  interruptHandler = undefined;
+  progressMode = "ok";
 });
 afterEach(() => rmSync(configDir, { recursive: true, force: true }));
 
 interface Result { code: ExitCode; out: string; err: string; prompts: string[] }
 
-async function cli(argv: string[], o: { tty?: boolean; reply?: string; env?: Record<string, string> } = {}): Promise<Result> {
+async function cli(argv: string[], o: { tty?: boolean; reply?: string; env?: Record<string, string>; stdin?: string } = {}): Promise<Result> {
   let out = "", err = "";
   const prompts: string[] = [];
   const io: Io = {
@@ -259,8 +290,12 @@ async function cli(argv: string[], o: { tty?: boolean; reply?: string; env?: Rec
     stdoutIsTty: o.tty === true,
     stdinIsTty: o.tty === true,
     env: { SIGNUM_CONFIG_DIR: configDir, SIGNUM_URL: baseUrl, SIGNUM_TOKEN: TOKEN, ...(o.env ?? {}) } as NodeJS.ProcessEnv,
-    readStdin: async () => "",
+    readStdin: async () => o.stdin ?? "",
     ...(o.tty === true ? { prompt: async (q: string) => { prompts.push(q); return o.reply ?? ""; } } : {}),
+    onInterrupt: (handler) => {
+      interruptHandler = handler;
+      return () => { if (interruptHandler === handler) interruptHandler = undefined; };
+    },
   };
   try {
     return { code: await run(argv, io), out, err, prompts };
@@ -722,6 +757,166 @@ describe("operations over many records (STORY-45, #119)", () => {
   it("--explain prints the bulk request and sends nothing", async () => {
     const r = await cli([...two, "--explain"]);
     expect(JSON.parse(r.out)).toMatchObject({ body: { lites: [{ EntityType: "Order", id: 42 }, { EntityType: "Order", id: 43 }] } });
+    expect(operationCalls()).toEqual([]);
+  });
+});
+
+describe("values over many records, interruption and progress (STORY-45, #119)", () => {
+  const two = ["OrderOperation.Save", "--lite", "Order;42", "--lite", "Order;43"];
+  const sentBody = () => JSON.parse(operationCalls()[0]?.body ?? "{}") as Record<string, unknown>;
+  const auditLines = () => readFileSync(auditLogPath({ SIGNUM_CONFIG_DIR: configDir } as NodeJS.ProcessEnv), "utf8").trim().split("\n")
+    .map((l) => JSON.parse(l) as Record<string, unknown>);
+
+  it("sends --edit over many records as setters, spelled as reflection spells them (AC-45.4)", async () => {
+    const r = await cli([...two, "--edit", "name=Acme", "--edit", "address.city=Berlin", "--edit", "Customer=Customer;7", "--yes"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(operationCalls()[0]?.path).toBe("/api/operation/executeMultiple/OrderOperation.Save");
+    expect(sentBody()["setters"]).toEqual([
+      { property: "Name", operation: "Set", value: "Acme" },
+      { property: "Address.City", operation: "Set", value: "Berlin" },
+      { property: "Customer", operation: "Set", value: { EntityType: "Customer", id: 7 } },
+    ]);
+  });
+
+  it("resolves a handle in a value locally, and --explain keeps it as written (AC-53.2)", async () => {
+    const handle = `${HANDLE_PREFIX}abcdef123456`;
+    saveHandles({ [handle]: "Customer;7" }, { SIGNUM_CONFIG_DIR: configDir } as NodeJS.ProcessEnv);
+    const shown = await cli([...two, "--edit", `Customer=${handle}`, "--explain"]);
+    expect(shown.out).toContain(handle);
+    expect(shown.out).not.toContain('"id": 7');
+    await cli([...two, "--edit", `Customer=${handle}`, "--yes"]);
+    expect(sentBody()["setters"]).toEqual([{ property: "Customer", operation: "Set", value: { EntityType: "Customer", id: 7 } }]);
+  });
+
+  it("names the values in the confirmation", async () => {
+    const r = await cli([...two, "--edit", "Name=Acme"], { tty: true, reply: "y" });
+    expect(r.prompts[0]).toContain('setting Name="Acme"');
+  });
+
+  it("refuses values where they would be discarded, or cannot be addressed, sending nothing", async () => {
+    const lite = await cli(["OrderOperation.Approve", "--lite", "Order;42", "--lite", "Order;43", "--edit", "Name=X", "--yes"]);
+    expect(lite.code).toBe(ExitCode.Usage);
+    expect(lite.err).toContain("would be discarded");
+    const del = await cli(["OrderOperation.Delete", "--lite", "Order;42", "--lite", "Order;43", "--edit", "Name=X", "--yes"]);
+    expect(del.code).toBe(ExitCode.Usage);
+    const row = await cli([...two, "--edit", "Lines.0.Quantity=3", "--yes"]);
+    expect(row.code).toBe(ExitCode.Usage);
+    expect(row.err).toContain("--setters-json");
+    const list = await cli([...two, "--edit", "Lines=3", "--yes"]);
+    expect(list.err).toContain("is a list");
+    const unknown = await cli([...two, "--edit", "Colour=red", "--yes"]);
+    expect(unknown.err).toContain("has no member 'Colour'");
+    expect(operationCalls()).toEqual([]);
+  });
+
+  it("passes --setters-json through, checked for shape, for MList rows (AC-45.4)", async () => {
+    const setters = [{
+      property: "Lines", operation: "ChangeElements",
+      predicate: [{ property: "Quantity", filterOperation: "EqualTo", value: 1 }],
+      setters: [{ property: "Quantity", operation: "Set", value: 2 }],
+    }];
+    const r = await cli([...two, "--setters-json", JSON.stringify(setters), "--yes"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(sentBody()["setters"]).toEqual(setters);
+  });
+
+  it("names where --setters-json is wrong, and sends nothing", async () => {
+    const cases: Array<[unknown, string]> = [
+      [[{ property: "Name" }], "[0]: needs an \"operation\""],
+      [[{ property: "Name", operation: "Set" }], "Set needs a \"value\""],
+      [[{ property: "Name", operation: "Set", value: 1, colour: "red" }], "unknown field 'colour'"],
+      [[{ property: "Lines", operation: "ChangeElements", predicate: [{ property: "Quantity", value: 1 }], setters: [{ property: "Quantity", operation: "Set", value: 2 }] }],
+        "[0].predicate[0]: a predicate needs a \"filterOperation\""],
+      [[], "non-empty JSON array"],
+    ];
+    for (const [json, message] of cases) {
+      const r = await cli([...two, "--setters-json", JSON.stringify(json), "--yes"]);
+      expect(r.code).toBe(ExitCode.Usage);
+      expect(r.err).toContain(message);
+    }
+    expect(operationCalls()).toEqual([]);
+  });
+
+  it("--setters-json makes even one record a bulk operation, and reads @file", async () => {
+    const file = join(configDir, "setters.json");
+    await Bun.write(file, JSON.stringify([{ property: "Name", operation: "Set", value: "Müller – Ωmega" }]));
+    const r = await cli(["OrderOperation.Save", "--lite", "Order;42", "--setters-json", `@${file}`, "--yes"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(operationCalls()[0]?.path).toBe("/api/operation/executeMultiple/OrderOperation.Save");
+    expect(sentBody()["setters"]).toEqual([{ property: "Name", operation: "Set", value: "Müller – Ωmega" }]);
+  });
+
+  it("a dry run says the values are not checked", async () => {
+    canExecute = { "OrderOperation.Save": null };
+    const r = await cli([...two, "--edit", "Name=X", "--dry-run"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.err).toContain("values to set are not checked");
+    expect(operationCalls()).toEqual([]);
+  });
+
+  it("interrupted mid-batch, keeps what was reported, logs every record, and says how far it got (AC-45.6)", async () => {
+    hangAfterFirst = true;
+    const r = await cli(["OrderOperation.Approve", "--lite", "Order;42", "--lite", "Order;43", "--yes", "-o", "table"]);
+    expect(r.code).toBe(ExitCode.Interrupted);
+    expect(r.out).toContain("ok  Order;42");
+    expect(r.out).toContain("FAILED  Order;43: interrupted before the server reported it");
+    expect(r.err).toContain("the server reported 1 of 2 records");
+    expect(auditLines().map((l) => [l["target"], l["ok"], l["exitCode"]])).toEqual([["Order;42", true, undefined], ["Order;43", false, 130]]);
+  });
+
+  it("shows each outcome as it arrives, before the batch ends", async () => {
+    hangAfterFirst = true;
+    const r = await cli(["OrderOperation.Approve", "--lite", "Order;42", "--lite", "Order;43", "--yes", "-o", "ndjson"]);
+    const lines = r.out.trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(lines[0]).toEqual({ target: "Order;42", ok: true });
+  });
+
+  it("reads the records from stdin, a query's rows included (#119, #120)", async () => {
+    const handle = `${HANDLE_PREFIX}0123456789ab`;
+    saveHandles({ [handle]: "Order;43" }, { SIGNUM_CONFIG_DIR: configDir } as NodeJS.ProcessEnv);
+    const rows = `{"Entity":"Order;42","Name":"x"}\n{"Entity":"${handle}","Name":"y"}\n`;
+    const r = await cli(["OrderOperation.Approve", "--lite", "-", "--yes", "--json"], { stdin: rows });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(JSON.parse(operationCalls()[0]?.body ?? "{}").lites).toEqual([{ EntityType: "Order", id: 42 }, { EntityType: "Order", id: 43 }]);
+    expect(JSON.parse(r.out)).toEqual([{ target: "Order;42", ok: true }, { target: handle, ok: true }]);
+  });
+
+  it("--progress runs one record through executeLiteWithProgress and renders its result (AC-45.2)", async () => {
+    const r = await cli(["OrderOperation.Ship", "--lite", "Order;42", "--progress", "--yes", "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(operationCalls()[0]?.path).toBe("/api/operation/executeLiteWithProgress/OrderOperation.Ship");
+    expect(JSON.parse(operationCalls()[0]?.body ?? "{}")).toEqual({ lite: { EntityType: "Order", id: 42 }, args: null });
+    expect(JSON.parse(r.out).entity.Type).toBe("Order");
+  });
+
+  it("--progress under -o ndjson streams each step, then the result", async () => {
+    const r = await cli(["OrderOperation.Ship", "--lite", "Order;42", "--progress", "--yes", "-o", "ndjson", "--pseudonymize", "off"]);
+    const lines = r.out.trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(lines[0]).toEqual({ currentTask: "Shipping Acme", min: 0, max: 2, position: 1 });
+    expect((lines[1]?.["entity"] as Record<string, unknown>)["Type"]).toBe("Order");
+  });
+
+  it("--progress shows a step at a terminal on stderr, rewritten in place", async () => {
+    const r = await cli(["OrderOperation.Ship", "--lite", "Order;42", "--progress", "--yes", "--pseudonymize", "off"], { tty: true });
+    expect(r.err).toContain("[1/2] Shipping Acme");
+  });
+
+  it("--progress reports an error step as the error it is, and a stream that stops early as one", async () => {
+    progressMode = "error";
+    const failed = await cli(["OrderOperation.Ship", "--lite", "Order;42", "--progress", "--yes"]);
+    expect(failed.code).toBe(ExitCode.Concurrency);
+    expect(auditLines().at(-1)?.["ok"]).toBe(false);
+    progressMode = "cut";
+    const cut = await cli(["OrderOperation.Ship", "--lite", "Order;42", "--progress", "--yes"]);
+    expect(cut.code).toBe(ExitCode.Transport);
+    expect(cut.err).toContain("ended before OrderOperation.Ship finished");
+  });
+
+  it("refuses --progress with --edit, and over many records", async () => {
+    const edit = await cli(["OrderOperation.Save", "--lite", "Order;42", "--edit", "Name=X", "--progress", "--yes"]);
+    expect(edit.code).toBe(ExitCode.Usage);
+    const many = await cli(["OrderOperation.Ship", "--lite", "Order;42", "--lite", "Order;43", "--progress", "--yes"]);
+    expect(many.code).toBe(ExitCode.Usage);
     expect(operationCalls()).toEqual([]);
   });
 });

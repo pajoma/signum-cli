@@ -24,6 +24,7 @@ import { runInstance } from "./commands/instance.ts";
 import { assertNoUserInfo, resolveInstance } from "./core/instances.ts";
 import { runUnmask } from "./commands/unmask.ts";
 import { runOperation } from "./commands/operate.ts";
+import { decodeUtf8 } from "./core/input.ts";
 import type { Ctx, Io } from "./core/ctx.ts";
 
 function showHelp(args: ParsedArgs, io: Io): ExitCode {
@@ -329,9 +330,14 @@ export async function main(argv: readonly string[]): Promise<number> {
     readStdin: async () => {
       const chunks: Buffer[] = [];
       for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
-      return Buffer.concat(chunks).toString("utf8");
+      // UTF-8 strictly, whatever the platform's codepage: invalid bytes are refused, not replaced (#120).
+      return decodeUtf8(Buffer.concat(chunks), "stdin");
     },
     ...(process.stdin.isTTY === true ? { prompt: promptAtTerminal } : {}),
+    onInterrupt: (handler) => {
+      process.on("SIGINT", handler);
+      return () => { process.off("SIGINT", handler); };
+    },
   };
   try {
     return await run(argv, io);

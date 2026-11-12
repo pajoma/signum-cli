@@ -49,6 +49,8 @@ export interface MutationDescription {
   destructive?: boolean;
   /** Each record a bulk operation touches, as `Type;id`; the prompt counts and lists them (#119, AC-45.5). */
   records?: readonly string[];
+  /** The values a bulk operation sets on every record, as a person reads them (AC-45.4). */
+  changes?: readonly string[];
 }
 
 /**
@@ -92,7 +94,8 @@ export async function confirmMutation(ctx: Ctx, m: MutationDescription): Promise
   if (m.records !== undefined && count > 1) {
     const listed = m.records.slice(0, 5).join(", ") + (count > 5 ? `, … (${count - 5} more)` : "");
     const typed = count >= TYPED_CONFIRMATION_FROM || m.destructive === true;
-    const question = `${m.destructive === true ? "DELETE" : "Run " + m.operation + " on"} ${count} records at ${m.url}: ${listed}` +
+    const setting = m.changes !== undefined && m.changes.length > 0 ? `, setting ${m.changes.join(", ")}` : "";
+    const question = `${m.destructive === true ? "DELETE" : "Run " + m.operation + " on"} ${count} records at ${m.url}${setting}: ${listed}` +
       (m.destructive === true ? ". This cannot be undone." : ".") +
       (typed ? ` Type ${count} to confirm: ` : " [y/N] ");
     const answer = (await ctx.io.prompt(question)).trim();

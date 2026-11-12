@@ -32,6 +32,10 @@ export interface MemberInfo {
   name: string;
   type: string | undefined;
   niceName: string | undefined;
+  /** `TypeReferenceTS.IsLite` (`ReflectionServer.cs:548`): a value for it is a Lite, `{EntityType, id}`. */
+  isLite?: boolean;
+  /** An MList, or another collection: a setter cannot address one of its rows by position. */
+  isCollection?: boolean;
 }
 
 /** `OperationType` (`Operation.cs:233-240`), serialized by name. */
@@ -112,7 +116,12 @@ function parseMembers(raw: unknown): MemberInfo[] {
     const typeName = t !== null && typeof t === "object"
       ? str((t as Record<string, unknown>)["name"])
       : str(t);
-    return { name, type: typeName, niceName: str(i["niceName"]) };
+    const ref = t !== null && typeof t === "object" ? t as Record<string, unknown> : {};
+    return {
+      name, type: typeName, niceName: str(i["niceName"]),
+      ...(ref["isLite"] === true ? { isLite: true } : {}),
+      ...(ref["isCollection"] === true ? { isCollection: true } : {}),
+    };
   });
 }
 

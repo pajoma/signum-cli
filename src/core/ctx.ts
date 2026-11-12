@@ -26,6 +26,12 @@ export interface Io {
    * waiting for input that cannot arrive).
    */
   prompt?: ((question: string, opts?: { hidden?: boolean }) => Promise<string>) | undefined;
+  /**
+   * Run `handler` on the caller's interrupt (Ctrl-C) instead of dying at once, until the returned
+   * function is called. For a request whose server keeps working: what it already did must still be
+   * reported and logged (AC-45.6). Absent where nothing can interrupt.
+   */
+  onInterrupt?: ((handler: () => void) => () => void) | undefined;
 }
 
 export interface Ctx {

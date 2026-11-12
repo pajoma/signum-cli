@@ -13,7 +13,7 @@
  */
 
 import {
-  ConcurrencyError, NotAuthenticatedError, NotAuthorizedError, NotFoundError,
+  ConcurrencyError, InterruptedError, NotAuthenticatedError, NotAuthorizedError, NotFoundError,
   TransportError, ValidationError, CliError, ExitCode,
 } from "./errors.ts";
 import { rotateCredential } from "./credentials.ts";
@@ -50,6 +50,8 @@ export type RequestSpec = RequestBody & {
   /** Sent even when no token is stored — used for anonymous endpoints. */
   allowAnonymous?: boolean;
   ifModifiedSince?: string | undefined;
+  /** Abort the request — the caller's interrupt (AC-45.6). Reported as `InterruptedError`. */
+  signal?: AbortSignal | undefined;
 };
 
 export interface HttpResponse<T = unknown> {
@@ -154,6 +156,84 @@ export class SignumHttp {
   }
 
   async request<T = unknown>(spec: RequestSpec): Promise<HttpResponse<T>> {
+    const res = await this.open(spec);
+    if (res.status === 304) {
+      return { status: 304, body: undefined as T, headers: res.headers, notModified: true };
+    }
+    const body = await this.readBody(res, spec);
+    if (res.ok) return { status: res.status, body: body as T, headers: res.headers, notModified: false };
+    throw this.toError(res.status, body);
+  }
+
+  /**
+   * A response read line by line, as it arrives: the multi and progress endpoints write NDJSON and
+   * flush after every line (`OperationController.cs:598-624`). Each complete line is handed over at
+   * once, so a caller can act on it before the rest arrives; a last line with no newline — a stream
+   * that broke off — is handed over too, and it is the caller's to judge. An error status is read
+   * whole and thrown like `request`'s.
+   */
+  async requestLines(spec: RequestSpec, onLine: (line: string) => void): Promise<{ status: number; headers: Headers }> {
+    const res = await this.open(spec);
+    if (!res.ok) throw this.toError(res.status, await this.readBody(res, spec));
+    if (res.body === null) return { status: res.status, headers: res.headers };
+    // UTF-8 whatever the platform says, and a character split across chunks is held until whole.
+    const decoder = new TextDecoder("utf-8");
+    let pending = "";
+    const reader = res.body.getReader();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        pending += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = pending.indexOf("\n")) !== -1) {
+          const line = pending.slice(0, nl);
+          pending = pending.slice(nl + 1);
+          if (line.trim() !== "") onLine(line);
+        }
+      }
+    } catch (err) {
+      if (spec.signal?.aborted === true) throw new InterruptedError();
+      throw new TransportError(`the response from ${this.opts.baseUrl} broke off`, {
+        hint: "The server may still have acted on part of the request.",
+        cause: err,
+      });
+    }
+    pending += decoder.decode();
+    if (pending.trim() !== "") onLine(pending);
+    return { status: res.status, headers: res.headers };
+  }
+
+  /**
+   * An error body from inside a stream (`ProgressStep.error`), as the error it would have been as a
+   * response: the status is the one the server's filter gives that exception type
+   * (`SignumExceptionFilterAttribute.GetStatus`, `:131-146`).
+   */
+  errorFromBody(body: unknown): CliError {
+    const type = exceptionType(body) ?? "";
+    const status = type.endsWith("UnauthorizedAccessException") || type.endsWith("AuthenticationException") ? 403
+      : type.endsWith("EntityNotFoundException") ? 404
+      : type.endsWith("IntegrityCheckException") ? 400
+      : 500;
+    return this.toError(status, body);
+  }
+
+  private async readBody(res: Response, spec: RequestSpec): Promise<unknown> {
+    const text = await res.text();
+    let body: unknown = text;
+    const contentType = res.headers.get("content-type") ?? "";
+    if (text !== "" && (contentType.includes("json") || text.startsWith("{") || text.startsWith("["))) {
+      try {
+        body = spec.lossless === true ? parseLossless(text) : JSON.parse(text);
+      } catch {
+        body = text;
+      }
+    }
+    return body;
+  }
+
+  /** Send, adopt a rotated token, and hand back the response unread. */
+  private async open(spec: RequestSpec): Promise<Response> {
     const url = buildUrl(this.opts.baseUrl, spec.path, spec.query);
     const headers: Record<string, string> = {
       accept: "application/json",
@@ -182,16 +262,18 @@ export class SignumHttp {
     const controller = new AbortController();
     const timeout = this.opts.timeoutMs ?? 30_000;
     const timer = setTimeout(() => controller.abort(), timeout);
+    const signal = spec.signal !== undefined ? AbortSignal.any([controller.signal, spec.signal]) : controller.signal;
 
     let res: Response;
     try {
       res = await fetch(url, {
         method: spec.method,
         headers,
-        signal: controller.signal,
+        signal,
         ...(payload !== undefined ? { body: payload } : {}),
       });
     } catch (err) {
+      if (spec.signal?.aborted === true) throw new InterruptedError();
       const aborted = err instanceof Error && err.name === "AbortError";
       throw new TransportError(
         aborted ? `request timed out after ${timeout}ms` : `could not reach ${this.opts.baseUrl}`,
@@ -223,24 +305,7 @@ export class SignumHttp {
       }
     }
 
-    if (res.status === 304) {
-      return { status: 304, body: undefined as T, headers: res.headers, notModified: true };
-    }
-
-    const text = await res.text();
-    let body: unknown = text;
-    const contentType = res.headers.get("content-type") ?? "";
-    if (text !== "" && (contentType.includes("json") || text.startsWith("{") || text.startsWith("["))) {
-      try {
-        body = spec.lossless === true ? parseLossless(text) : JSON.parse(text);
-      } catch {
-        body = text;
-      }
-    }
-
-    if (res.ok) return { status: res.status, body: body as T, headers: res.headers, notModified: false };
-
-    throw this.toError(res.status, body);
+    return res;
   }
 
   private toError(status: number, body: unknown): CliError {

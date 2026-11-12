@@ -60,7 +60,7 @@ const http = live === undefined ? undefined : new SignumHttp({ baseUrl: live.url
 interface Result { code: ExitCode; out: string; err: string }
 
 /** One command, non-interactively, as a script would run it. Output stays in memory. */
-async function cli(argv: string[]): Promise<Result> {
+async function cli(argv: string[], o: { stdin?: string } = {}): Promise<Result> {
   let out = "", err = "";
   const io: Io = {
     out: (s) => { out += s; },
@@ -69,7 +69,7 @@ async function cli(argv: string[]): Promise<Result> {
     stdinIsTty: false,
     // An isolated profile, and an explicit human context: the run is a script, not an agent.
     env: { SIGNUM_CONFIG_DIR: configDir, SIGNUM_URL: live?.url ?? "", SIGNUM_TOKEN: live?.token ?? "", SIGNUM_CALLER_CONTEXT: "automated" } as NodeJS.ProcessEnv,
-    readStdin: async () => "",
+    readStdin: async () => o.stdin ?? "",
   };
   try {
     return { code: await run(argv, io), out, err };
@@ -259,6 +259,49 @@ describe.skipIf(!createWrites)("live create and delete (#118)", () => {
       const r = await cli([createDelete as string, ...ids.flatMap((id) => ["--lite", `${type};${id}`]), "--yes", "-o", "json"]);
       expect(r.code).toBe(ExitCode.Ok);
       const clean = type.replace(/Entity$/, "");
+      expect(JSON.parse(r.out)).toEqual(ids.map((id) => ({ target: `${clean};${id}`, ok: true })));
+      ids.length = 0;
+    } finally {
+      for (const id of ids) await cli([createDelete as string, "--lite", `${type};${id}`, "--yes"]);
+    }
+  });
+
+  it("sets a value on two records in one bulk request, by setter, and both are saved (AC-45.4)", async () => {
+    const type = createType as string;
+    const ids: string[] = [];
+    try {
+      for (const n of [1, 2]) {
+        const made = await cli([createSave as string, "--edit", `${createMember}=signum live setter ${n} ${new Date().toISOString()}`, "--yes", "-o", "json"]);
+        expect(made.code).toBe(ExitCode.Ok);
+        ids.push(String((JSON.parse(made.out) as { entity: { id: unknown } }).entity.id));
+      }
+      // The member as a person writes it, lower-cased: the setter must reach the server as reflection
+      // spells it, or `PropertyRoute.GetMember` refuses it.
+      const label = `signum live set ${new Date().toISOString()}`;
+      const set = await cli([createSave as string, ...ids.flatMap((id) => ["--lite", `${type};${id}`]),
+        "--edit", `${(createMember as string).toLowerCase()}=${label}`, "--yes", "-o", "json"]);
+      expect(set.code).toBe(ExitCode.Ok);
+      for (const id of ids) {
+        const fetched = await read({ type, id }) as Record<string, unknown>;
+        expect(fetched[wireKey(fetched, createMember as string)]).toBe(label);
+      }
+    } finally {
+      for (const id of ids) await cli([createDelete as string, "--lite", `${type};${id}`, "--yes"]);
+    }
+  });
+
+  it("reads the records to act on from stdin, as a query's rows (#119, #120)", async () => {
+    const type = createType as string;
+    const ids: string[] = [];
+    try {
+      for (const n of [1, 2]) {
+        const made = await cli([createSave as string, "--edit", `${createMember}=signum live stdin ${n} ${new Date().toISOString()}`, "--yes", "-o", "json"]);
+        ids.push(String((JSON.parse(made.out) as { entity: { id: unknown } }).entity.id));
+      }
+      const clean = type.replace(/Entity$/, "");
+      const rows = ids.map((id) => JSON.stringify({ Entity: `${clean};${id}` })).join("\n");
+      const r = await cli([createDelete as string, "--lite", "-", "--yes", "-o", "json"], { stdin: rows });
+      expect(r.code).toBe(ExitCode.Ok);
       expect(JSON.parse(r.out)).toEqual(ids.map((id) => ({ target: `${clean};${id}`, ok: true })));
       ids.length = 0;
     } finally {

@@ -35,7 +35,16 @@ source of truth: a release tag `v<version>` must match it (see the README's rele
     `--lite`, and one request reports one outcome per record. A partial failure is the new exit
     code 10 and lists which failed and why; all failing is 1. The confirmation names the count, and
     from 10 records (or any delete of several) the count must be typed back. `--dry-run` answers per
-    record. Not yet: property setters over many records (AC-45.4) and `executeLiteWithProgress`.
+    record.
+  - Values over many records (#119, AC-45.4): `--edit Member=value` with several records sets the
+    member on each, and `--setters-json` takes the setter list itself for MList rows and new
+    entities. Only for an operation that saves the entity it is given, and named in the confirmation.
+  - Each record's outcome is shown and logged the moment the server reports it. Ctrl-C stops a batch
+    and reports how far it got; the new exit code 130 means interrupted (AC-45.6).
+  - `--lite` and `--id` read a list of records from `@file` or `-` (stdin), including the rows of
+    `query -o ndjson`, so a query's answer can be piped into the operation that acts on it.
+  - `--progress` runs one record through `executeLiteWithProgress` and shows the server's progress
+    (AC-45.2).
 
 ## 0.2.1 — 2026-10-23
 
