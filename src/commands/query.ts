@@ -15,10 +15,8 @@ import { CliError, ExitCode, InterruptedError, NotAuthenticatedError, UsageError
 import { renderResultTable, renderDataDocument, renderDocument, streamResultTable } from "../core/output.ts";
 import { resolveResultTable, type RawResultTable, type ResolvedTable } from "../core/resulttable.ts";
 import { loadMetadata, resolveQueryKey } from "../core/metadata.ts";
-import {
-  fetchDefaultColumns, filterUnusableReason, idColumnTypes, resolveLiteColumns, validateTokens,
-  type QueryTokenInfo,
-} from "../core/tokens.ts";
+import { filterUnusableReason, idColumnTypes, resolveLiteColumns, type QueryTokenInfo } from "../core/tokens.ts";
+import { fetchDefaultColumns, validateTokens } from "../core/token-requests.ts";
 import { isHandle, resolveHandle } from "../core/reidentify.ts";
 import { loadHandles } from "../core/handles.ts";
 import { emitCommandEcho } from "../core/commandline.ts";
