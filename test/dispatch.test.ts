@@ -5,7 +5,9 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { BUILT_INS, builtInsSatisfyDispatchInvariant, flagCheckPath, flagSetsAreDisjoint, parseArgs } from "../src/core/args.ts";
+import {
+  BUILT_INS, builtInsSatisfyDispatchInvariant, declaredFlagsFor, flagCheckPath, flagSetsAreDisjoint, parseArgs,
+} from "../src/core/args.ts";
 import { allFlagSpecs, COMMANDS, GLOBAL_FLAGS } from "../src/core/help.ts";
 import { HANDLERS } from "../src/cli.ts";
 import { flag, optAll, type Ctx } from "../src/core/ctx.ts";
@@ -287,7 +289,10 @@ describe("the sensitivity decision has exactly one home", () => {
 });
 
 describe("flag accessors (#124)", () => {
-  const ctxFor = (argv: string[]) => ({ args: parseArgs(argv, {}) }) as unknown as Ctx;
+  const ctxFor = (argv: string[]) => {
+    const args = parseArgs(argv, {});
+    return { args, declaredFlags: declaredFlagsFor(args) } as unknown as Ctx;
+  };
 
   it("read a declared flag normally", () => {
     expect(optAll(ctxFor(["query", "Order", "--filter", "Id > 1"]), "filter")).toEqual(["Id > 1"]);

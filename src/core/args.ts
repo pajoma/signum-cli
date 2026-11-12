@@ -300,6 +300,13 @@ export function flagCheckPath(command: string, sub: string | undefined): string[
   return [command];
 }
 
+/** What `ctx.ts` checks a command's flag reads against (#124): the built-in's declared flags. */
+export function declaredFlagsFor(args: ParsedArgs): { path: string[]; names: Set<string> } | undefined {
+  if (args.kind !== "builtin" || args.command === undefined) return undefined;
+  const path = flagCheckPath(args.command, args.positionals[0]);
+  return path !== undefined ? { path, names: knownFlagNames(path) } : undefined;
+}
+
 export function assertKnownFlags(args: ParsedArgs, path: readonly string[]): void {
   const known = knownFlagNames(path);
   const used = new Set<string>([...args.options.keys(), ...args.booleans]);

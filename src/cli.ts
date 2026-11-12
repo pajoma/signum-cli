@@ -4,7 +4,9 @@
  * STORY-09 (non-interactive by construction) · STORY-51 (agent gate) · STORY-63 (errors route to help)
  */
 
-import { assertFormatSupported, assertKnownFlags, BUILT_INS, flagCheckPath, parseArgs, type ParsedArgs } from "./core/args.ts";
+import {
+  assertFormatSupported, assertKnownFlags, BUILT_INS, declaredFlagsFor, flagCheckPath, parseArgs, type ParsedArgs,
+} from "./core/args.ts";
 import { nearest } from "./core/text.ts";
 import { CliError, ExitCode, NotFoundError, UsageError, exitCodeOf } from "./core/errors.ts";
 import { detectCallerContext } from "./core/caller.ts";
@@ -250,6 +252,7 @@ function contextFor(args: ParsedArgs, io: Io, caller: Ctx["caller"], format: Out
     // Pseudonymization active means an agent gets surrogates rather than a refusal (AC-51.4).
     openData: makeDataOpener(caller, args.flags.allowAgentData, io.out, privacy.mode !== "off"),
     privacy,
+    declaredFlags: declaredFlagsFor(args),
   };
 }
 
