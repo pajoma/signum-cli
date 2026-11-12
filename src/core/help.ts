@@ -261,14 +261,24 @@ export const COMMANDS: CommandSpec[] = [
   },
   {
     name: "get",
-    summary: "Retrieve one entity by type and id, or by Lite key",
-    usage: "signum get <Type> <id> | signum get <Lite>",
+    summary: "Retrieve one entity by type and id, or by Lite key; or every record of a master-data type",
+    usage: "signum get <Type> <id> [--pack] | signum get <Lite> | signum get <Type> [--top <n> | --all]",
     milestone: "m1",
+    description:
+      "With an id, the entity as stored. --pack adds what this login may do to it: canExecute maps " +
+      "each operation key to null (permitted) or the reason it is not, and a key that is absent was " +
+      "withheld for this login — it does not mean the operation does not exist.\n\n" +
+      "Without an id, every record of a master-data type (api/fetchAll), the first 50 unless --top " +
+      "or --all says otherwise. The server sends them all, so the bound limits what is shown; a " +
+      "transactional type is refused, since `signum query <Type> --entities` pages it.",
     flags: [
       { name: "exists", summary: "Check presence only; print nothing" },
+      { name: "pack", summary: "The entity with canExecute: what this login may do to it (AC-30.3)" },
+      { name: "top", arg: "<n>", summary: "Without an id: show at most n records (default 50)" },
+      { name: "all", summary: "Without an id: show every record" },
       { name: "as-command", summary: "Print the command for a human to run; emit no data (REQ-078)" },
     ],
-    examples: ["signum get Order 42", 'signum get "Order;42" --json'],
+    examples: ["signum get Order 42", 'signum get "Order;42" --json', "signum get Order 42 --pack", "signum get Country --top 10"],
   },
   {
     name: "unmask",

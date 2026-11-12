@@ -64,6 +64,10 @@ source of truth: a release tag `v<version>` must match it (see the README's rele
   operations: `auth login` and `auth status`, `version`, the discovery commands, `unmask --labels
   fetch`. It is enforced in the HTTP client, so a command added later gets it too. Every preview
   now shows the request's headers, credentials redacted. `--trace` is an alias of `--verbose`.
+- **`get --pack` and `get <Type>`** (#138). `signum get Order 42 --pack` returns the entity with
+  `canExecute`, what this login may do to it, in one call. `signum get Country` lists every record
+  of a master-data type (`--top n`, default 50, or `--all`); a transactional type is refused in
+  favour of `query --entities`, which pages.
 - **Structured input from files and stdin** (#120). `-f <file|@file|->` saves an edited entity
   document: write it with `signum get Order;42 -o json`, change what you need, and
   `signum save order -f order.json --yes` applies only what you changed — also to a pseudonymized

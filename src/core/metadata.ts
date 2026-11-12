@@ -73,6 +73,11 @@ export interface TypeInfo {
   kind: string | undefined;
   /** For entities only: `Main`, `Part`, `String`, `System`, … (`TypeInfoTS.EntityKind`, `:469`). */
   entityKind: string | undefined;
+  /**
+   * For entities only: `Master` or `Transactional` (`TypeInfoTS.EntityData`, `ReflectionServer.cs:470`).
+   * `api/fetchAll` refuses a Transactional type (`EntityController.cs:77-89`), so `get <Type>` asks first.
+   */
+  entityData?: string | undefined;
   niceName: string | undefined;
   members: MemberInfo[];
   operations: OperationInfo[];
@@ -152,6 +157,7 @@ export function parseMetadata(payload: unknown, origin: Metadata["origin"]): Met
         name,
         kind: str(t["kind"]),
         entityKind: str(t["entityKind"]),
+        ...(str(t["entityData"]) !== undefined ? { entityData: str(t["entityData"]) } : {}),
         niceName: str(t["niceName"]),
         members: parseMembers(t["members"]),
         operations: parseOperations(t["operations"]),

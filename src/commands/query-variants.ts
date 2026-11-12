@@ -58,6 +58,25 @@ export function variantRequest(queryKey: string, filters: unknown[], orders: unk
   return { queryKey, filters, orders, ...(count !== null ? { count } : {}) };
 }
 
+/**
+ * A list of entities, each pseudonymized as its own document — the shape `query --entities` and
+ * `get <Type>` both return. Walked as a single array, each whole entity would be judged an identity
+ * and replaced by a handle, contents and all.
+ */
+export function pseudonymizeEntities(ctx: Ctx, items: readonly unknown[]): {
+  values: unknown[]; pseudonymized: string[]; handleDetails: Record<string, { lite: string; label?: string }>;
+} {
+  const pseudonymized = new Set<string>();
+  let handleDetails: Record<string, { lite: string; label?: string }> = {};
+  const values = items.map((e) => {
+    const r = pseudonymizeDocument(e, ctx.privacy);
+    r.pseudonymized.forEach((p) => pseudonymized.add(p));
+    handleDetails = { ...handleDetails, ...r.handleDetails };
+    return r.value;
+  });
+  return { values, pseudonymized: [...pseudonymized], handleDetails };
+}
+
 export async function runVariant(
   ctx: Ctx, target: Target, variant: Variant, request: Record<string, unknown>, open: () => DataWriter,
 ): Promise<ExitCode> {
@@ -69,17 +88,15 @@ export async function runVariant(
   });
   const items = Array.isArray(res.body) ? res.body : [];
 
-  // Each entity is its own document, so each is pseudonymized as one: walked as a single array, the
-  // whole entity would be judged an identity and replaced by a handle, contents and all.
   const pseudonymized = new Set<string>();
   let handleDetails: Record<string, { lite: string; label?: string }> = {};
   const values = variant === "entities"
-    ? items.map((e) => {
-        const r = pseudonymizeDocument(e, ctx.privacy);
+    ? (() => {
+        const r = pseudonymizeEntities(ctx, items);
         r.pseudonymized.forEach((p) => pseudonymized.add(p));
-        handleDetails = { ...handleDetails, ...r.handleDetails };
-        return r.value;
-      })
+        handleDetails = r.handleDetails;
+        return r.values;
+      })()
     : (() => {
         const r = pseudonymizeDocument(items, ctx.privacy);
         r.pseudonymized.forEach((p) => pseudonymized.add(p === "" ? "Entity" : p));
