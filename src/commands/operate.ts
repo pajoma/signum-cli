@@ -21,7 +21,7 @@
  */
 
 import type { Ctx } from "../core/ctx.ts";
-import { flag, opt, optAll } from "../core/ctx.ts";
+import { flag, interruptible, opt, optAll } from "../core/ctx.ts";
 import { ConcurrencyError, CliError, ExitCode, InterruptedError, NotFoundError, TransportError, UsageError } from "../core/errors.ts";
 import {
   applyDocument, asEntity, fetchEntity, markAllModified, serializeEntity, setMember,
@@ -40,7 +40,7 @@ import { resolveTarget, type Target } from "../core/target.ts";
 import { nearest, parseLiteKey } from "../core/text.ts";
 import { bulkPlan, isBulkRequest, runBulk, type BulkPlan } from "./operate-bulk.ts";
 import {
-  argsOf, cleanName, DATA_KIND, explainSendError, failureOf, interruptible, liteJson, packCanExecute, parseEdits, permission,
+  argsOf, cleanName, DATA_KIND, explainSendError, failureOf, liteJson, packCanExecute, parseEdits, permission,
   recordKey, renderPack, shownTarget, type Edit, type OperationTarget,
 } from "./operate-common.ts";
 

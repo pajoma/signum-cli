@@ -229,7 +229,10 @@ export const COMMANDS: CommandSpec[] = [
       "removes the others silently and the response carries no marker that it did, so a result " +
       "is complete for you, not necessarily for the database (AC-08.6). A page that is not the " +
       "whole result says so on stderr in every format (\"50 of 56 rows visible to you\"), and " +
-      "stdout carries only the rows (AC-21.5).",
+      "stdout carries only the rows (AC-21.5).\n\n" +
+      "--all fetches the result a page at a time and writes each page as it arrives, so nothing " +
+      "holds the whole result. At a terminal, more than 10000 rows are confirmed first. Ctrl-C " +
+      "stops between pages and closes the output, so what was written stays valid (exit 130).",
     flags: [
       { name: "filter", arg: "<expr>", summary: "Filter expression; repeatable (AND). See `signum help filter`" },
       { name: "filter-json", arg: "<file|@file|->", summary: "Raw FilterTS[] JSON; combines with --filter (AND)" },
@@ -237,8 +240,9 @@ export const COMMANDS: CommandSpec[] = [
       { name: "order", arg: "<token>", summary: "Sort token; prefix with - for descending" },
       { name: "top", arg: "<n>", summary: "Return only the first n rows" },
       { name: "page", arg: "<n>", summary: "Page number (1-based); use with --page-size" },
-      { name: "page-size", arg: "<n>", summary: "Rows per page; default 50" },
-      { name: "all", summary: "Fetch every row, unbounded — only one of --top/--page/--all at a time" },
+      { name: "page-size", arg: "<n>", summary: "Rows per page; default 50, or 1000 per request with --all" },
+      { name: "all", summary: "Every row, fetched a page at a time and written as it comes — one of --top/--page/--all" },
+      { name: "yes", alias: "y", summary: "With --all: skip the question asked at a terminal before a large result" },
       { name: "group", summary: "Set groupResults; required for aggregate tokens (Total.Sum, …)" },
       { name: "count", summary: "Return only the row count" },
       { name: "lites", summary: "Return matching entity references (api/query/lites); --top/--all set the count",

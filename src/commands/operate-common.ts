@@ -137,23 +137,3 @@ export function failureOf(err: unknown): { ok: false; error: string; exitCode: n
     exitCode: err instanceof CliError ? err.exitCode : ExitCode.Unexpected,
   };
 }
-
-/**
- * Run `work` with Ctrl-C turned into an abort of its request instead of the death of the process,
- * so what the server already did can still be reported and logged (AC-45.6). A second Ctrl-C is
- * the default again: whoever presses it twice means it.
- */
-export async function interruptible<T>(ctx: Ctx, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
-  const controller = new AbortController();
-  let release: (() => void) | undefined;
-  release = ctx.io.onInterrupt?.(() => {
-    release?.();
-    release = undefined;
-    controller.abort();
-  });
-  try {
-    return await work(controller.signal);
-  } finally {
-    release?.();
-  }
-}

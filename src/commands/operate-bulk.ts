@@ -12,7 +12,7 @@
  */
 
 import type { Ctx } from "../core/ctx.ts";
-import { optAll } from "../core/ctx.ts";
+import { interruptible, optAll } from "../core/ctx.ts";
 import { ExitCode, InterruptedError, UsageError } from "../core/errors.ts";
 import { confirmMutation, recordMutation } from "../core/guard.ts";
 import { loadHandles } from "../core/handles.ts";
@@ -23,7 +23,7 @@ import { isHandle } from "../core/reidentify.ts";
 import { describeSetters, parseSettersJson, settersFromEdits, type PropertySetter } from "../core/setters.ts";
 import type { Target } from "../core/target.ts";
 import {
-  argsOf, cleanName, explainSendError, failureOf, interruptible, liteJson, packCanExecute, parseEdits, permission,
+  argsOf, cleanName, explainSendError, failureOf, liteJson, packCanExecute, parseEdits, permission,
   realKey, recordKey, renderPack, shownTarget, type OperationTarget,
 } from "./operate-common.ts";
 

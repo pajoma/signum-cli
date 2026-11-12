@@ -76,9 +76,9 @@ user is definitely paying attention.
 **Acceptance Criteria:**
 - AC-63.1: An unknown query token lists the nearest valid tokens — fetched from the server's own continuation list at the point the path broke — and points at `signum explain <QueryKey>`. Delivered for `signum explain <QueryKey>.<token>`, for `--column`/`--order` (#95), and for `--filter`/`--filter-json` (#97). *(Amended: the `m2` deferral for tokens inside `--filter`/`--column` is dropped — it was tied to AC-20.7, which now covers every slot.)*
 - AC-63.2: An unparseable filter cites the rule it broke — for example the quoted-cast rule — and points at `signum help filter`.
-- AC-63.3: `m2` — An ambiguous operation verb lists the candidate canonical keys and exits non-zero, never guessing (AC-41.3). **Belongs with m2:** operations are not invokable in m1, and a verb-noun invocation currently exits 2 naming the milestone and pointing at `signum operations`.
+- AC-63.3: `m2` — An ambiguous operation verb lists the candidate canonical keys and exits non-zero, never guessing (AC-41.3). **Belongs with m2:** operations are not invokable in m1, and a verb-noun invocation currently exits 2 naming the milestone and pointing at `signum operations`. *(Delivered with AC-41.3, #116: the candidates are listed by canonical key and nothing is sent.)*
 - AC-63.4: An unknown type or query suggests near matches from cached metadata.
-- AC-63.5: `m2` — A namespace-qualified operation key is met with the actual key format, since that is a common wrong guess (AC-41.5). **Belongs with m2**, same reason as AC-63.3.
+- AC-63.5: `m2` — A namespace-qualified operation key is met with the actual key format, since that is a common wrong guess (AC-41.5). **Belongs with m2**, same reason as AC-63.3. *(Delivered with AC-41.5, #116.)*
 - AC-63.6: An auth failure names which of the two 403 cases it was and what to do — re-authenticate, or stop because it is a permission problem (AC-08.2).
 - AC-63.7: Suggestions come from the **cached metadata**, so a typo costs no round trip.
 

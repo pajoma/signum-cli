@@ -76,6 +76,11 @@ source of truth: a release tag `v<version>` must match it (see the README's rele
   constructor's output can be piped into the Save that stores it. `--filter-json -` now reads stdin.
   One reader serves every such flag: UTF-8 whatever the codepage (invalid bytes are refused), a
   missing file is a usage error naming it, and two flags both reading stdin are refused.
+- **`query --all` pages and streams** (AC-23.3–23.5). It fetched everything in one response; now it
+  asks for a page at a time (1000 rows, `--page-size` to change it) and writes each as it arrives.
+  At a terminal, a result of 10 000 rows or more is confirmed first (`--yes` skips the question).
+  Ctrl-C stops between pages with the output still valid, and exits 130. A result that changes
+  while it is paged is reported, since a row may then be missed or repeated.
 
 ## 0.2.1 — 2026-10-23
 
