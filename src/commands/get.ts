@@ -99,7 +99,7 @@ export async function runGet(ctx: Ctx): Promise<ExitCode> {
     // Behind a handle the path would spell out the real id, so show the handle in its place. Built,
     // not substituted: a pattern made from the id misses when the id holds a regex character.
     const shown = viaHandle ? pathFor(first) : path;
-    renderDocument({ method: "GET", url: `${target.url}/${shown}`, ...(viaHandle ? { id: "resolved locally from the handle" } : {}) },
+    renderDocument({ ...target.http.describe({ method: "GET", path: shown }), ...(viaHandle ? { id: "resolved locally from the handle" } : {}) },
       { format: ctx.format === "table" ? "json" : ctx.format, write: ctx.io.out });
     return ExitCode.Ok;
   }

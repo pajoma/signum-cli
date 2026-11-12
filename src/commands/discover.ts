@@ -8,6 +8,7 @@
  * credentials — api/reflection/types is anonymous.
  */
 
+import { Explained } from "../core/http.ts";
 import type { Ctx } from "../core/ctx.ts";
 import { ExitCode, UsageError } from "../core/errors.ts";
 import { listingShape, renderDocument, renderListing } from "../core/output.ts";
@@ -219,6 +220,7 @@ async function tryFetchQueryTokens(
     const target = resolveTarget(ctx);
     return { tokens: await fetchSubTokens(target.http, type.name) };
   } catch (err) {
+    if (err instanceof Explained) throw err;
     // Deliberately broad: no credential, no reachable server, a query key the reflection document
     // claims but the server does not expose. None of them should cost the reader the members list.
     return { unavailable: err instanceof Error ? err.message : String(err) };
@@ -459,7 +461,7 @@ async function explainToken(ctx: Ctx, queryKey: string, tokenPath: string): Prom
   // Validate first, so a typo is reported as a typo — with the valid continuations at the point
   // it broke — rather than as an empty continuation list that looks like a leaf.
   const [resolved] = await validateTokens(target.http, queryKey, [tokenPath]);
-  const children = await fetchSubTokens(target.http, queryKey, tokenPath);
+  const children = await fetchSubTokens(target.http, queryKey, tokenPath, false); // the answer: shown under --explain
 
   if (ctx.format === "json" || ctx.format === "ndjson") {
     renderDocument(
@@ -524,6 +526,14 @@ export async function runDiscover(
   ctx: Ctx,
   which: "types" | "queries" | "operations" | "explain",
 ): Promise<ExitCode> {
+  const arg0 = ctx.args.positionals[0];
+  // --explain: the request that answers this command, shown and not sent (REQ-053). The reflection
+  // document is what types, queries, operations and `explain <Type>` read. A dotted `explain`
+  // argument reads the reflection document as metadata and, for a token path, asks
+  // api/query/subTokens — which is shown where it is made.
+  if (ctx.args.flags.explain && !(which === "explain" && arg0?.includes(".") === true)) {
+    await resolveTarget(ctx).http.request({ method: "GET", path: "api/reflection/types", allowAnonymous: true });
+  }
   const md = await metadata(ctx);
   noteOrigin(ctx, md);
   const arg = ctx.args.positionals[0];

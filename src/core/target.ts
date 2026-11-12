@@ -4,7 +4,8 @@
  */
 
 import type { Ctx } from "./ctx.ts";
-import { SignumHttp } from "./http.ts";
+import { SignumHttp, type ExplainedRequest } from "./http.ts";
+import { renderDocument } from "./output.ts";
 import { loadCredential, type StoredCredential } from "./credentials.ts";
 import { NotAuthenticatedError, UsageError } from "./errors.ts";
 
@@ -17,6 +18,15 @@ export interface Target {
   http: SignumHttp;
   /** Emitted once by the caller if set (AC-11.5). */
   permissionWarning: string | undefined;
+}
+
+/**
+ * Where `--explain` shows a request (REQ-053): stdout, as a document in the chosen format. Handed to
+ * every client the CLI builds, so a request any command makes is shown rather than sent (#122).
+ */
+export function explainSink(ctx: Ctx): ((request: ExplainedRequest) => void) | undefined {
+  if (!ctx.args.flags.explain) return undefined;
+  return (request) => renderDocument(request, { format: ctx.format === "table" ? "json" : ctx.format, write: ctx.io.out });
 }
 
 export function resolveTarget(ctx: Ctx, options: { requireAuth?: boolean } = {}): Target {
@@ -68,6 +78,7 @@ export function resolveTarget(ctx: Ctx, options: { requireAuth?: boolean } = {})
     token,
     timeoutMs: ctx.args.flags.timeoutMs,
     trace: ctx.args.flags.verbose ? (line) => ctx.io.err(line) : undefined,
+    explain: explainSink(ctx),
     // An ambient token has nowhere to be written back to, so a rotation must be reported rather
     // than attempted — the default handler updates the STORED credential and would fail with
     // "no stored credential to rotate", turning a successful request into a hard error. (Same

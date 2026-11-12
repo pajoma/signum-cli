@@ -23,7 +23,7 @@
  * "nothing is queryable".
  */
 
-import { SignumHttp } from "./http.ts";
+import { Explained, SignumHttp } from "./http.ts";
 import { loadMetadataCache, saveMetadataCache } from "./metadata-cache.ts";
 import { CliError, ExitCode, NotAuthenticatedError, NotAuthorizedError, NotFoundError, UsageError } from "./errors.ts";
 import { editDistance } from "./text.ts";
@@ -350,6 +350,7 @@ export async function loadMetadata(opts: LoadMetadataOptions): Promise<Metadata>
       path: "api/reflection/types",
       allowAnonymous: true, // anonymous endpoint — no credential needed (AC-61.4)
       ifModifiedSince: cached?.lastModified,
+      prepare: true, // metadata to build a request with; sent under --explain too (REQ-053)
     });
 
     if (res.notModified && cached !== undefined) {
@@ -364,6 +365,7 @@ export async function loadMetadata(opts: LoadMetadataOptions): Promise<Metadata>
       url: opts.url, fetchedAt: new Date().toISOString(), fromCache: false, stale: false, authenticated,
     });
   } catch (err) {
+    if (err instanceof Explained) throw err;
     // A stale cache is used and flagged, never discarded (AC-61.6).
     if (cached !== undefined) {
       opts.warn?.(`warning: could not refresh metadata, using cache from ${cached.fetchedAt}\n`);

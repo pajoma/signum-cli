@@ -530,7 +530,7 @@ function explainPlan(ctx: Ctx, target: Target, p: Plan): ExitCode {
     : sends === "new" ? { entity: newEntity(p), args: p.args }
     : sends === "lite" ? { lite: shownTarget(p.target as OperationTarget), args: p.args }
     : { entity: fetched(p.target), args: p.args };
-  renderDocument({ method: "POST", url: `${target.url}/${operationPath(p)}`, body },
+  renderDocument(target.http.describe({ method: "POST", path: operationPath(p), body }, body),
     { format: ctx.format === "table" ? "json" : ctx.format, write: ctx.io.out });
   return ExitCode.Ok;
 }
@@ -548,7 +548,7 @@ async function dryRun(ctx: Ctx, target: Target, p: Plan): Promise<ExitCode> {
   let canExecute: Record<string, unknown> | undefined;
   if (p.route === "saveNew") {
     const payload = serializeEntity(newEntity(p));
-    const res = await target.http.request<unknown>({ method: "POST", path: "api/entityPackEntity", rawBody: payload.json, lossless: true });
+    const res = await target.http.request<unknown>({ method: "POST", path: "api/entityPackEntity", rawBody: payload.json, lossless: true, prepare: true });
     canExecute = (((res.body ?? {}) as Record<string, unknown>)["canExecute"] ?? {}) as Record<string, unknown>;
   } else if (p.target !== undefined) {
     canExecute = await packCanExecute(target, p.target);

@@ -26,6 +26,7 @@ import { defaultCredentialUrl } from "./core/credentials.ts";
 import { runUnmask } from "./commands/unmask.ts";
 import { runOperation } from "./commands/operate.ts";
 import { decodeUtf8 } from "./core/input.ts";
+import { Explained } from "./core/http.ts";
 import type { Ctx, Io } from "./core/ctx.ts";
 
 function showHelp(args: ParsedArgs, io: Io): ExitCode {
@@ -123,6 +124,8 @@ export async function run(argv: readonly string[], io: Io): Promise<ExitCode> {
   try {
     return await runParsed(args, io);
   } catch (err) {
+    // `--explain` showed the request the command was about to send, and nothing was sent (REQ-053).
+    if (err instanceof Explained) return ExitCode.Ok;
     // The one place that knows how the user named the target, so a login hint raised anywhere
     // below is worded for it here (`-i <name>` when an instance was given).
     if (err instanceof CliError) err.namingInstance(args.flags.instance);

@@ -176,7 +176,8 @@ async function bulkDryRun(ctx: Ctx, target: Target, p: BulkPlan): Promise<ExitCo
 
 export async function runBulk(ctx: Ctx, target: Target, p: BulkPlan, mode: { explain: boolean; dry: boolean }): Promise<ExitCode> {
   if (mode.explain) {
-    renderDocument({ method: "POST", url: `${target.url}/${bulkPath(p)}`, body: bulkBody(p, true) },
+    const shown = bulkBody(p, true);
+    renderDocument(target.http.describe({ method: "POST", path: bulkPath(p), body: shown }, shown),
       { format: ctx.format === "table" ? "json" : ctx.format, write: ctx.io.out });
     if (!mode.dry) return ExitCode.Ok;
   }

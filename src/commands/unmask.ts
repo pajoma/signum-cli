@@ -16,6 +16,7 @@
  * REQ-058 rather than a server-side lookup: the surrogate→real relationship never leaves the machine.
  */
 
+import { Explained } from "../core/http.ts";
 import type { Ctx } from "../core/ctx.ts";
 import { ExitCode, PolicyError, UsageError } from "../core/errors.ts";
 import { renderDataDocument } from "../core/output.ts";
@@ -181,6 +182,7 @@ async function fetchMissingLabels(
         if (label !== undefined) found[w.handle] = label;
       }
     } catch (err) {
+      if (err instanceof Explained) throw err;
       // One unreadable type must not lose the labels of every other type. Named, never swallowed.
       ctx.io.err(
         `warning: could not fetch labels for ${type} (${err instanceof Error ? err.message : String(err)})\n`,

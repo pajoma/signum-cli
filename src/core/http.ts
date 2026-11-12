@@ -31,6 +31,32 @@ export interface HttpOptions {
   /** Called when the server rotates the token, so it can be persisted. */
   onTokenRotated?: ((token: string) => void) | undefined;
   env?: NodeJS.ProcessEnv;
+  /**
+   * `--explain` (REQ-053): every request not marked `prepare` is handed here, described with its
+   * credentials redacted, and NOT sent; the client then throws `Explained` to end the command. One
+   * place for every command, so a command added later cannot forget to honour the flag (#122).
+   */
+  explain?: ((request: ExplainedRequest) => void) | undefined;
+}
+
+/** A request as `--explain` shows it: everything that would be sent, credentials redacted. */
+export interface ExplainedRequest {
+  method: string;
+  url: string;
+  headers: Record<string, string>;
+  body?: unknown;
+}
+
+/**
+ * Thrown once `--explain` has shown the request a command was about to send. Not a `CliError`, so a
+ * command's own error handling — which maps failures to messages — cannot mistake it for one; the
+ * entry point turns it into exit 0.
+ */
+export class Explained extends Error {
+  constructor() {
+    super("explained; nothing was sent");
+    this.name = "Explained";
+  }
 }
 
 /**
@@ -52,6 +78,12 @@ export type RequestSpec = RequestBody & {
   ifModifiedSince?: string | undefined;
   /** Abort the request — the caller's interrupt (AC-45.6). Reported as `InterruptedError`. */
   signal?: AbortSignal | undefined;
+  /**
+   * A read the command needs in order to BUILD its request — metadata, a query's tokens, a dry
+   * run's permission check — and so sent even under `--explain`, as its help says ("metadata may be
+   * fetched"). Never an operation: a request that can change data is refused this mark.
+   */
+  prepare?: boolean;
 };
 
 export interface HttpResponse<T = unknown> {
@@ -232,8 +264,43 @@ export class SignumHttp {
     return body;
   }
 
+  /** Whether `--explain` is on: requests not marked `prepare` are described, never sent. */
+  get explaining(): boolean {
+    return this.opts.explain !== undefined;
+  }
+
+  /** The request as `--explain` shows it. `body` replaces the real one where it would disclose more. */
+  describe(spec: RequestSpec, body?: unknown): ExplainedRequest {
+    const headers: Record<string, string> = { accept: "application/json", ...(spec.headers ?? {}) };
+    if (this.opts.token !== undefined && this.opts.token !== "") headers["Authorization"] = `Bearer ${this.opts.token}`;
+    const payload = spec.rawBody ?? (spec.body !== undefined ? JSON.stringify(spec.body) : undefined);
+    if (payload !== undefined) headers["content-type"] = "application/json";
+    if (spec.ifModifiedSince !== undefined) headers["if-modified-since"] = spec.ifModifiedSince;
+    let shown: unknown = body;
+    if (shown === undefined && payload !== undefined) {
+      try {
+        shown = parseLossless(payload);
+      } catch {
+        shown = payload;
+      }
+    }
+    return {
+      method: spec.method,
+      url: buildUrl(this.opts.baseUrl, spec.path, spec.query),
+      headers: redactHeaders(headers),
+      ...(shown !== undefined ? { body: shown } : {}),
+    };
+  }
+
   /** Send, adopt a rotated token, and hand back the response unread. */
   private async open(spec: RequestSpec): Promise<Response> {
+    if (spec.prepare === true && spec.path.replace(/^\/+/, "").startsWith("api/operation/")) {
+      throw new CliError("internal: an operation request was marked as preparation, which --explain would send", ExitCode.Unexpected);
+    }
+    if (this.opts.explain !== undefined && spec.prepare !== true) {
+      this.opts.explain(this.describe(spec));
+      throw new Explained();
+    }
     const url = buildUrl(this.opts.baseUrl, spec.path, spec.query);
     const headers: Record<string, string> = {
       accept: "application/json",

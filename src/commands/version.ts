@@ -9,7 +9,8 @@ import type { Ctx } from "../core/ctx.ts";
 import { ExitCode } from "../core/errors.ts";
 import { renderDocument } from "../core/output.ts";
 import { defaultCredentialUrl } from "../core/credentials.ts";
-import { appVersionFrom, SignumHttp } from "../core/http.ts";
+import { appVersionFrom, Explained, SignumHttp } from "../core/http.ts";
+import { explainSink } from "../core/target.ts";
 
 // M4 (Brooks review): single source of truth — read the version from package.json rather
 // than a second hardcoded copy that silently drifts. Bun bundles the JSON import into the
@@ -30,6 +31,7 @@ export async function runVersion(ctx: Ctx): Promise<ExitCode> {
       baseUrl: url,
       timeoutMs: ctx.args.flags.timeoutMs ?? 8000,
       trace: ctx.args.flags.verbose ? (l) => ctx.io.err(l) : undefined,
+      explain: explainSink(ctx),
       env: ctx.io.env,
     });
     try {
@@ -45,6 +47,7 @@ export async function runVersion(ctx: Ctx): Promise<ExitCode> {
       const app = appVersionFrom(res.headers);
       server = { url, reachable: true, detail: `${count} types`, appVersion: app.version ?? null, appBuildTime: app.buildTime ?? null };
     } catch (err) {
+      if (err instanceof Explained) throw err;
       server = { url, reachable: false, detail: err instanceof Error ? err.message : String(err) };
     }
   }

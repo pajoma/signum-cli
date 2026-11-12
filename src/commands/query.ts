@@ -444,8 +444,9 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
 
   // --explain prints the request and sends nothing (AC-20.6).
   if (ctx.args.flags.explain) {
+    // Described by the client, so it shows what any request shows: headers, credentials redacted.
     renderDocument(
-      { method: "POST", url: `${target.url}/api/query/${variant ?? (wantCount ? "queryValue" : "executeQuery")}/${queryKey}`, body: request },
+      target.http.describe({ method: "POST", path: `api/query/${variant ?? (wantCount ? "queryValue" : "executeQuery")}/${queryKey}`, body: request }),
       { format: ctx.format === "table" ? "json" : ctx.format, write: ctx.io.out },
     );
     return ExitCode.Ok;

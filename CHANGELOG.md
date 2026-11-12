@@ -60,6 +60,10 @@ source of truth: a release tag `v<version>` must match it (see the README's rele
   setting both variables is now refused rather than one silently winning. `auth status` lists every
   profile and marks the active one and the default, and a write's confirmation names the instance
   beside the URL.
+- **`--explain` on every command that sends a request** (#122), not only `query`, `get` and
+  operations: `auth login` and `auth status`, `version`, the discovery commands, `unmask --labels
+  fetch`. It is enforced in the HTTP client, so a command added later gets it too. Every preview
+  now shows the request's headers, credentials redacted. `--trace` is an alias of `--verbose`.
 - **Structured input from files and stdin** (#120). `-f <file|@file|->` saves an edited entity
   document: write it with `signum get Order;42 -o json`, change what you need, and
   `signum save order -f order.json --yes` applies only what you changed — also to a pseudonymized

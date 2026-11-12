@@ -185,7 +185,8 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
       switch (name) {
         case "help": case "h": flags.help = true; break;
         case "explain": flags.explain = true; break;
-        case "verbose": case "v": flags.verbose = true; break;
+        // `--trace` is REQ-053's name for it; `--verbose`/`-v` came first. One flag, three spellings (#122).
+        case "verbose": case "v": case "trace": flags.verbose = true; break;
         case "no-color": flags.noColor = true; break;
         case "json": flags.output = "json"; break;
         case "url": flags.url = value; break;

@@ -15,9 +15,9 @@ import {
 } from "../core/credentials.ts";
 import { instanceForUrl, listInstances, resolveInstance, validateUrl } from "../core/instances.ts";
 import { normalizeUrl } from "../core/text.ts";
-import { appVersionFrom, SignumHttp } from "../core/http.ts";
+import { appVersionFrom, Explained, SignumHttp } from "../core/http.ts";
 import { flag } from "../core/ctx.ts";
-import { resolveTarget } from "../core/target.ts";
+import { explainSink, resolveTarget } from "../core/target.ts";
 import { handoffInstructions, loginCommand } from "../core/handoff.ts";
 
 /** Generic form, for error hints where no target URL is known (`auth status` on a fresh install). */
@@ -127,6 +127,8 @@ async function login(ctx: Ctx): Promise<ExitCode> {
     timeoutMs: ctx.args.flags.timeoutMs,
     trace: ctx.args.flags.verbose ? (l) => ctx.io.err(l) : undefined,
     onTokenRotated: (fresh) => { rotated = fresh; },
+    // `auth login --explain` shows the verification request, token redacted, and stores nothing.
+    explain: explainSink(ctx),
     env: ctx.io.env,
   });
 
@@ -339,6 +341,7 @@ async function status(ctx: Ctx): Promise<ExitCode> {
     report.appVersion = app.version ?? null;
     report.appBuildTime = app.buildTime ?? null;
   } catch (err) {
+    if (err instanceof Explained) throw err;
     // Only a TRANSPORT failure means the target is unreachable. A 403 proves the opposite: the
     // server answered. Reporting `reachable: false` next to "not authenticated: No authentication
     // information found!" sent a reader looking for a network problem that did not exist (#83).

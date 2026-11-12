@@ -93,6 +93,7 @@ export async function packCanExecute(target: Target, t: OperationTarget): Promis
     method: "GET",
     path: `api/entityPack/${encodeURIComponent(cleanName(t.type))}/${encodeURIComponent(t.id)}`,
     lossless: true,
+    prepare: true, // a dry run's permission read: it composes with --explain (AC-43.6)
   });
   return (((res.body ?? {}) as Record<string, unknown>)["canExecute"] ?? {}) as Record<string, unknown>;
 }

@@ -122,10 +122,13 @@ export async function fetchSubTokens(
   http: SignumHttp,
   queryKey: string,
   token?: string | undefined,
+  /** False where the tokens ARE the answer (`signum explain Order.Entity`), so --explain shows the call. */
+  prepare = true,
 ): Promise<QueryTokenInfo[]> {
   const res = await http.request<unknown>({
     method: "POST",
     path: "api/query/subTokens",
+    prepare,
     // `token` is nullable on the wire (`SubTokensRequest.token`), and null is what asks for the
     // query's own root columns rather than a continuation.
     body: { queryKey, token: token ?? null },
@@ -150,6 +153,7 @@ export async function validateTokens(
       method: "POST",
       path: "api/query/parseTokens",
       body: { queryKey, tokens: [...tokens] },
+      prepare: true, // validating the caller's tokens is building the request
     });
     return parseList(res.body);
   } catch (err) {
@@ -246,6 +250,7 @@ export async function fetchDefaultColumns(
   const res = await http.request<unknown>({
     method: "GET",
     path: `api/query/description/${encodeURIComponent(queryKey)}`,
+    prepare: true, // the default columns are part of the request being built
   });
 
   const body = res.body;
