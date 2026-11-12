@@ -179,6 +179,10 @@ let interruptHandler: (() => void) | undefined;
 /** What `executeLiteWithProgress` answers: a result, an error step, or a stream that stops early. */
 let progressMode: "ok" | "error" | "cut" = "ok";
 
+/** A record with MList rows, for documents that change, add and remove rows (#120). */
+const ORDER_50 = `{"Type":"Order","id":50,"ticks":"5","toStr":"Order 50","modified":false,"name":"Initech","customer":null,` +
+  `"lines":[{"rowId":1,"element":{"Type":"OrderLineEmbedded","toStr":"Widget","modified":false,"quantity":1,"product":"Widget"}},` +
+  `{"rowId":2,"element":{"Type":"OrderLineEmbedded","toStr":"Gadget","modified":false,"quantity":2,"product":"Gadget"}}]}`;
 const ORDER_42 = `{"Type":"Order","id":42,"ticks":"638500000000000017","toStr":"Order 42","modified":false,"name":"Acme","customer":{"EntityType":"Customer","id":9,"model":"Erika Mustermann"}}`;
 
 beforeAll(() => {
@@ -191,6 +195,7 @@ beforeAll(() => {
       const headers = { "content-type": "application/json" };
       if (url.pathname === "/api/reflection/types") return new Response(JSON.stringify(REFLECTION), { headers });
       if (url.pathname === "/api/entity/Order/42") return new Response(ORDER_42, { headers });
+      if (url.pathname === "/api/entity/Order/50") return new Response(ORDER_50, { headers });
       const multi = /^\/api\/operation\/(executeMultiple|deleteMultiple|constructFromMultiple)\//.exec(url.pathname);
       if (multi !== null) {
         if (answer === "forbidden") {
@@ -918,5 +923,162 @@ describe("values over many records, interruption and progress (STORY-45, #119)",
     const many = await cli(["OrderOperation.Ship", "--lite", "Order;42", "--lite", "Order;43", "--progress", "--yes"]);
     expect(many.code).toBe(ExitCode.Usage);
     expect(operationCalls()).toEqual([]);
+  });
+});
+
+describe("structured input: -f, @file and - (REQ-054, #120)", () => {
+  const saved = () => JSON.parse(operationCalls()[0]?.body ?? "{}").entity as Record<string, unknown>;
+  const write = async (name: string, value: unknown): Promise<string> => {
+    const path = join(configDir, name);
+    await Bun.write(path, typeof value === "string" ? value : JSON.stringify(value));
+    return path;
+  };
+  /** The record as `get` writes it, pseudonymized under the default policy: what a caller edits. */
+  const got = async (key: string): Promise<Record<string, unknown>> =>
+    JSON.parse((await cli(["get", key, "-o", "json", "--pseudonymize", "heuristic"])).out);
+
+  it("applies a pseudonymized document's one change onto the real record, and nothing else (#120)", async () => {
+    const doc = await got("Order;42");
+    expect(doc["name"]).not.toBe("Acme");            // the caller never saw the real values…
+    doc["name"] = "Globex";
+    const file = await write("order.json", doc);
+    seen = [];
+    const r = await cli(["save", "order", "-f", file, "--yes", "--pseudonymize", "heuristic"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const e = saved();
+    expect(e["name"]).toBe("Globex");
+    expect(e["modified"]).toBe(true);
+    // …and none of their surrogates or handles reach the record: everything left alone stays real.
+    expect(e["id"]).toBe(42);
+    expect(e["ticks"]).toBe("638500000000000017");
+    expect(e["customer"]).toEqual({ EntityType: "Customer", id: 9, model: "Erika Mustermann" });
+    expect(operationCalls()[0]?.path).toBe("/api/operation/executeEntity/OrderOperation.Save");
+  });
+
+  it("a document that changes nothing sends nothing (AC-32.4)", async () => {
+    const file = await write("same.json", await got("Order;42"));
+    seen = [];
+    const r = await cli(["save", "order", "-f", file, "--yes", "--pseudonymize", "heuristic"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("changes nothing");
+    expect(operationCalls()).toEqual([]);
+  });
+
+  it("refuses a pseudonym copied into a changed value", async () => {
+    const doc = await got("Order;42");
+    doc["name"] = "name-1fd8";
+    const r = await cli(["save", "order", "-f", await write("p.json", doc), "--yes"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("is a pseudonym, not a value");
+    expect(operationCalls()).toEqual([]);
+  });
+
+  it("changes, removes and adds MList rows by rowId (AC-31.3)", async () => {
+    const doc = await got("Order;50");
+    const lines = doc["lines"] as Array<{ rowId: unknown; element: Record<string, unknown> }>;
+    (lines[1] as { element: Record<string, unknown> }).element["quantity"] = 5;
+    doc["lines"] = [lines[1], { rowId: null, element: { Type: "OrderLineEmbedded", quantity: 3, product: "Doohickey" } }];
+    seen = [];
+    const file = await write("rows.json", doc);
+    // Read pseudonymized, saved without: the surrogates left in it are refused, never written.
+    const mismatched = await cli(["save", "order", "-f", file, "--yes", "--pseudonymize", "off"]);
+    expect(mismatched.code).toBe(ExitCode.Usage);
+    expect(mismatched.err).toContain("is a pseudonym");
+    const r = await cli(["save", "order", "-f", file, "--yes", "--pseudonymize", "heuristic"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const e = saved();
+    expect(e["name"]).toBe("Initech");
+    expect(e["modified"]).toBe(true);
+    expect(e["lines"]).toEqual([
+      { rowId: 2, element: { Type: "OrderLineEmbedded", toStr: "Gadget", modified: true, quantity: 5, product: "Gadget" } },
+      { rowId: null, element: { Type: "OrderLineEmbedded", modified: true, quantity: 3, product: "Doohickey" } },
+    ]);
+  });
+
+  it("a document written before the record changed is a conflict, exit 7, and sends nothing (#117)", async () => {
+    const doc = await got("Order;42");
+    doc["name"] = "Globex";
+    doc["ticks"] = "1";
+    const r = await cli(["save", "order", "-f", await write("stale.json", doc), "--yes"]);
+    expect(r.code).toBe(ExitCode.Concurrency);
+    expect(operationCalls()).toEqual([]);
+  });
+
+  it("takes the record from the document's id, and refuses a different one named beside it", async () => {
+    const doc = { Type: "Order", id: 42, name: "Globex" };
+    const file = await write("plain.json", doc);
+    const r = await cli(["save", "order", "-f", file, "--yes", "--pseudonymize", "off"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const clash = await cli(["save", "order", "43", "-f", file, "--yes"]);
+    expect(clash.code).toBe(ExitCode.Usage);
+    expect(clash.err).toContain("but the command names 43");
+  });
+
+  it("creates a record from a document without an id, as the operation's pack or the bare entity (AC-44.4)", async () => {
+    const pack = { entity: { Type: "Order", id: null, isNew: true, toStr: "", name: "Hooli", customer: "Customer;7" }, canExecute: {} };
+    const r = await cli(["save", "order", "-f", await write("new.json", pack), "--yes"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const e = saved();
+    expect(e).toMatchObject({ Type: "Order", isNew: true, modified: true, name: "Hooli", customer: { EntityType: "Customer", id: 7 } });
+    expect("id" in e).toBe(false);
+  });
+
+  it("refuses to create a record from a pseudonymized document", async () => {
+    const doc = { Type: "Order", id: null, isNew: true, toStr: "toStr-1a2b", name: "name-1a2b" };
+    const r = await cli(["save", "order", "-f", await write("pnew.json", doc), "--yes"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("written pseudonymized");
+    expect(operationCalls()).toEqual([]);
+  });
+
+  it("reads the document from stdin, and refuses two flags that both want it", async () => {
+    const r = await cli(["save", "order", "-f", "-", "--yes", "--pseudonymize", "off"], { stdin: '{"Type":"Order","id":42,"name":"Globex"}' });
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(saved()["name"]).toBe("Globex");
+    const both = await cli(["OrderOperation.Save", "--lite", "-", "-f", "-", "--yes"], { stdin: "Order;42" });
+    expect(both.code).toBe(ExitCode.Usage);
+    expect(both.err).toContain("both read stdin");
+  });
+
+  it("refuses -f where the document would be discarded, or over many records", async () => {
+    const file = await write("d.json", { Type: "Order", id: 42, name: "Globex" });
+    const lite = await cli(["OrderOperation.Ship", "-f", file, "--yes"]);
+    expect(lite.code).toBe(ExitCode.Usage);
+    expect(lite.err).toContain("would be discarded");
+    const many = await cli(["OrderOperation.Save", "--lite", "Order;42", "--lite", "Order;43", "-f", file, "--yes"]);
+    expect(many.code).toBe(ExitCode.Usage);
+    expect(operationCalls()).toEqual([]);
+  });
+
+  it("--explain describes the document's changes without resolving its handles", async () => {
+    const doc = await got("Order;42");
+    doc["name"] = "Globex";
+    const r = await cli(["save", "order", "-f", await write("x.json", doc), "--explain"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(r.out).toContain("with the changes in -f");
+    expect(r.out).not.toContain("Customer;9");
+  });
+
+  it("a missing, unreadable or non-UTF-8 file is a clean usage error naming it", async () => {
+    const missing = await cli(["save", "order", "-f", "/no/such/order.json", "--yes"]);
+    expect(missing.code).toBe(ExitCode.Usage);
+    expect(missing.err).toContain("could not read -f file '/no/such/order.json': no such file");
+    const dir = await cli(["save", "order", "-f", configDir, "--yes"]);
+    expect(dir.err).toContain("it is a directory");
+    const latin1 = join(configDir, "latin1.json");
+    await Bun.write(latin1, new Uint8Array([0x7b, 0x22, 0x6e, 0x22, 0x3a, 0x22, 0xfc, 0x22, 0x7d])); // {"n":"<0xFC>"}
+    const bad = await cli(["save", "order", "-f", latin1, "--yes"]);
+    expect(bad.code).toBe(ExitCode.Usage);
+    expect(bad.err).toContain("is not valid UTF-8");
+    const lites = await cli(["OrderOperation.Approve", "--lite", "@/no/such/list.txt", "--yes"]);
+    expect(lites.err).toContain("could not read --lite file");
+  });
+
+  it("decodes UTF-8 with a byte-order mark, non-ASCII intact", async () => {
+    const file = join(configDir, "bom.json");
+    await Bun.write(file, new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode('{"Type":"Order","id":42,"name":"Müller – Ωmega"}')]));
+    const r = await cli(["save", "order", "-f", `@${file}`, "--yes", "--pseudonymize", "off"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(saved()["name"]).toBe("Müller – Ωmega");
   });
 });

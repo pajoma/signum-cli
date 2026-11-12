@@ -1157,8 +1157,8 @@ describe("query (STORY-20, STORY-21, STORY-22)", () => {
   });
 
   it("combines and/or grouping, --filter-json, and repeated --filter (all ANDed)", async () => {
-    // --filter-json takes a FILE PATH (or `-` for stdin, not yet wired for query) — never
-    // inline JSON text, per design/filter-expression-syntax.md's own examples.
+    // --filter-json takes a FILE PATH (or `-` for stdin, #120) — never inline JSON text, per
+    // design/filter-expression-syntax.md's own examples.
     const filterJsonFile = join(configDir, "filters.json");
     writeFileSync(filterJsonFile, '[{"token":"Entity.Customer.Name","operation":"Contains","value":"Acme"}]');
     const r = await cli([
@@ -1178,6 +1178,21 @@ describe("query (STORY-20, STORY-21, STORY-22)", () => {
       { token: "Total", operation: "GreaterThan", value: 100 },
       { token: "Entity.Customer.Name", operation: "Contains", value: "Acme" },
     ]);
+  });
+
+  it("reads --filter-json - from stdin, as UTF-8 (#120, AC-20.5)", async () => {
+    const r = await cli(["query", "Order", "--filter-json", "-", "--explain"], {
+      stdin: '\uFEFF[{"token":"Entity.Customer.Name","operation":"EqualTo","value":"Müller – Ω"}]',
+    });
+    expect(r.code).toBe(ExitCode.Ok);
+    const doc = JSON.parse(r.out) as { body: { filters: unknown[] } };
+    expect(doc.body.filters).toEqual([{ token: "Entity.Customer.Name", operation: "EqualTo", value: "Müller – Ω" }]);
+  });
+
+  it("refuses --filter-json - when nothing is piped, rather than waiting", async () => {
+    const r = await cli(["query", "Order", "--filter-json", "-", "--explain"]);
+    expect(r.code).toBe(ExitCode.Usage);
+    expect(r.err).toContain("stdin is a terminal");
   });
 
   it("gives a clean UsageError on a --filter-json path that does not exist", async () => {

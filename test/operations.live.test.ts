@@ -23,7 +23,7 @@
  */
 
 import { afterAll, describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { run } from "../src/cli.ts";
@@ -147,6 +147,39 @@ describe.skipIf(!writes)("live writes (#114, #117)", () => {
     // Each write was recorded with its real target and outcome (AC-46.6).
     const log = readFileSync(auditLogPath({ SIGNUM_CONFIG_DIR: configDir } as NodeJS.ProcessEnv), "utf8");
     expect(log).toContain(`"target":"${entity?.type.replace(/Entity$/, "")};${entity?.id}"`);
+  });
+
+  it("-f applies one change from a pseudonymized copy, and nothing else, then restores (#120, AC-32.5)", async () => {
+    const before = await read(entity as { type: string; id: string });
+    const k = wireKey(before as Record<string, unknown>, member as string);
+    const original = (before as Record<string, unknown>)[k];
+    if (!editable(original)) throw new Error(`${member} is not a text value this test can restore`);
+    // The copy a caller edits: pseudonymized, so every value it leaves alone is a surrogate or handle.
+    const got = await cli(["get", key, "-o", "json", "--pseudonymize", "heuristic"]);
+    expect(got.code).toBe(ExitCode.Ok);
+    const doc = JSON.parse(got.out) as Record<string, unknown>;
+    const file = join(configDir, "live-document.json");
+    writeFileSync(file, JSON.stringify(doc));
+
+    const unchanged = await cli([save as string, "-f", file, "--yes", "--pseudonymize", "heuristic"]);
+    expect(unchanged.code).toBe(ExitCode.Usage);
+    expect(unchanged.err).toContain("changes nothing");
+
+    doc[k] = `${original} (signum live -f)`;
+    writeFileSync(file, JSON.stringify(doc));
+    try {
+      const r = await cli([save as string, "-f", file, "--yes", "--pseudonymize", "heuristic"]);
+      expect(r.code).toBe(ExitCode.Ok);
+      const after = await read(entity as { type: string; id: string }) as Record<string, unknown>;
+      expect(after[k]).toBe(`${original} (signum live -f)`);
+      // Only that member changed: none of the copy's surrogates reached the record. `toStr` is the
+      // server's own, derived from the data, so it may follow the change.
+      expect(withoutTicks({ ...after, [k]: original, toStr: before.toStr } as EntityJson)).toBe(withoutTicks(before));
+    } finally {
+      const restore = await cli([save as string, "--lite", key, "--edit", `${member}=${original}`, "--yes"]);
+      expect(restore.code).toBe(ExitCode.Ok);
+    }
+    expect(withoutTicks(await read(entity as { type: string; id: string }))).toBe(withoutTicks(before));
   });
 
   it("an empty required value is refused as a validation error, exit 6 (AC-40.6)", async () => {

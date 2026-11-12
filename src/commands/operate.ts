@@ -22,16 +22,19 @@
 
 import type { Ctx } from "../core/ctx.ts";
 import { flag, opt, optAll } from "../core/ctx.ts";
-import { CliError, ExitCode, InterruptedError, NotFoundError, TransportError, UsageError } from "../core/errors.ts";
-import { fetchEntity, serializeEntity, setMember, type EntityJson, type MemberPath } from "../core/entity.ts";
+import { ConcurrencyError, CliError, ExitCode, InterruptedError, NotFoundError, TransportError, UsageError } from "../core/errors.ts";
+import {
+  applyDocument, asEntity, fetchEntity, markAllModified, serializeEntity, setMember,
+  type DocumentValue, type EntityJson, type MemberPath,
+} from "../core/entity.ts";
 import { assertPermit, confirmMutation, recordMutation, type MutationPermit } from "../core/guard.ts";
 import { loadHandles } from "../core/handles.ts";
-import { inputReader, isIndirect, type InputReader } from "../core/input.ts";
-import { parseLossless } from "../core/json.ts";
-import { loadMetadata, type Metadata } from "../core/metadata.ts";
+import { assertOneStdin, inputReader, isIndirect, type InputReader } from "../core/input.ts";
+import { JsonNumber, parseLossless } from "../core/json.ts";
+import { findType, loadMetadata, type Metadata } from "../core/metadata.ts";
 import { kebab, resolveKey, resolveVerbNoun, type ArgValue, type ResolvedOperation } from "../core/operations.ts";
 import { renderDocument } from "../core/output.ts";
-import { pseudonymizeDocument } from "../core/privacy.ts";
+import { looksLikeSurrogate, pseudonymizeDocument } from "../core/privacy.ts";
 import { isHandle, resolveHandle } from "../core/reidentify.ts";
 import { resolveTarget, type Target } from "../core/target.ts";
 import { nearest, parseLiteKey } from "../core/text.ts";
@@ -241,6 +244,15 @@ interface Plan {
   route: Route;
   args: ArgValue[] | null;
   edits: Edit[];
+  /** `-f`: the document the caller edited, applied to the record as it is when sent (#120). */
+  document: EntityDocument | undefined;
+}
+
+interface EntityDocument {
+  edited: EntityJson;
+  /** Where it came from, for `--explain` and messages: `-f order.json`, `-f - (stdin)`. */
+  source: string;
+  value: DocumentValue;
 }
 
 function routeOf(op: ResolvedOperation, hasTarget: boolean): Route {
@@ -269,19 +281,23 @@ async function plan(ctx: Ctx, md: Metadata, input: InputReader): Promise<Plan | 
       hint: "Run `signum operations` to see the operations and the types they run on.",
     });
   }
-  if (optAll(ctx, "f").length > 0 || optAll(ctx, "filename").length > 0) {
-    throw new UsageError("-f is not supported yet: an entity edited in a file carries no `modified` flags, and the server discards unmarked changes", {
-      hint: "Use --edit Member=value, which marks what changed (AC-31.7). Input from files is #120.",
-    });
-  }
-
+  // Before anything is read: a second reader of stdin must be refused, not fail to parse the first's input.
+  assertOneStdin(["lite", "id", "f", "filename", "setters-json"].flatMap((f) => optAll(ctx, f).map((v) => [f, v] as const)));
+  const document = await readDocument(ctx, md, input);
   const targets = await targetsOf(ctx, input, noun, positionals);
+  if (document !== undefined) adoptDocumentTarget(document, targets, loadHandles(ctx.io.env));
   // A key alone names no type; for a constructor the noun or the key's only type does (AC-44.1).
   const op = isKey
     ? resolveKey(md, command, targets[0]?.type)
     : resolveVerbNoun(md, command, noun as string);
   assertTargetsOfType(op, targets);
+  if (document !== undefined && cleanName(document.edited.Type).toLowerCase() !== cleanName(op.type.name).toLowerCase()) {
+    throw new UsageError(`${document.source} is a ${document.edited.Type}, not a ${op.type.name}`);
+  }
   if (isBulkRequest(ctx, targets.length) || op.info.kind === "ConstructorFromMany") {
+    if (document !== undefined) {
+      throw new UsageError("-f is one record's document; over many records, set values with --edit or --setters-json");
+    }
     if (flag(ctx, "progress")) {
       throw new UsageError("--progress is for one record; over many records each outcome is shown as it arrives", {
         hint: "Drop --progress: a bulk operation already reports record by record.",
@@ -294,9 +310,96 @@ async function plan(ctx: Ctx, md: Metadata, input: InputReader): Promise<Plan | 
   const target = targets[0];
   let route = routeOf(op, target !== undefined);
   const edits = parseEdits(ctx);
-  validateSingle(op, target, route, edits);
-  if (flag(ctx, "progress")) route = progressRoute(op, route, edits);
-  return { op, target, route, args: argsOf(ctx), edits };
+  validateSingle(op, target, route, edits, document);
+  if (flag(ctx, "progress")) route = progressRoute(op, route, edits.length > 0 || document !== undefined);
+  return { op, target, route, args: argsOf(ctx), edits, document };
+}
+
+/**
+ * `-f` / `--filename`: an entity document from a file, `@file` or `-` (#120). It may be the bare
+ * entity, as `get -o json` writes it, or a pack `{entity, canExecute}`, as an operation writes its
+ * result — so a constructor's output can be piped into the Save that stores it.
+ */
+async function readDocument(ctx: Ctx, md: Metadata, input: InputReader): Promise<EntityDocument | undefined> {
+  const given = [...optAll(ctx, "f").map((v) => ["f", v] as const), ...optAll(ctx, "filename").map((v) => ["filename", v] as const)];
+  if (given.length === 0) return undefined;
+  if (given.length > 1) throw new UsageError("-f takes one document");
+  const [flagName, written] = given[0] as readonly [string, string];
+  const source = written === "-" ? `-${flagName.length === 1 ? "" : "-"}${flagName} - (stdin)` : `${flagName.length === 1 ? "-" : "--"}${flagName} ${written.replace(/^@/, "")}`;
+  const text = await input.read(flagName, written, { bare: "path" });
+  let parsed: unknown;
+  try {
+    parsed = parseLossless(text);
+  } catch (err) {
+    throw new UsageError(`${source} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const o = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  const entity = typeof o["Type"] !== "string" && o["entity"] !== null && typeof o["entity"] === "object" ? o["entity"] : parsed;
+  if (entity === null || typeof entity !== "object" || typeof (entity as Record<string, unknown>)["Type"] !== "string") {
+    throw new UsageError(`${source} is not an entity: it needs a "Type"`, { hint: "Write it with `signum get <Type;id> -o json`, then edit it." });
+  }
+  return { edited: asEntity(entity), source, value: documentValue(md, loadHandles(ctx.io.env)) };
+}
+
+/** The record a document names, by its `id`, is the target — and must agree with one named as well. */
+function adoptDocumentTarget(doc: EntityDocument, targets: OperationTarget[], handles: Readonly<Record<string, string>>): void {
+  const id = doc.edited.id;
+  if (id === undefined || id === null || doc.edited.isNew === true) {
+    if (targets.length > 0) throw new UsageError(`${doc.source} is a new record, so it takes no record to run on`);
+    return;
+  }
+  const written = String(id);
+  // `get` writes the id as a handle when it pseudonymizes; it resolves locally like any other.
+  const fromDoc = parseTarget(isHandle(written) ? written : `${cleanName(doc.edited.Type)};${written}`, undefined, handles);
+  const named = targets[0];
+  if (named === undefined) {
+    targets.push(fromDoc);
+    return;
+  }
+  if (targets.length > 1 || recordKey(named.type, named.id) !== recordKey(fromDoc.type, fromDoc.id)) {
+    throw new UsageError(`${doc.source} is ${fromDoc.shown}, but the command names ${named.shown}`, {
+      hint: "Name the record once: the document's id is enough.",
+    });
+  }
+}
+
+/**
+ * How a value from the caller's document goes on the wire. A handle resolves locally to the Lite it
+ * stands for (AC-53.2); a `Type;id` string where the record holds a Lite, or names an entity type,
+ * is that Lite. A string shaped like the surrogate pseudonymization gives that member is refused: it
+ * is a pseudonym the caller copied, not a value, and sending it would write it into the record.
+ * Values inside a new object are judged the same way, each under its own member name.
+ */
+function documentValue(md: Metadata, handles: Readonly<Record<string, string>>): DocumentValue {
+  const one = (v: unknown, key: string, path: string, current: unknown): unknown => {
+    if (typeof v === "string") {
+      if (isHandle(v)) {
+        const real = resolveHandle(v, handles);
+        const lite = parseLiteKey(real);
+        return lite !== undefined ? liteJson({ type: lite.type, id: lite.id, shown: v }) : real;
+      }
+      if (key !== "" && looksLikeSurrogate(v, key)) {
+        throw new UsageError(`${path}: '${v}' is a pseudonym, not a value`, {
+          hint: "The document was written pseudonymized. Leave a value you did not change exactly as it was\n" +
+            "shown, and write a changed one in full; or read the record with --pseudonymize off.",
+        });
+      }
+      const lite = parseLiteKey(v);
+      const isLiteSlot = current !== null && typeof current === "object" && typeof (current as Record<string, unknown>)["EntityType"] === "string";
+      if (lite !== undefined && (isLiteSlot || findType(md, lite.type)?.kind === "Entity")) {
+        return liteJson({ type: lite.type, id: lite.id, shown: v });
+      }
+      return v;
+    }
+    if (Array.isArray(v)) return v.map((x, i) => one(x, key, `${path}.${i}`, undefined));
+    if (v !== null && typeof v === "object" && !(v instanceof JsonNumber)) {
+      const o = v as Record<string, unknown>;
+      return Object.fromEntries(Object.entries(o).map(([k, x]) =>
+        [k, k === "Type" || k === "EntityType" || k === "rowId" ? x : one(x, k, `${path}.${k}`, undefined)]));
+    }
+    return v;
+  };
+  return (v, path, current) => one(v, path.split(".").filter((s) => !/^\d+$/.test(s)).pop() ?? "", path, current);
 }
 
 /**
@@ -306,12 +409,12 @@ async function plan(ctx: Ctx, md: Metadata, input: InputReader): Promise<Plan | 
  * report progress is the application's choice — the web client opts in per operation — so it is the
  * caller's flag here; one that reports none simply finishes.
  */
-function progressRoute(op: ResolvedOperation, route: Route, edits: readonly Edit[]): Route {
+function progressRoute(op: ResolvedOperation, route: Route, edited: boolean): Route {
   if (route !== "executeLite" && route !== "executeEntity") {
     throw new UsageError(`--progress is for an operation that executes on a record; ${op.key} does not`);
   }
-  if (edits.length > 0) {
-    throw new UsageError("--progress sends the record as a Lite, so --edit would be discarded", {
+  if (edited) {
+    throw new UsageError("--progress sends the record as a Lite, so an --edit or -f would be discarded", {
       hint: "Save the edit first, then run the operation with --progress.",
     });
   }
@@ -329,8 +432,20 @@ function assertTargetsOfType(op: ResolvedOperation, targets: OperationTarget[]):
 }
 
 /** A record where the route needs one and none where it takes none; edits only where they are saved. */
-function validateSingle(op: ResolvedOperation, target: OperationTarget | undefined, route: Route, edits: readonly Edit[]): void {
+function validateSingle(
+  op: ResolvedOperation, target: OperationTarget | undefined, route: Route, edits: readonly Edit[], document: EntityDocument | undefined,
+): void {
   const sends = ROUTES[route].sends;
+  if (document !== undefined && target === undefined && sends !== "new") {
+    throw new UsageError(`${document.source} is a new record, and ${op.key} cannot create one`, {
+      hint: "Create it with an operation that may run on a new record, such as the type's Save.",
+    });
+  }
+  if (document !== undefined && !ROUTES[route].takesEdits) {
+    throw new UsageError(`${op.key} does not save the record it is given, so ${document.source} would be discarded`, {
+      hint: "Save a document with an operation that takes the entity, such as its Save.",
+    });
+  }
   if (sends === "type" && target !== undefined) {
     throw new UsageError(`${op.key} constructs from nothing, so it takes no record`, {
       hint: `signum ${kebab(op.info.verb)} ${kebab(op.type.name)}`,
@@ -367,7 +482,9 @@ function operationPath(p: Plan): string {
  */
 function newEntity(p: Plan): EntityJson {
   const members = new Map(p.op.type.members.map((m) => [m.name.toLowerCase(), m.name]));
-  const e: Record<string, unknown> = { Type: cleanName(p.op.type.name), isNew: true, modified: true };
+  const e: Record<string, unknown> = p.document !== undefined
+    ? newFromDocument(p.document)
+    : { Type: cleanName(p.op.type.name), isNew: true, modified: true };
   for (const edit of p.edits) {
     const written = String(edit.path[0]);
     const name = members.get(written.toLowerCase());
@@ -381,14 +498,35 @@ function newEntity(p: Plan): EntityJson {
   return e as EntityJson;
 }
 
+/**
+ * A new record from the caller's document (`-f`, #120): every value translated as for an edit, the
+ * identity and concurrency members dropped, and every entity in it marked, since all of it is new.
+ * A pseudonymized document is refused outright: with no stored record to compare against, its
+ * surrogates cannot be told from values — a number least of all.
+ */
+function newFromDocument(doc: EntityDocument): Record<string, unknown> {
+  const toStr = doc.edited.toStr;
+  if (typeof toStr === "string" && looksLikeSurrogate(toStr, "toStr")) {
+    throw new UsageError(`${doc.source} was written pseudonymized, so its values cannot be told from pseudonyms`, {
+      hint: "A new record has nothing stored to compare with. Write the real values, or produce the\n" +
+        "document with --pseudonymize off (e.g. signum create order --pseudonymize off -o json).",
+    });
+  }
+  const { id: _id, ticks: _ticks, toStr: _toStr, ...rest } = doc.edited as Record<string, unknown>;
+  const e = doc.value(rest, "", undefined) as Record<string, unknown>;
+  return markAllModified({ ...e, Type: doc.edited.Type, isNew: true });
+}
+
 /** `--explain`: the exact request, sending nothing (REQ-053, AC-42.7). */
 function explainPlan(ctx: Ctx, target: Target, p: Plan): ExitCode {
+  const applied = [...(p.document !== undefined ? [`the changes in ${p.document.source}`] : []), ...p.edits.map((e) => e.written)];
   const fetched = (t: OperationTarget | undefined): string =>
-    `${t?.shown}, as fetched from api/entity when sent` +
-    (p.edits.length > 0 ? `, with ${p.edits.map((e) => e.written).join(", ")} applied` : "");
+    `${t?.shown}, as fetched from api/entity when sent` + (applied.length > 0 ? `, with ${applied.join(", ")} applied` : "");
   const sends = ROUTES[p.route].sends;
+  // A new record from a document is described, not shown: shown, its handles would be resolved.
   const body: Record<string, unknown> =
     sends === "type" ? { Type: cleanName(p.op.type.name), args: p.args }
+    : sends === "new" && p.document !== undefined ? { entity: `a new ${p.op.type.name} from ${p.document.source}${p.edits.length > 0 ? `, with ${p.edits.map((e) => e.written).join(", ")}` : ""}`, args: p.args }
     : sends === "new" ? { entity: newEntity(p), args: p.args }
     : sends === "lite" ? { lite: shownTarget(p.target as OperationTarget), args: p.args }
     : { entity: fetched(p.target), args: p.args };
@@ -436,22 +574,38 @@ async function dryRun(ctx: Ctx, target: Target, p: Plan): Promise<ExitCode> {
 }
 
 /** The fetched record with the edits applied, as its `serializeEntity` payload. */
-async function fetchedPayload(target: Target, p: Plan): Promise<string> {
+async function fetchedPayload(ctx: Ctx, target: Target, p: Plan): Promise<string> {
   const t = p.target as OperationTarget;
   // Fetched now, so its `ticks` is the one the server last issued and travels back verbatim as a
   // string: a stale one is the server's concurrency check, never something to refresh away (#117).
   const entity: EntityJson = await fetchEntity(target.http, cleanName(t.type), t.id);
   let changed = false;
+  if (p.document !== undefined) {
+    // The document was written from the record at ITS ticks. If the record changed since, applying
+    // the document would silently undo someone else's change, so it is the conflict it is (#117).
+    const written = p.document.edited.ticks;
+    if (written !== undefined && String(written) !== String(entity.ticks)) {
+      throw new ConcurrencyError(`${t.shown} changed since ${p.document.source} was written; nothing was sent`, {
+        hint: "Read it again, redo the change on the fresh copy, and save that.",
+      });
+    }
+    // Compared with the record as `get` would show it now, under the same policy: what the caller
+    // left alone is recognised as alone whatever surrogate it carries.
+    const shown = pseudonymizeDocument(entity, ctx.privacy).value;
+    changed = applyDocument(entity, shown, p.document.edited, p.document.value).length > 0;
+  }
   for (const e of p.edits) changed = setMember(entity, wirePath(entity, e.path), e.value) || changed;
-  if (p.edits.length > 0 && !changed) {
+  if ((p.edits.length > 0 || p.document !== undefined) && !changed) {
     // Saving nothing is not a save (AC-32.4): say so and send nothing.
-    throw new CliError("every --edit already holds that value; nothing was sent", ExitCode.Usage);
+    throw new CliError(p.document !== undefined
+      ? `${p.document.source} changes nothing in ${t.shown}; nothing was sent`
+      : "every --edit already holds that value; nothing was sent", ExitCode.Usage);
   }
   return serializeEntity(entity).json;
 }
 
 /** The request body for each route. */
-async function body(target: Target, p: Plan): Promise<string> {
+async function body(ctx: Ctx, target: Target, p: Plan): Promise<string> {
   const args = JSON.stringify(p.args);
   switch (ROUTES[p.route].sends) {
     case "type":
@@ -462,7 +616,7 @@ async function body(target: Target, p: Plan): Promise<string> {
     case "lite":
       return JSON.stringify({ lite: liteJson(p.target as OperationTarget), args: p.args });
     case "entity":
-      return `{"entity":${await fetchedPayload(target, p)},"args":${args}}`;
+      return `{"entity":${await fetchedPayload(ctx, target, p)},"args":${args}}`;
   }
 }
 
@@ -480,7 +634,7 @@ async function send(ctx: Ctx, target: Target, p: Plan, permit: MutationPermit): 
     if (!(exists.body === true || exists.body === "true")) throw new NotFoundError(`${t.shown} not found`);
   }
   const res = await target.http.request<unknown>({
-    method: "POST", path: operationPath(p), rawBody: await body(target, p), lossless: true,
+    method: "POST", path: operationPath(p), rawBody: await body(ctx, target, p), lossless: true,
   });
   return res.body;
 }
@@ -575,7 +729,7 @@ async function sendWithProgress(ctx: Ctx, target: Target, p: Plan): Promise<unkn
 function describeResult(ctx: Ctx, p: Plan, pack: unknown): void {
   if (ROUTES[p.route].constructs && !p.op.info.resultIsSaved) {
     ctx.io.err(`note: ${p.op.key} returned a new ${p.op.type.name} that is NOT saved; nothing was stored.\n` +
-      "Saving it needs the entity as input, which is #120.\n");
+      `To store it, pipe it into the Save: … --pseudonymize off -o json | signum save ${kebab(p.op.type.name)} -f - --yes\n`);
   }
   if (p.route === "saveNew") {
     const entity = ((pack ?? {}) as Record<string, unknown>)["entity"];

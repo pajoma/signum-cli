@@ -463,6 +463,17 @@ function canonical(value: unknown): string {
  * `Customer-7f3a`. But when the token IS just `Entity` there is nothing else to fall back to, and
  * the earlier version produced a meaningless `value-7f3a`.
  */
+/**
+ * Whether `value` has the shape of the text surrogate `surrogate` gives `token` — `name-1fd8`. Used
+ * on input (#120): a document a caller edited after reading it pseudonymized still carries the
+ * surrogates of everything they left alone, and sending one back would write a pseudonym into the
+ * record. Numbers are not recognisable this way; they are caught only by comparing with what was shown.
+ */
+export function looksLikeSurrogate(value: string, token: string): boolean {
+  const label = labelFor(token).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${label}-[0-9a-f]{4}$`, "i").test(value);
+}
+
 function labelFor(token: string): string {
   const segments = token.split(".").filter((s) => s !== "");
   const meaningful = segments.filter((s) => s !== ENTITY_SEGMENT);

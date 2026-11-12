@@ -67,6 +67,20 @@ function readPath(flag: string, path: string): string {
   return decodeUtf8(bytes, `${flagName(flag)} file '${path}'`);
 }
 
+/**
+ * Refuse, before reading anything, a command where two flags both ask for stdin. `inputReader`
+ * refuses the second read too, but by then the first has consumed stdin, and an input meant for the
+ * second would be reported as the first's malformed input.
+ */
+export function assertOneStdin(given: ReadonlyArray<readonly [flag: string, value: string]>): void {
+  const readers = given.filter(([, v]) => v === "-").map(([f]) => f);
+  if (readers.length > 1) {
+    throw new UsageError(`${readers.slice(0, -1).map(flagName).join(", ")} and ${flagName(readers.at(-1) as string)} both read stdin, which can be read only once`, {
+      hint: `Give all but one of them a file instead: ${flagName(readers.at(-1) as string)} @<file>.`,
+    });
+  }
+}
+
 /** A reader for one command run. Stdin is claimed by the first flag that reads it. */
 export function inputReader(io: Io): InputReader {
   let stdinFlag: string | undefined;

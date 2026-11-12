@@ -45,6 +45,14 @@ source of truth: a release tag `v<version>` must match it (see the README's rele
     `query -o ndjson`, so a query's answer can be piped into the operation that acts on it.
   - `--progress` runs one record through `executeLiteWithProgress` and shows the server's progress
     (AC-45.2).
+- **Structured input from files and stdin** (#120). `-f <file|@file|->` saves an edited entity
+  document: write it with `signum get Order;42 -o json`, change what you need, and
+  `signum save order -f order.json --yes` applies only what you changed — also to a pseudonymized
+  copy, whose surrogates and handles are recognised and never written back. A document written
+  before the record changed is a conflict (exit 7); one without an id creates a record, so a
+  constructor's output can be piped into the Save that stores it. `--filter-json -` now reads stdin.
+  One reader serves every such flag: UTF-8 whatever the codepage (invalid bytes are refused), a
+  missing file is a usage error naming it, and two flags both reading stdin are refused.
 
 ## 0.2.1 — 2026-10-23
 

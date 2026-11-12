@@ -29,7 +29,7 @@ import {
 import { opt, optAll, flag } from "../core/ctx.ts";
 import { resolveTarget, type Target } from "../core/target.ts";
 import type { SignumHttp } from "../core/http.ts";
-import { readFileSync } from "node:fs";
+import { inputReader, type InputReader } from "../core/input.ts";
 import { countFrom, requestedVariant, runVariant, variantRequest } from "./query-variants.ts";
 
 interface OrderSpec { token: string; orderType: "Ascending" | "Descending" }
@@ -79,24 +79,10 @@ function parsePagination(ctx: Ctx): unknown {
   return { mode: "Firsts", elementsPerPage: 50 };
 }
 
-function readFilterJson(source: string): unknown[] {
-  if (source === "-") {
-    // stdin needs an async read; readFilterJson is called from synchronous request-building.
-    throw new UsageError("--filter-json - (stdin) is not yet wired for query", {
-      hint: "Pass a file path instead: --filter-json filters.json  (or --filter-json @filters.json)",
-    });
-  }
-
-  const path = source.startsWith("@") ? source.slice(1) : source;
-  let text: string;
-  try {
-    text = readFileSync(path, "utf8");
-  } catch (err) {
-    // A bad path must be a clean usage error, not a raw ENOENT stack (found by testing).
-    throw new UsageError(`could not read --filter-json file '${path}'`, {
-      hint: err instanceof Error ? err.message : String(err),
-    });
-  }
+/** `--filter-json <file|@file|->`: read through the one input reader (#120), so `-` is stdin. */
+async function readFilterJson(source: string, input: InputReader): Promise<unknown[]> {
+  // A bare value is a path, as it always was; a bad one is a clean usage error, never a raw ENOENT.
+  const text = await input.read("filter-json", source, { bare: "path" });
 
   let parsed: unknown;
   try {
@@ -144,9 +130,9 @@ const DATA_KIND = "query results";
  * The inputs that can be checked without a server: filters and pagination. Runs before the privacy
  * gate, so a mistake in the caller's own input is reported even under a detected agent.
  */
-function parseLocalInputs(ctx: Ctx): {
+async function parseLocalInputs(ctx: Ctx): Promise<{
   groupEnabled: boolean; dslFilters: FilterWire[]; jsonFilters: FilterWire[]; pagination: unknown;
-} {
+}> {
   // Parse --filter FIRST, before the privacy gate: a syntax error is not data — it is a
   // diagnostic about the agent's OWN input, which it needs to see to correct itself. Gating
   // it behind "refusing to emit data" would hide a parse error from exactly the caller who
@@ -174,7 +160,7 @@ function parseLocalInputs(ctx: Ctx): {
   // behind the privacy gate. It also has to happen before token validation below, since #97 folds
   // the escape hatch's tokens into the same round trip as the DSL's.
   const filterJsonSource = opt(ctx, "filter-json");
-  const jsonFilters = filterJsonSource !== undefined ? (readFilterJson(filterJsonSource) as FilterWire[]) : [];
+  const jsonFilters = filterJsonSource !== undefined ? (await readFilterJson(filterJsonSource, inputReader(ctx.io)) as FilterWire[]) : [];
 
   // Pagination is validated HERE, beside the filter, because it is equally local: `--top abc` is
   // wrong whatever the server says. It used to be parsed while building the request, so an invalid
@@ -401,7 +387,7 @@ export async function runQuery(ctx: Ctx): Promise<ExitCode> {
   }
 
   // Local diagnostics FIRST, before the privacy gate — see parseLocalInputs.
-  const { groupEnabled, dslFilters, jsonFilters, pagination } = parseLocalInputs(ctx);
+  const { groupEnabled, dslFilters, jsonFilters, pagination } = await parseLocalInputs(ctx);
   const variant = requestedVariant(ctx); // REQ-024: --lites / --entities, also local
   const variantCount = variant !== undefined ? countFrom(pagination) : null;
 
