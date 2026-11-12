@@ -163,6 +163,7 @@ deliberate, so that a mistyped command cannot quietly cause damage.
 - AC-46.4: A profile marked *protected* (AC-05.5) requires `--yes` even non-interactively.
 - AC-46.5: Deletes and bulk operations require typed confirmation, not a bare y/n, when the target count exceeds a threshold.
 - AC-46.6: Every mutation is logged locally — operation, target, profile, timestamp, outcome — with no credentials, so an operator can reconstruct what they did.
+- AC-46.7: Under a detected AI caller (STORY-50), a mutation needs its **own** acknowledgement — `--i-understand-an-agent-is-writing` or `SIGNUM_ALLOW_AGENT_WRITES=1` — in addition to `--yes`, and is refused with exit 9 without it. `--yes` is something an agent types, and text planted in a row can talk it into typing it. The data acknowledgement (AC-51.2) does **not** stand in for it: letting a model read pseudonymized rows and letting it change records are different decisions. `--dry-run` and `--explain` need neither. Like every detection-based rule this is a stricter default, not a boundary (AC-50.6); the audit log records the caller context of every attempt.
 
 ---
 

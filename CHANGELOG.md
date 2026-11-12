@@ -24,6 +24,9 @@ source of truth: a release tag `v<version>` must match it (see the README's rele
   - A validation failure is exit 6 with the server's field messages; a stale record is exit 7, with
     `ticks` sent back exactly as fetched; a refusal is exit 4, noting that the API runs only what the
     UI may.
+  - A detected AI agent needs its own acknowledgement to change data,
+    `--i-understand-an-agent-is-writing` or `SIGNUM_ALLOW_AGENT_WRITES=1`, besides `--yes`; the one
+    for reading data does not count. Without it the write is refused with exit 9 (AC-46.7).
   - Construct and delete operations (#118) and bulk operations (#119) are not invokable yet.
 
 ## 0.2.1 — 2026-10-23

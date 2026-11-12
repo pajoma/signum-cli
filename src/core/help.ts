@@ -548,6 +548,8 @@ export const TOPICS: Record<string, string> = {
     "  Confirmation: at a terminal you are asked, naming the operation, the record and",
     "  the application. Without a terminal (a script, an agent) the command FAILS",
     "  unless --yes (-y) is given. Every attempt is logged to <config-dir>/audit.log.",
+    "  A detected AI agent also needs --i-understand-an-agent-is-writing (or",
+    "  SIGNUM_ALLOW_AGENT_WRITES=1). The acknowledgement for reading data does not count.",
     "",
     "  The record:  positional id, --lite \"Type;id\", --id <id>, or a ref_ handle.",
     "  Edits:       --edit Member.Path=value, for an operation that takes the entity",

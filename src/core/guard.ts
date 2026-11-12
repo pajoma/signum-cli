@@ -14,13 +14,18 @@
  *     anything but yes.
  *   - Anywhere else, fail. A script must never hang on a prompt it cannot answer, and must never
  *     mutate by default (STORY-09). An agent is "anywhere else".
+ *   - A detected AI agent also needs its own acknowledgement, `--i-understand-an-agent-is-writing`
+ *     or SIGNUM_ALLOW_AGENT_WRITES=1 (AC-46.7). `--yes` alone is something an agent types, and text
+ *     planted in a row can talk it into typing it. The data acknowledgement does not stand in for
+ *     this one: reading and changing are different decisions. Detection is spoofable, so this is a
+ *     stricter default, not a boundary (AC-50.6).
  */
 
 import { appendFileSync, chmodSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { configDir } from "./config.ts";
 import { flag, type Ctx } from "./ctx.ts";
-import { CliError, ExitCode, UsageError } from "./errors.ts";
+import { CliError, ExitCode, PolicyError, UsageError } from "./errors.ts";
 
 const PERMIT: unique symbol = Symbol("signum.mutationPermit");
 
@@ -45,6 +50,18 @@ export interface MutationDescription {
 /** Ask, or refuse, before anything that changes the application. */
 export async function confirmMutation(ctx: Ctx, m: MutationDescription): Promise<MutationPermit> {
   const permit: MutationPermit = { ...m, [PERMIT]: true };
+
+  // Before --yes, so an agent is told what it is missing whichever flags it passed.
+  if (ctx.caller.context === "agent" && !ctx.args.flags.allowAgentWrites) {
+    throw new PolicyError(`refusing to let a detected AI caller run ${m.operation}`, {
+      hint:
+        "Signals: " + ctx.caller.signals.join("; ") + ".\n" +
+        "Nothing was sent. Changing data from an agent needs its own acknowledgement, separate\n" +
+        "from the one for reading data:\n" +
+        "  --i-understand-an-agent-is-writing   or   SIGNUM_ALLOW_AGENT_WRITES=1\n" +
+        "--dry-run and --explain need neither: they change nothing.",
+    });
+  }
   if (flag(ctx, "yes") || flag(ctx, "y")) return permit;
 
   // A prompt needs a terminal on both ends: one to show it, one to answer it.
@@ -101,6 +118,7 @@ export function recordMutation(
     url: permit.url,
     operation: permit.operation,
     target: permit.realTarget,
+    caller: ctx.caller.context,
     ...(permit.target !== permit.realTarget ? { via: permit.target } : {}),
     ...outcome,
   }) + "\n";

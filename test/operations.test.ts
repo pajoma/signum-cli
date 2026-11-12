@@ -424,12 +424,53 @@ describe("an agent acting through a handle (AC-53.2, AC-53.7)", () => {
   it("resolves the handle locally, gets a pseudonymized result, and the log keeps the real target", async () => {
     const handle = `${HANDLE_PREFIX}bbbbbbbbbbbb`;
     saveHandles({ [handle]: "Order;42" }, { SIGNUM_CONFIG_DIR: configDir } as NodeJS.ProcessEnv);
-    const r = await cli(["OrderOperation.Ship", "--lite", handle, "--yes", "--json"], { env: { CLAUDECODE: "1" } });
+    const r = await cli(["OrderOperation.Ship", "--lite", handle, "--yes", "--i-understand-an-agent-is-writing", "--json"], { env: { CLAUDECODE: "1" } });
     expect(r.code).toBe(ExitCode.Ok);
     expect(operationCalls()[0]?.body).toContain(`"id":42`);
     expect(r.out).not.toContain("Erika Mustermann");
     expect(r.out).not.toContain(`"id": 42`);
     const [line] = readFileSync(auditLogPath({ SIGNUM_CONFIG_DIR: configDir } as NodeJS.ProcessEnv), "utf8").trim().split("\n");
-    expect(JSON.parse(line ?? "{}")).toMatchObject({ target: "Order;42", via: handle });
+    expect(JSON.parse(line ?? "{}")).toMatchObject({ target: "Order;42", via: handle, caller: "agent" });
+  });
+});
+
+/**
+ * A detected agent changes data only with its own acknowledgement (AC-46.7). `--yes` is something an
+ * agent types, and text planted in a row can talk it into typing it.
+ */
+describe("writes by a detected AI agent (AC-46.7)", () => {
+  const agent = { env: { CLAUDECODE: "1" } };
+
+  it("--yes alone is refused with exit 9, naming the acknowledgement, and nothing is sent", async () => {
+    const r = await cli(["OrderOperation.Ship", "--lite", "Order;42", "--yes"], agent);
+    expect(r.code).toBe(ExitCode.Policy);
+    expect(r.err).toContain("--i-understand-an-agent-is-writing");
+    expect(r.err).toContain("CLAUDECODE");
+    expect(operationCalls()).toEqual([]);
+  });
+
+  it("the acknowledgement for reading data does not stand in for it", async () => {
+    const r = await cli(["OrderOperation.Ship", "--lite", "Order;42", "--yes", "--i-understand-data-goes-to-a-model"], agent);
+    expect(r.code).toBe(ExitCode.Policy);
+    expect(operationCalls()).toEqual([]);
+  });
+
+  it("is accepted as the flag or as SIGNUM_ALLOW_AGENT_WRITES=1, still with --yes", async () => {
+    expect((await cli(["OrderOperation.Ship", "--lite", "Order;42", "--yes", "--i-understand-an-agent-is-writing"], agent)).code).toBe(ExitCode.Ok);
+    expect((await cli(["OrderOperation.Ship", "--lite", "Order;42", "--yes"], { env: { CLAUDECODE: "1", SIGNUM_ALLOW_AGENT_WRITES: "1" } })).code).toBe(ExitCode.Ok);
+    // Without --yes it still fails: the acknowledgement is about who, --yes about this command.
+    expect((await cli(["OrderOperation.Ship", "--lite", "Order;42", "--i-understand-an-agent-is-writing"], agent)).code).toBe(ExitCode.Usage);
+    expect(operationCalls()).toHaveLength(2);
+  });
+
+  it("needs nothing for --dry-run or --explain, which change nothing", async () => {
+    canExecute = { "OrderOperation.Ship": null };
+    expect((await cli(["OrderOperation.Ship", "--lite", "Order;42", "--dry-run"], agent)).code).toBe(ExitCode.Ok);
+    expect((await cli(["OrderOperation.Ship", "--lite", "Order;42", "--explain"], agent)).code).toBe(ExitCode.Ok);
+    expect(operationCalls()).toEqual([]);
+  });
+
+  it("does not apply to a script or a person", async () => {
+    expect((await cli(["OrderOperation.Ship", "--lite", "Order;42", "--yes"])).code).toBe(ExitCode.Ok);
   });
 });

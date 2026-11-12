@@ -58,6 +58,12 @@ export interface GlobalFlags {
   /** STORY-51 acknowledgement (AC-51.2). Deliberately unmissable. */
   allowAgentData: boolean;
   /**
+   * A detected agent may CHANGE data (AC-46.7). Separate from `allowAgentData` on purpose: letting a
+   * model read pseudonymized rows and letting it run operations are different decisions, and the
+   * first must not quietly grant the second.
+   */
+  allowAgentWrites: boolean;
+  /**
    * Requested pseudonymization mode (REQ-057). May TIGHTEN freely; loosening under a detected agent
    * needs `allowAgentData` and is logged — see privacy.ts `resolvePolicy` (AC-52.10).
    */
@@ -131,6 +137,7 @@ function emptyFlags(): GlobalFlags {
     callerContext: undefined,
     version: false,
     allowAgentData: false,
+    allowAgentWrites: false,
     pseudonymize: undefined,
     offline: false,
   };
@@ -186,6 +193,7 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
         case "output": case "o": flags.output = parseOutputFormat(value as string); break;
         case "caller-context": flags.callerContext = value; break;
         case "i-understand-data-goes-to-a-model": flags.allowAgentData = true; break;
+        case "i-understand-an-agent-is-writing": flags.allowAgentWrites = true; break;
         case "offline": flags.offline = true; break;
         case "version": flags.version = true; break;
         case "pseudonymize": flags.pseudonymize = value; break;
@@ -217,6 +225,7 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
   }
 
   if (env["SIGNUM_ALLOW_AGENT_DATA"] === "1") flags.allowAgentData = true;
+  if (env["SIGNUM_ALLOW_AGENT_WRITES"] === "1") flags.allowAgentWrites = true;
   if (env["SIGNUM_OFFLINE"] === "1") flags.offline = true;
   if (flags.pseudonymize === undefined) {
     const fromEnv = env["SIGNUM_PSEUDONYMIZE"];
