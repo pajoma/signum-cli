@@ -16,7 +16,7 @@ import {
 } from "./core/help.ts";
 import { runVersion } from "./commands/version.ts";
 import { runAuth } from "./commands/auth.ts";
-import { runDiscover } from "./commands/discover.ts";
+import { describeQuery, runDiscover } from "./commands/discover.ts";
 import { runQuery } from "./commands/query.ts";
 import { runGet } from "./commands/get.ts";
 import { runCache } from "./commands/cache.ts";
@@ -24,7 +24,7 @@ import { runInstance } from "./commands/instance.ts";
 import { assertNoUserInfo, resolveInstance } from "./core/instances.ts";
 import { defaultCredentialUrl } from "./core/credentials.ts";
 import { runUnmask } from "./commands/unmask.ts";
-import { runOperation } from "./commands/operate.ts";
+import { describeOperation, runOperation, type AppHelp } from "./commands/operate.ts";
 import { decodeUtf8 } from "./core/input.ts";
 import { Explained } from "./core/http.ts";
 import type { Ctx, Io } from "./core/ctx.ts";
@@ -151,40 +151,17 @@ async function runParsed(args: ParsedArgs, io: Io): Promise<ExitCode> {
   // privacy.json — and a malformed one printed "warning: could not read …" over plain help.
   // Nothing above this line touches the filesystem.
   if (args.kind === "none" || args.flags.help || args.command === "help") {
-    return showHelp(args, io);
+    // A query or an operation is described from the application too (STORY-61); the rest of help
+    // reads nothing, and only naming a subject makes it look further.
+    const subject = applicationSubject(args);
+    if (subject === undefined) return showHelp(args, io);
+    return await showApplicationHelp(args, io, subject, () => contextFor(args, io, caller, format));
   }
 
   // Before any request is made, so a refused trace never prints a line (#128).
   if (args.flags.verbose) assertMayTrace(caller, args.flags.allowAgentData);
 
-  // After help, which must not read configuration (AC-60.2); before any command reads `url`.
-  if (args.flags.instance !== undefined) args.flags.url = resolveInstance(args.flags.instance, io.env);
-  // --url, SIGNUM_URL and a registered instance alike: a credential in the URL leaks everywhere.
-  if (args.flags.url !== undefined) assertNoUserInfo(args.flags.url);
-
-  // The target, once, before anything that is kept per target is read (#121).
-  const target = args.flags.url ?? defaultCredentialUrl(io.env);
-
-  const privacy = resolvePolicy({
-    callerIsAgent: caller.context === "agent",
-    target,
-    requested: args.flags.pseudonymize !== undefined ? parseMode(args.flags.pseudonymize) : undefined,
-    acknowledged: args.flags.allowAgentData,
-    env: io.env,
-    warn: (line) => io.err(line),
-  });
-
-  const ctx: Ctx = {
-    args,
-    io,
-    target,
-    format,
-    color: colorEnabled(io.stdoutIsTty, args.flags.noColor, io.env),
-    caller,
-    // Pseudonymization active means an agent gets surrogates rather than a refusal (AC-51.4).
-    openData: makeDataOpener(caller, args.flags.allowAgentData, io.out, privacy.mode !== "off"),
-    privacy,
-  };
+  const ctx = contextFor(args, io, caller, format);
 
   switch (args.kind) {
     case "builtin": {
@@ -239,6 +216,92 @@ async function runParsed(args: ParsedArgs, io: Io): Promise<ExitCode> {
   throw new UsageError(`unknown command '${String(args.command)}'`, {
     hint: "Run `signum help` to see available commands.",
   });
+}
+
+/** Everything a command reads: the target, the privacy policy, the data gate. Reads configuration. */
+function contextFor(args: ParsedArgs, io: Io, caller: Ctx["caller"], format: OutputFormat): Ctx {
+  // After help, which must not read configuration (AC-60.2); before any command reads `url`.
+  if (args.flags.instance !== undefined) args.flags.url = resolveInstance(args.flags.instance, io.env);
+  // --url, SIGNUM_URL and a registered instance alike: a credential in the URL leaks everywhere.
+  if (args.flags.url !== undefined) assertNoUserInfo(args.flags.url);
+
+  // The target, once, before anything that is kept per target is read (#121).
+  const target = args.flags.url ?? defaultCredentialUrl(io.env);
+
+  const privacy = resolvePolicy({
+    callerIsAgent: caller.context === "agent",
+    target,
+    requested: args.flags.pseudonymize !== undefined ? parseMode(args.flags.pseudonymize) : undefined,
+    acknowledged: args.flags.allowAgentData,
+    env: io.env,
+    warn: (line) => io.err(line),
+  });
+
+  return {
+    args,
+    io,
+    target,
+    format,
+    color: colorEnabled(io.stdoutIsTty, args.flags.noColor, io.env),
+    caller,
+    // Pseudonymization active means an agent gets surrogates rather than a refusal (AC-51.4).
+    openData: makeDataOpener(caller, args.flags.allowAgentData, io.out, privacy.mode !== "off"),
+    privacy,
+  };
+}
+
+type Subject = { kind: "query"; key: string } | { kind: "operation" };
+
+/** `query <key> --help`, `help query <key>`, or an operation's `--help`: help with an application half. */
+function applicationSubject(args: ParsedArgs): Subject | undefined {
+  if (args.kind === "operation-key" || args.kind === "verb-noun") return { kind: "operation" };
+  const path = args.command === "help" ? args.positionals : [args.command ?? "", ...args.positionals];
+  if (path[0]?.toLowerCase() === "query" && path[1] !== undefined) return { kind: "query", key: path[1] };
+  return undefined;
+}
+
+/**
+ * The static help, then what the application says about the subject (AC-61.1, AC-61.2), from the
+ * cache when it can (AC-61.3). Help never fails for want of an application: without one, or without
+ * the metadata, the static part is printed with one line saying what could not be described and how
+ * to fix it, and the exit is 0 (AC-61.5).
+ */
+async function showApplicationHelp(args: ParsedArgs, io: Io, subject: Subject, context: () => Ctx): Promise<ExitCode> {
+  const asJson = args.flags.output === "json" || args.flags.output === "ndjson";
+  const named = subject.kind === "query" ? `query ${subject.key}` : `${String(args.command)}${args.kind === "verb-noun" && args.positionals[0] !== undefined ? ` ${args.positionals[0]}` : ""}`;
+  let described: AppHelp | undefined;
+  let unavailable: string | undefined;
+  let remedy = "name the application with --url or -i, log in, or run the command online once to fill the cache";
+  try {
+    // Metadata and permission reads only; --explain does not apply to help, which sends no request of its own.
+    args.flags.explain = false;
+    const ctx = context();
+    described = subject.kind === "query" ? await describeQuery(ctx, subject.key) : await describeOperation(ctx);
+  } catch (err) {
+    unavailable = err instanceof Error ? err.message : String(err);
+    // An error that knows its own way out says it; the generic remedy is for a missing application.
+    if (err instanceof CliError && err.hint !== undefined) remedy = err.hint;
+  }
+
+  if (asJson) {
+    const help = staticHelpDocument(subject);
+    renderDocument(
+      { ...help, application: described?.doc ?? null, ...(unavailable !== undefined ? { applicationUnavailable: unavailable } : {}) },
+      { format: args.flags.output as OutputFormat, write: io.out },
+    );
+    return ExitCode.Ok;
+  }
+  showHelp(args, io);
+  if (described !== undefined) io.out(described.text);
+  else io.err(`\nnote: could not describe ${named} for this application: ${unavailable ?? "unknown"}\n${remedy.replace(/\n?$/, "\n")}`);
+  return ExitCode.Ok;
+}
+
+/** The structured static help a subject's JSON help starts from: the query command, or the operations topic. */
+function staticHelpDocument(subject: Subject): Record<string, unknown> {
+  if (subject.kind === "operation") return { schemaVersion: 1, topic: "operations", text: TOPICS["operations"] };
+  const spec = findCommand(["query"]);
+  return { schemaVersion: 1, ...(spec !== undefined ? { command: helpAsJson(spec) } : {}) };
 }
 
 type Handler = (ctx: Ctx, command: string) => Promise<ExitCode> | ExitCode;

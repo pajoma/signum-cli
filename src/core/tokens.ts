@@ -27,6 +27,7 @@
 import type { SignumHttp } from "./http.ts";
 import { CliError, UsageError, ValidationError } from "./errors.ts";
 import { editDistance } from "./text.ts";
+import { saveQueryDescription } from "./metadata-cache.ts";
 
 /** The entity column's token is exactly this (`QueryDescription.cs:17` — `ColumnDescription.Entity`). */
 export const ENTITY_TOKEN = "Entity";
@@ -246,21 +247,34 @@ export function nearestTokens(wanted: string, candidates: readonly QueryTokenInf
 export async function fetchDefaultColumns(
   http: SignumHttp,
   queryKey: string,
+  env?: NodeJS.ProcessEnv,
 ): Promise<QueryTokenInfo[]> {
+  return defaultColumns(descriptionColumns(await fetchQueryDescription(http, queryKey, env)));
+}
+
+/** The description, fetched live; it refreshes the copy help reads offline (AC-61.3). */
+export async function fetchQueryDescription(http: SignumHttp, queryKey: string, env?: NodeJS.ProcessEnv): Promise<unknown> {
   const res = await http.request<unknown>({
     method: "GET",
     path: `api/query/description/${encodeURIComponent(queryKey)}`,
     prepare: true, // the default columns are part of the request being built
   });
+  saveQueryDescription(http.baseUrl, queryKey, res.body, env);
+  return res.body;
+}
 
-  const body = res.body;
+/** Every column a description lists, its two injected pseudo-tokens included. */
+export function descriptionColumns(body: unknown): QueryTokenInfo[] {
   if (body === null || typeof body !== "object") return [];
   const columns = (body as Record<string, unknown>)["columns"];
   if (columns === null || typeof columns !== "object") return [];
+  return Object.values(columns as Record<string, unknown>).map(parseToken).filter((t) => t.fullKey !== "");
+}
 
-  return Object.values(columns as Record<string, unknown>)
-    .map(parseToken)
-    .filter((t) => t.fullKey !== "" && t.fullKey !== ENTITY_TOKEN)
+/** The columns a query shows when none are named: the web client's own rule, quoted above. */
+export function defaultColumns(columns: readonly QueryTokenInfo[]): QueryTokenInfo[] {
+  return columns
+    .filter((t) => t.fullKey !== ENTITY_TOKEN)
     .filter((t) => t.kind !== "Aggregate" && t.kind !== "TimeSeries");
 }
 

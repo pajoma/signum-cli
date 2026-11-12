@@ -81,6 +81,14 @@ source of truth: a release tag `v<version>` must match it (see the README's rele
   At a terminal, a result of 10 000 rows or more is confirmed first (`--yes` skips the question).
   Ctrl-C stops between pages with the output still valid, and exits 130. A result that changes
   while it is paged is reported, since a row may then be missed or repeated.
+- **Help that knows the application** (AC-61.1–61.3, 61.5). `signum query Order --help` adds the
+  query's default columns, the tokens a filter may name and its ordering; `signum ship order --help`
+  adds what the operation runs on, whether `--edit` applies and whether a constructor's result is
+  saved, and with a record named (`ship order 42 --help`) whether this login may run it there.
+  Both read the cache first, so with a warm cache they work offline; query descriptions are now
+  cached too, and `cache show` and `cache clear` include them. Without an application, help prints
+  as before plus one note saying why it could not describe the subject, and exits 0. `explain
+  <OperationKey>` prints the same description and no longer says operations are m2.
 
 ## 0.2.1 — 2026-10-23
 

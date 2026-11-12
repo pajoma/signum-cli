@@ -329,6 +329,11 @@ export interface LoadMetadataOptions {
   http: SignumHttp;
   /** Skip the network entirely and use whatever is cached. */
   offline?: boolean;
+  /**
+   * A cached document is answer enough, and the network is asked only when there is none: help
+   * (AC-61.3), which must work offline with a warm cache and is no reason to wait for a server.
+   */
+  preferCache?: boolean;
   env?: NodeJS.ProcessEnv;
   warn?: (line: string) => void;
 }
@@ -339,7 +344,7 @@ export async function loadMetadata(opts: LoadMetadataOptions): Promise<Metadata>
   const authenticated = opts.http.hasToken;
   const cached = loadMetadataCache(opts.url, authenticated, opts.env);
 
-  if (opts.offline === true) {
+  if (opts.offline === true || (opts.preferCache === true && cached !== undefined)) {
     if (cached === undefined) {
       throw new CliError("no cached metadata for this target", ExitCode.Transport, {
         hint: "Run a command online once to populate the cache.",

@@ -14,14 +14,19 @@ import { ExitCode, UsageError } from "../core/errors.ts";
 import { listingShape, renderDocument, renderListing } from "../core/output.ts";
 import { isBuiltIn } from "../core/args.ts";
 import {
-  anonymousViewNote, findType, hidesEntities, isEntityTypeInfo, loadMetadata, queryableTypes, queryDenied, TYPE_KINDS,
-  unknownTypeError, type Metadata, type OperationInfo, type TypeInfo,
+  anonymousViewNote, findType, hidesEntities, isEntityTypeInfo, loadMetadata, queryableTypes, queryDenied, resolveQueryKey,
+  TYPE_KINDS, unknownTypeError, type Metadata, type OperationInfo, type TypeInfo,
 } from "../core/metadata.ts";
+import { loadQueryDescription } from "../core/metadata-cache.ts";
+import { operationFacts, type AppHelp } from "./operate.ts";
 import { loginCommand } from "../core/handoff.ts";
 import { flag, opt } from "../core/ctx.ts";
 import { resolveTarget } from "../core/target.ts";
 import { sensitivity } from "../core/privacy.ts";
-import { fetchSubTokens, validateTokens, type QueryTokenInfo } from "../core/tokens.ts";
+import {
+  defaultColumns, descriptionColumns, fetchQueryDescription, fetchSubTokens, filterUnusableReason, validateTokens,
+  type QueryTokenInfo,
+} from "../core/tokens.ts";
 
 async function metadata(ctx: Ctx): Promise<Metadata> {
   const target = resolveTarget(ctx);
@@ -228,23 +233,80 @@ async function tryFetchQueryTokens(
 }
 
 function explainOperation(ctx: Ctx, t: TypeInfo, op: OperationInfo): ExitCode {
-  const shadowed = isBuiltIn(op.verb.toLowerCase());
+  // The same description `<verb> <Type> --help` prints (AC-61.2), so the two cannot disagree.
+  const facts = operationFacts({ key: op.key, type: t, info: op });
   if (ctx.format === "json" || ctx.format === "ndjson") {
-    renderDocument(
-      { kind: "operation", key: op.key, verb: op.verb, type: t.name,
-        command: `signum ${kebab(op.verb)} ${kebab(t.name)}`, shadowed, niceName: op.niceName ?? null,
-        invocable: false, note: "invoking operations is m2" },
-      { format: ctx.format, write: ctx.io.out },
-    );
+    renderDocument(facts.doc, { format: ctx.format, write: ctx.io.out });
     return ExitCode.Ok;
   }
-  ctx.io.out(`${op.key}  (operation on ${t.name})\n`);
-  if (op.niceName !== undefined) ctx.io.out(`  ${op.niceName}\n`);
-  ctx.io.out(`\n  invoke as:  signum ${kebab(op.verb)} ${kebab(t.name)}  (m2)\n`);
-  if (shadowed) {
-    ctx.io.out(`  NOTE: verb '${op.verb.toLowerCase()}' is shadowed by a built-in; use the canonical key.\n`);
-  }
+  ctx.io.out(facts.text);
   return ExitCode.Ok;
+}
+
+/**
+ * `signum query <key> --help` (AC-61.1, AC-61.3): the query's columns, its ordering, and the tokens a
+ * filter may use. Reflection and the query's description both come from the cache when it has them,
+ * so a query that has run once is described offline; the description is fetched live otherwise, and
+ * that needs a login (QueryController is not anonymous). A failure is the caller's to degrade.
+ */
+export async function describeQuery(ctx: Ctx, queryKey: string): Promise<AppHelp> {
+  const target = resolveTarget(ctx);
+  const md = await loadMetadata({
+    url: target.url, http: target.http, offline: ctx.args.flags.offline, preferCache: true,
+    env: ctx.io.env, warn: (line) => ctx.io.err(line),
+  });
+  const type = resolveQueryKey(md, queryKey);
+  const cached = loadQueryDescription(target.url, type.name, ctx.io.env) ?? loadQueryDescription(target.url, queryKey, ctx.io.env);
+  if (cached === undefined && ctx.args.flags.offline) {
+    throw new UsageError(`--offline, and the columns of ${type.name} are not cached yet`, {
+      hint: `Run \`signum query ${type.name} --top 1\` online once; its description is kept.`,
+    });
+  }
+  const columns = descriptionColumns(cached !== undefined ? cached.payload : await fetchQueryDescription(target.http, type.name, ctx.io.env));
+  const shown = defaultColumns(columns);
+  const filterable = columns.filter((c) => c.kind !== "TimeSeries" && filterUnusableReason(c) === undefined);
+
+  const origin = [
+    md.origin.fromCache ? `metadata cached ${md.origin.fetchedAt}` : "",
+    cached !== undefined ? `columns cached ${cached.fetchedAt}` : "",
+  ].filter((x) => x !== "").join(", ");
+  const table = (rows: ReadonlyArray<readonly [string, string]>): string[] => {
+    const w = Math.max(0, ...rows.map(([a]) => a.length));
+    return rows.map(([a, b]) => `  ${a.padEnd(w)}  ${b}`.trimEnd());
+  };
+  const text = [
+    "",
+    `${type.name.toUpperCase()} IN THIS APPLICATION${origin !== "" ? `  (${origin})` : ""}`,
+    ...(type.niceName !== undefined ? [`  ${type.niceName}`] : []),
+    "",
+    "COLUMNS  shown when no --column is given; --column replaces them",
+    ...table(shown.map((c) => [c.fullKey, c.type ?? ""])),
+    "",
+    `FILTER TOKENS  for --filter and --order; \`signum explain ${type.name}.<token>\` walks deeper`,
+    ...table(filterable.map((c) => [c.fullKey, [c.type ?? "", c.kind === "Aggregate" ? "with --group only" : ""].filter((x) => x !== "").join(", ")])),
+    "",
+    "ORDERING",
+    "  The query sets none, and the server adds none: rows come in the database's order unless",
+    "  --order is given. --page and --all order by key as well, so pages do not overlap.",
+    "",
+  ].join("\n");
+  return {
+    doc: {
+      kind: "query", queryKey: type.name, niceName: type.niceName ?? null,
+      columns: shown.map((c) => ({ token: c.fullKey, niceName: c.niceName ?? null, type: c.type ?? null })),
+      filterTokens: filterable.map((c) => ({
+        token: c.fullKey, type: c.type ?? null, filterType: c.filterType ?? null, groupOnly: c.kind === "Aggregate",
+      })),
+      ordering: null,
+      orderingNote: "The query sets none; --page and --all order by key.",
+      source: {
+        url: md.origin.url,
+        metadataCachedAt: md.origin.fromCache ? md.origin.fetchedAt : null,
+        columnsCachedAt: cached?.fetchedAt ?? null,
+      },
+    },
+    text,
+  };
 }
 
 /**

@@ -34,6 +34,7 @@ import { JsonNumber, parseLossless } from "../core/json.ts";
 import { findType, loadMetadata, type Metadata } from "../core/metadata.ts";
 import { kebab, resolveKey, resolveVerbNoun, type ArgValue, type ResolvedOperation } from "../core/operations.ts";
 import { renderDocument } from "../core/output.ts";
+import { isBuiltIn } from "../core/args.ts";
 import { looksLikeSurrogate, pseudonymizeDocument } from "../core/privacy.ts";
 import { isHandle, resolveHandle } from "../core/reidentify.ts";
 import { resolveTarget, type Target } from "../core/target.ts";
@@ -798,4 +799,125 @@ export async function runOperation(ctx: Ctx): Promise<ExitCode> {
   describeResult(ctx, p, pack);
   renderPack(ctx, pack);
   return ExitCode.Ok;
+}
+
+/** A section of help only this application can supply (STORY-61), in both renderings. */
+export interface AppHelp {
+  doc: Record<string, unknown>;
+  text: string;
+}
+
+/**
+ * What metadata says about an operation: what it runs on, where it is sent, what it takes. The one
+ * description `explain <OperationKey>` and `<verb> <Type> --help` both print (AC-61.2).
+ */
+export function operationFacts(op: ResolvedOperation): AppHelp {
+  const { info, type } = op;
+  const kind = info.kind ?? "Execute";
+  const many = kind === "ConstructorFromMany";
+  const route = many ? undefined : routeOf(op, true);
+  const runsOn = many ? "many" : route === "construct" ? "none" : ROUTES[route as Route].sends === "entity" ? "entity" : "lite";
+  const endpoint = many ? "constructFromMany" : ROUTES[route as Route].endpoint;
+  const takesEdits = route !== undefined && ROUTES[route].takesEdits;
+  const createsWithoutRecord = kind === "Execute" && info.canBeModified && info.canBeNew;
+  const destructive = kind === "Delete";
+  const shadowed = isBuiltIn(info.verb.toLowerCase());
+  const command = `signum ${kebab(info.verb)} ${kebab(type.name)}`;
+  const record = runsOn === "none" ? "" : runsOn === "many" ? " 42 43" : " 42";
+  const usage = shadowed ? `signum ${info.key}${record === "" ? "" : ` --lite "${type.name};42"`}` : `${command}${record}`;
+
+  const target = {
+    entity: `a record, sent whole (api/operation/${endpoint})\n              fetched first, so --edit and -f change it on the way`,
+    lite: `a record, sent as its identity only (api/operation/${endpoint})`,
+    none: `no record: it builds a new ${type.name} (api/operation/construct)`,
+    many: `several records at once, which it builds one new entity from (api/operation/constructFromMany)`,
+  }[runsOn];
+  const lines = [
+    `${info.key}  (${kind} on ${type.name})${info.niceName !== undefined ? `  ${info.niceName}` : ""}`,
+    "",
+    `  run as:     ${usage}`,
+    ...(shadowed ? [`              '${info.verb.toLowerCase()}' is shadowed by a built-in command; only the canonical key reaches it`] : []),
+    `  runs on:    ${target}`,
+    ...(createsWithoutRecord ? ["              with no record named it creates one, from --edit values"] : []),
+    ...(runsOn === "entity" || runsOn === "lite"
+      ? [`              several records: one ${destructive ? "deleteMultiple" : kind === "Execute" ? "executeMultiple" : "constructFromMultiple"} request, one outcome each`]
+      : []),
+    `  edits:      ${takesEdits ? "--edit Member=value and -f apply, and only to what changed" : "none: it does not save the record it is given, so --edit is refused"}`,
+    "  arguments:  the application does not declare them; Signum passes an untyped list the",
+    "              operation reads by position. --arg, --arg-string, --arg-lite and --arg-json",
+    "              build it in the order typed (`signum help operations`).",
+    ...(destructive ? ["  deletes:    it cannot be undone; the confirmation says so"] : []),
+    ...(ROUTES[route as Route]?.constructs === true || many
+      ? [`  result:     ${info.resultIsSaved ? "saved by the operation" : "NOT saved: run the type's Save on it to keep it"}`]
+      : []),
+  ];
+  return {
+    doc: {
+      kind: "operation", key: info.key, verb: info.verb, type: type.name, niceName: info.niceName ?? null,
+      operationType: kind, runsOn, endpoint: `api/operation/${endpoint}`, takesEdits, createsWithoutRecord,
+      destructive, shadowed, command: shadowed ? `signum ${info.key}` : command, example: usage,
+      arguments: null,
+      argumentsNote: "Signum does not describe an operation's arguments; it reads an untyped list by position.",
+      ...(ROUTES[route as Route]?.constructs === true || many ? { resultIsSaved: info.resultIsSaved } : {}),
+    },
+    text: lines.join("\n") + "\n",
+  };
+}
+
+/**
+ * `signum ship order [42] --help` (AC-61.2): the operation as this application describes it, and,
+ * for a record named, whether this login may run it there and why not — the `--dry-run` question,
+ * asked of the same entity pack. Metadata comes from the cache when there is one (AC-61.3).
+ */
+export async function describeOperation(ctx: Ctx): Promise<AppHelp> {
+  const isKey = ctx.args.kind === "operation-key";
+  const command = String(ctx.args.command);
+  const noun = isKey ? undefined : ctx.args.positionals[0];
+  if (!isKey && noun === undefined) {
+    throw new UsageError(`'${command}' names no type`, { hint: `Name one: signum ${command} <Type> --help` });
+  }
+  const target = resolveTarget(ctx);
+  const md = await loadMetadata({
+    url: target.url, http: target.http, offline: ctx.args.flags.offline, preferCache: true,
+    env: ctx.io.env, warn: (l) => ctx.io.err(l),
+  });
+  const targets = await targetsOf(ctx, inputReader(ctx.io), noun, isKey ? ctx.args.positionals : ctx.args.positionals.slice(1));
+  const op = isKey ? resolveKey(md, command, targets[0]?.type) : resolveVerbNoun(md, command, noun as string);
+  assertTargetsOfType(op, targets);
+  const facts = operationFacts(op);
+  const from = md.origin.fromCache ? `  (metadata cached ${md.origin.fetchedAt})` : "";
+
+  // Permission is per record; reflection lists only what this login may run at all (#112).
+  const named = targets[0];
+  // As the caller wrote it when that was a handle, which must not be resolved in output; else as Type;id.
+  const record = named === undefined ? undefined
+    : { ...named, shown: isHandle(named.shown) ? named.shown : `${cleanName(named.type)};${named.id}` };
+  let permitted: Record<string, unknown>;
+  if (record === undefined) {
+    const constructs = op.info.kind === "Constructor";
+    permitted = {
+      permission: null,
+      permissionNote: constructs
+        ? "Listed only for a login that may run it; the server checks the rest when it runs."
+        : `Whether this login may run it depends on the record: name one (signum ${kebab(op.info.verb)} ${kebab(op.type.name)} 42 --help), or use --dry-run.`,
+    };
+  } else if (ctx.args.flags.offline || target.tokenSource === "none") {
+    permitted = {
+      permission: null,
+      permissionNote: ctx.args.flags.offline
+        ? `Not asked for ${record.shown}: --offline, and permission is a live question.`
+        : `Not asked for ${record.shown}: that needs a login.`,
+    };
+  } else {
+    const verdict = permission(await packCanExecute(target, record), op.key);
+    permitted = { permission: { record: record.shown, permitted: verdict.ok, ...(verdict.reason !== undefined ? { reason: verdict.reason } : {}) } };
+  }
+  const p = permitted["permission"] as { record: string; permitted: boolean; reason?: string } | null;
+  const permissionLine = p === null
+    ? `  permission: ${String(permitted["permissionNote"])}`
+    : `  permission: on ${p.record}, ${p.permitted ? "permitted for this login" : `not permitted — ${p.reason ?? ""}`}`;
+  return {
+    doc: { ...facts.doc, ...permitted, source: { url: md.origin.url, metadataCachedAt: md.origin.fromCache ? md.origin.fetchedAt : null } },
+    text: `\n${op.type.name.toUpperCase()} IN THIS APPLICATION${from}\n\n${facts.text}${permissionLine}\n`,
+  };
 }

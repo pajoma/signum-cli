@@ -389,14 +389,16 @@ describe("executing an operation (STORY-40, #114)", () => {
     expect(operationCalls()[0]?.path).toBe("/api/operation/executeLite/OrderOperation.Get");
   });
 
-  it("answers `<verb> <Type> --help` with the operations help, sending nothing", async () => {
-    const r = await cli(["ship", "order", "--help"]);
+  it("answers `<verb> <Type> --help` with the operations help and the operation itself, running nothing", async () => {
+    const r = await cli(["approve", "order", "--help"]);
     expect(r.code).toBe(ExitCode.Ok);
     expect(r.out).toContain("OPERATIONS");
     expect(r.out).toContain("--dry-run");
-    expect(seen).toEqual([]);
+    expect(r.out).toContain("ORDER IN THIS APPLICATION");
+    expect(r.out).toContain("OrderOperation.Approve  (Execute on Order)");
+    expect(r.out).toContain("runs on:    a record, sent as its identity only (api/operation/executeLite)");
+    expect(seen.map((x) => x.path)).toEqual(["/api/reflection/types"]);
   });
-
 
   it("--explain prints the exact request and sends nothing (AC-42.7)", async () => {
     const r = await cli(["OrderOperation.Ship", "--lite", "Order;42", "--arg-string", "x", "--explain"]);
@@ -406,6 +408,58 @@ describe("executing an operation (STORY-40, #114)", () => {
     expect(doc.body).toEqual({ lite: { EntityType: "Order", id: 42 }, args: ["x"] });
     expect(operationCalls()).toEqual([]);
   });
+});
+
+describe("help that knows the operation (AC-61.2, AC-61.5)", () => {
+  it("says what a Save takes: the record whole, edits, and a new one without a record", async () => {
+    const r = await cli(["save", "order", "--help"]);
+    expect(r.out).toContain("a record, sent whole (api/operation/executeEntity)");
+    expect(r.out).toContain("with no record named it creates one");
+    expect(r.out).toContain("edits:      --edit Member=value and -f apply");
+    expect(r.out).toContain("the application does not declare them");
+  });
+
+  it("names a constructor's target as none, and whether its result is saved", async () => {
+    const r = await cli(["OrderOperation.Create", "--help"]);
+    expect(r.out).toContain("runs on:    no record: it builds a new Order (api/operation/construct)");
+    expect(r.out).toContain("NOT saved");
+    const generate = await cli(["OrderOperation.Generate", "--help"]);
+    expect(generate.out).toContain("result:     saved by the operation");
+  });
+
+  it("for a record named, asks the entity pack whether this login may, and why not", async () => {
+    canExecute = { "OrderOperation.Approve": "Already approved" };
+    const r = await cli(["approve", "order", "42", "--help", "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const doc = JSON.parse(r.out) as { topic: string; application: Record<string, unknown> };
+    expect(doc.topic).toBe("operations");
+    expect(doc.application).toMatchObject({
+      key: "OrderOperation.Approve", runsOn: "lite", takesEdits: false,
+      permission: { record: "Order;42", permitted: false, reason: "Already approved" },
+    });
+    expect(seen.map((x) => x.path)).toEqual(["/api/reflection/types", "/api/entityPack/Order/42"]);
+  });
+
+  it("with a warm cache works offline, saying so; a shadowed verb names the key", async () => {
+    await cli(["types"]); // fills the cache
+    seen = [];
+    const r = await cli(["OrderOperation.Get", "--help", "--offline"]);
+    expect(r.out).toContain("metadata cached");
+    expect(r.out).toContain("shadowed by a built-in command");
+    expect(seen).toEqual([]);
+  });
+
+  it("degrades to the static help and one line when it cannot describe it, exit 0", async () => {
+    const ambiguous = await cli(["ship", "order", "--help"]);
+    expect(ambiguous.code).toBe(ExitCode.Ok);
+    expect(ambiguous.out).toContain("OPERATIONS");
+    expect(ambiguous.err).toContain("could not describe ship order");
+    expect(ambiguous.err).toContain("Name it by its canonical key");
+    const nowhere = await cli(["approve", "order", "--help"], { env: { SIGNUM_URL: "" } });
+    expect(nowhere.code).toBe(ExitCode.Ok);
+    expect(nowhere.err).toContain("no target application specified");
+  });
+
 });
 
 describe("the destructive-action guard (STORY-46, #113)", () => {

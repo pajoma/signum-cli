@@ -230,6 +230,8 @@ export const COMMANDS: CommandSpec[] = [
       "is complete for you, not necessarily for the database (AC-08.6). A page that is not the " +
       "whole result says so on stderr in every format (\"50 of 56 rows visible to you\"), and " +
       "stdout carries only the rows (AC-21.5).\n\n" +
+      "`signum query <key> --help` adds what this application says about that query: its default " +
+      "columns, the tokens a filter may name, and its ordering, from the cache when it has them.\n\n" +
       "--all fetches the result a page at a time and writes each page as it arrives, so nothing " +
       "holds the whole result. At a terminal, more than 10000 rows are confirmed first. Ctrl-C " +
       "stops between pages and closes the output, so what was written stays valid (exit 130).",
@@ -349,7 +351,8 @@ export const COMMANDS: CommandSpec[] = [
     milestone: "m1",
     description:
       "Discovery, dynamic help and pre-flight query validation all read a cached copy of " +
-      "api/reflection/types. This command makes that cache visible and removable — with " +
+      "api/reflection/types, and help reads each query's cached description too (kept whenever " +
+      "a query fetches it). This command makes that cache visible and removable — with " +
       "--offline it is the only thing the CLI will read.\n\n" +
       "Anonymous and authenticated documents are cached separately: reflection answers depend " +
       "on who is asking, so one fetched before login reports nothing as queryable.",
@@ -567,6 +570,10 @@ export const TOPICS: Record<string, string> = {
     "    signum save order --edit Name=Acme --yes        a new record, by its Save",
     "    signum create order --yes                       a constructor operation",
     "    signum delete order 42 --yes",
+    "",
+    "  `signum ship order --help` adds what this application says about that operation:",
+    "  what it runs on, whether --edit applies, and with a record named (ship order 42",
+    "  --help) whether this login may run it there.",
     "",
     "  Verbs and types are case-insensitive and kebab-tolerant. A verb a built-in",
     "  shadows (get, query, …) is reachable only by its canonical key. An ambiguous",

@@ -293,7 +293,7 @@ async function planColumns(
     // --group is excluded: a grouped query's columns are the grouping keys plus aggregates, which
     // only the caller can choose. Defaulting them would invent a query nobody asked for.
     try {
-      const defaults = await fetchDefaultColumns(http, queryKey);
+      const defaults = await fetchDefaultColumns(http, queryKey, ctx.io.env);
       idTypes = idColumnTypes(defaults);
       // The description already carries each column's filterType, so --resolve is free here.
       if (resolveLites) {
