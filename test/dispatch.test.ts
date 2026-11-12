@@ -5,11 +5,20 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { BUILT_INS, builtInsSatisfyDispatchInvariant, flagCheckPath, flagSetsAreDisjoint, parseArgs } from "../src/core/args.ts";
-import { COMMANDS, GLOBAL_FLAGS } from "../src/core/help.ts";
+import {
+  BUILT_INS, builtInsSatisfyDispatchInvariant, declaredFlagsFor, flagCheckPath, flagSetsAreDisjoint, parseArgs,
+} from "../src/core/args.ts";
+import { allFlagSpecs, COMMANDS, GLOBAL_FLAGS } from "../src/core/help.ts";
 import { HANDLERS } from "../src/cli.ts";
 import { flag, optAll, type Ctx } from "../src/core/ctx.ts";
 import { detectCallerContext } from "../src/core/caller.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { emitData } from "../src/core/emit.ts";
+import { loadHandles } from "../src/core/handles.ts";
+import { unsafeDataWriter } from "../src/core/policy.ts";
+import { resolvePolicy } from "../src/core/privacy.ts";
 
 describe("dispatch invariant", () => {
   it("no built-in contains a dot — rule 1 depends on it", () => {
@@ -22,6 +31,21 @@ describe("dispatch invariant", () => {
 
   it("a flag cannot both require a value and be boolean-only", () => {
     expect(flagSetsAreDisjoint()).toBe(true);
+  });
+
+  // The parser learns each flag's arity from its FlagSpec, so no second list can drift (audit, R3).
+  it("parses every declared flag with the arity its FlagSpec gives it", () => {
+    // The globals the parser peels into typed fields are checked by their own tests.
+    for (const f of allFlagSpecs().filter((g) => !GLOBAL_FLAGS.includes(g))) {
+      for (const name of [f.name, ...(f.alias !== undefined ? [f.alias] : [])]) {
+        const dash = name.length === 1 ? "-" : "--";
+        const parsed = parseArgs(["query", "Order", `${dash}${name}`, "x"], {});
+        if (f.arg !== undefined) expect([name, parsed.options.get(name)]).toEqual([name, ["x"]]);
+        else expect([name, parsed.booleans.has(name), parsed.positionals]).toEqual([name, true, ["Order", "x"]]);
+      }
+    }
+    // `--pack=true` used to land among the values, where `flag()` never looks, and was ignored.
+    expect(parseArgs(["get", "Order", "42", "--pack=true"], {}).booleans.has("pack")).toBe(true);
   });
 
   // #124: the help tree, the built-in list and the dispatcher must name the same commands, or a
@@ -234,18 +258,51 @@ describe("the sensitivity decision has exactly one home", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("both data paths persist minted handles before emitting", async () => {
+  it("data leaves a command only through emit.ts, which keeps handles before writing and discloses after", async () => {
     // A handle printed but not stored is permanently unresolvable, and we would have caused it
-    // (AC-53.5). The mapping now rides on the result rather than an optional parameter, but nothing
-    // stops a caller from ignoring it — so assert that neither does.
-    for (const path of ["src/commands/query.ts", "src/commands/get.ts"]) {
-      expect(await Bun.file(path).text()).toContain("persistHandles(ctx,");
+    // (AC-53.5). emit.ts holds the order; a command that persisted or disclosed on its own would be
+    // a second, unchecked copy of it (architecture audit, R3).
+    for (const file of new Bun.Glob("src/commands/*.ts").scanSync()) {
+      const text = await Bun.file(file).text();
+      expect([file, text.includes("persistHandles(")]).toEqual([file, false]);
+      expect([file, text.includes("disclosure(")]).toEqual([file, false]);
+    }
+
+    const dir = mkdtempSync(join(tmpdir(), "signum-emit-"));
+    const env = { SIGNUM_CONFIG_DIR: dir } as NodeJS.ProcessEnv;
+    const order: string[] = [];
+    const ctx = {
+      io: { env, err: (s: string) => order.push(`err:${s.trim().split("\n")[0]}`) },
+      target: "https://app.example",
+      privacy: resolvePolicy({ callerIsAgent: true, acknowledged: false, target: "https://app.example", env }),
+      openData: () => unsafeDataWriter((s) => order.push(`out:${s}`), "test sink"),
+    } as unknown as Ctx;
+    emitData(ctx, "test data", { handles: { ref_aaaaaaaaaaaa: "Order;42" }, pseudonymized: ["Name"] }, (out) => {
+      order.push(`stored:${loadHandles(env, "https://app.example")["ref_aaaaaaaaaaaa"] ?? "missing"}`);
+      out("row");
+    });
+    expect(order[0]).toBe("stored:Order;42");
+    expect(order[1]).toBe("out:row");
+    expect(order[2]).toStartWith("err:note: pseudonymized");
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("the parsed arguments stay as typed (architecture audit)", () => {
+  it("only the parser writes to args.flags; a resolved target goes into the context", async () => {
+    for (const file of new Bun.Glob("src/**/*.ts").scanSync()) {
+      if (file.endsWith("core/args.ts")) continue;
+      const writes = (await Bun.file(file).text()).match(/args\.flags\.[A-Za-z]+\s*=[^=]/g) ?? [];
+      expect([file, writes]).toEqual([file, []]);
     }
   });
 });
 
 describe("flag accessors (#124)", () => {
-  const ctxFor = (argv: string[]) => ({ args: parseArgs(argv, {}) }) as unknown as Ctx;
+  const ctxFor = (argv: string[]) => {
+    const args = parseArgs(argv, {});
+    return { args, declaredFlags: declaredFlagsFor(args) } as unknown as Ctx;
+  };
 
   it("read a declared flag normally", () => {
     expect(optAll(ctxFor(["query", "Order", "--filter", "Id > 1"]), "filter")).toEqual(["Id > 1"]);

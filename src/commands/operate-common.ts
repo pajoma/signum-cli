@@ -6,15 +6,16 @@
  * for both at once (Brooks review of #162).
  */
 
+import { emitData } from "../core/emit.ts";
 import type { Ctx } from "../core/ctx.ts";
 import { flag, optAll } from "../core/ctx.ts";
 import { CliError, ExitCode, NotAuthorizedError, NotFoundError, UsageError } from "../core/errors.ts";
 import { asEntity, type MemberPath } from "../core/entity.ts";
-import { loadHandles, persistHandles } from "../core/handles.ts";
+import { loadHandles } from "../core/handles.ts";
 import { JsonNumber } from "../core/json.ts";
 import { encodeArgs, type ArgValue } from "../core/operations.ts";
 import { renderDataDocument } from "../core/output.ts";
-import { disclosure, pseudonymizeDocument } from "../core/privacy.ts";
+import { pseudonymizeDocument } from "../core/privacy.ts";
 import { isHandle } from "../core/reidentify.ts";
 import type { Target } from "../core/target.ts";
 
@@ -111,13 +112,8 @@ export function renderPack(ctx: Ctx, pack: unknown): void {
   const o = (pack ?? {}) as Record<string, unknown>;
   const entity = o["entity"] !== undefined && o["entity"] !== null ? asEntity(o["entity"]) : null;
   const { value, pseudonymized, handleDetails } = pseudonymizeDocument(entity, ctx.privacy);
-  persistHandles(ctx, handleDetails); // before emitting — see the note in query.ts
-  renderDataDocument({ entity: value, canExecute: o["canExecute"] ?? {} }, {
-    format: ctx.format === "table" ? "json" : ctx.format,
-    write: ctx.openData(DATA_KIND),
-  });
-  const note = disclosure(ctx.privacy, pseudonymized);
-  if (note !== "") ctx.io.err("\n" + note);
+  emitData(ctx, DATA_KIND, { handles: handleDetails, pseudonymized }, (out) =>
+    renderDataDocument({ entity: value, canExecute: o["canExecute"] ?? {} }, { format: ctx.format === "table" ? "json" : ctx.format, write: out }));
 }
 
 /**

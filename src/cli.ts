@@ -4,120 +4,29 @@
  * STORY-09 (non-interactive by construction) · STORY-51 (agent gate) · STORY-63 (errors route to help)
  */
 
-import { assertFormatSupported, assertKnownFlags, BUILT_INS, flagCheckPath, parseArgs, type ParsedArgs } from "./core/args.ts";
+import { assertFormatSupported, assertKnownFlags, BUILT_INS, declaredFlagsFor, flagCheckPath, parseArgs, type ParsedArgs } from "./core/args.ts";
 import { nearest } from "./core/text.ts";
 import { CliError, ExitCode, NotFoundError, UsageError, exitCodeOf } from "./core/errors.ts";
 import { detectCallerContext } from "./core/caller.ts";
 import { assertMayTrace, makeDataOpener } from "./core/policy.ts";
 import { parseMode, resolvePolicy } from "./core/privacy.ts";
-import { colorEnabled, effectiveFormat, renderDocument, type OutputFormat } from "./core/output.ts";
-import {
-  COMMANDS, TOPICS, findCommand, helpAsJson, renderCommand, renderOverview, topicNames,
-} from "./core/help.ts";
+import { colorEnabled, effectiveFormat, type OutputFormat } from "./core/output.ts";
+import { assertNoUserInfo, resolveInstance } from "./core/instances.ts";
+import { defaultCredentialUrl } from "./core/credentials.ts";
+import { Explained } from "./core/http.ts";
+import { applicationSubject, showApplicationHelp, showHelp } from "./commands/help.ts";
 import { runVersion } from "./commands/version.ts";
 import { runAuth } from "./commands/auth.ts";
-import { describeQuery, runDiscover } from "./commands/discover.ts";
+import { runDiscover } from "./commands/discover.ts";
 import { runQuery } from "./commands/query.ts";
 import { runGet } from "./commands/get.ts";
 import { runCache } from "./commands/cache.ts";
 import { runInstance } from "./commands/instance.ts";
-import { assertNoUserInfo, resolveInstance } from "./core/instances.ts";
-import { defaultCredentialUrl } from "./core/credentials.ts";
 import { runUnmask } from "./commands/unmask.ts";
-import { describeOperation, runOperation, type AppHelp } from "./commands/operate.ts";
-import { decodeUtf8 } from "./core/input.ts";
-import { Explained } from "./core/http.ts";
+import { runOperation } from "./commands/operate.ts";
+import { terminalIo } from "./terminal.ts";
 import type { Ctx, Io } from "./core/ctx.ts";
 
-function showHelp(args: ParsedArgs, io: Io): ExitCode {
-  // Help is human-facing text, so prose is the default even when piped — unlike data
-  // output, which switches to JSON off a TTY. Structured help must be asked for (AC-62.1).
-  // Help is a document whatever it describes, so csv, tsv and name are refused as anywhere else.
-  assertFormatSupported(args, ["help"]);
-  const explicit = args.flags.output;
-  const asJson = explicit === "json" || explicit === "ndjson";
-  const format: OutputFormat = asJson ? explicit : "table";
-
-  // `signum ship order --help`: an operation's help is the operations topic (STORY-41).
-  if (args.kind === "operation-key" || args.kind === "verb-noun") {
-    if (asJson) renderDocument({ schemaVersion: 1, topic: "operations", text: TOPICS["operations"] }, { format, write: io.out });
-    else io.out(TOPICS["operations"] + "\n");
-    return ExitCode.Ok;
-  }
-
-  const path = args.kind === "builtin" && args.command !== undefined && args.command !== "help"
-    ? [args.command, ...args.positionals]
-    : args.positionals;
-
-  if (path.length > 0) {
-    // QA fix: a multi-segment path (e.g. "auth login") can only mean a subcommand — topics
-    // are always a single word — so try exact subcommand resolution FIRST. Previously topic
-    // lookup used only path[0] and ran unconditionally, so "help auth login" silently dropped
-    // "login" and rendered the "auth" topic instead of the login subcommand's own help, while
-    // "auth login --help" (the other route to the same intent) worked correctly. The two
-    // phrasings must agree.
-    if (path.length > 1) {
-      const exact = findCommand(path);
-      if (exact !== undefined) {
-        if (asJson) {
-          renderDocument({ schemaVersion: 1, command: helpAsJson(exact) }, { format, write: io.out });
-        } else {
-          io.out(renderCommand(exact, path));
-        }
-        return ExitCode.Ok;
-      }
-    }
-
-    const topicKey = (path[0] as string).toLowerCase();
-    const topic = TOPICS[topicKey];
-    if (topic !== undefined) {
-      // A name can be BOTH a topic and a command — `auth` is. Render both, topic first: the
-      // prose is the more useful lead, but stopping there meant `signum auth --help` showed no
-      // subcommands, flags or examples, while `signum query --help` showed all three. AC-60.4
-      // asks every command's help to carry runnable examples, so the command half is not
-      // optional just because a topic outranks it.
-      const alsoCommand = findCommand([topicKey]);
-      if (asJson) {
-        renderDocument(
-          {
-            schemaVersion: 1,
-            topic: topicKey,
-            text: topic,
-            ...(alsoCommand !== undefined ? { command: helpAsJson(alsoCommand) } : {}),
-          },
-          { format, write: io.out },
-        );
-      } else {
-        io.out(topic + "\n");
-        if (alsoCommand !== undefined) io.out("\n" + renderCommand(alsoCommand, [topicKey]));
-      }
-      return ExitCode.Ok;
-    }
-    const spec = findCommand([path[0] as string]);
-    if (spec !== undefined) {
-      if (asJson) {
-        // Structured help is SCOPED to what was asked for, not the whole tree.
-        renderDocument({ schemaVersion: 1, command: helpAsJson(spec) }, { format, write: io.out });
-      } else {
-        io.out(renderCommand(spec, [path[0] as string]));
-      }
-      return ExitCode.Ok;
-    }
-    // Unknown topic/command asked of `help` is still a usage error (AC-60.3).
-    throw new UsageError(`no help topic or command '${path.join(" ")}'`, {
-      hint:
-        "Commands: " + COMMANDS.map((c) => c.name).join(", ") + "\n" +
-        "Topics:   " + topicNames().join(", "),
-    });
-  }
-
-  if (asJson) {
-    renderDocument(helpAsJson(), { format, write: io.out });
-    return ExitCode.Ok;
-  }
-  io.out(renderOverview());
-  return ExitCode.Ok;
-}
 
 export async function run(argv: readonly string[], io: Io): Promise<ExitCode> {
   const args = parseArgs(argv, io.env);
@@ -158,7 +67,7 @@ async function runParsed(args: ParsedArgs, io: Io): Promise<ExitCode> {
     // Describing a subject sends requests, and one carries the real id behind a handle (an operation's
     // entity pack), so its trace is gated as any command's is (#128).
     if (args.flags.verbose) assertMayTrace(caller, args.flags.allowAgentData);
-    return await showApplicationHelp(args, io, subject, () => contextFor(args, io, caller, format));
+    return await showApplicationHelp(args, io, subject, (helpArgs) => contextFor(helpArgs, io, caller, format));
   }
 
   // Before any request is made, so a refused trace never prints a line (#128).
@@ -223,13 +132,14 @@ async function runParsed(args: ParsedArgs, io: Io): Promise<ExitCode> {
 
 /** Everything a command reads: the target, the privacy policy, the data gate. Reads configuration. */
 function contextFor(args: ParsedArgs, io: Io, caller: Ctx["caller"], format: OutputFormat): Ctx {
-  // After help, which must not read configuration (AC-60.2); before any command reads `url`.
-  if (args.flags.instance !== undefined) args.flags.url = resolveInstance(args.flags.instance, io.env);
+  // After help, which must not read configuration (AC-60.2). The parsed flags stay as typed; the
+  // resolved URL goes into the context, where commands read it.
+  const named = args.flags.instance !== undefined ? resolveInstance(args.flags.instance, io.env) : args.flags.url;
   // --url, SIGNUM_URL and a registered instance alike: a credential in the URL leaks everywhere.
-  if (args.flags.url !== undefined) assertNoUserInfo(args.flags.url);
+  if (named !== undefined) assertNoUserInfo(named);
 
   // The target, once, before anything that is kept per target is read (#121).
-  const target = args.flags.url ?? defaultCredentialUrl(io.env);
+  const target = named ?? defaultCredentialUrl(io.env);
 
   const privacy = resolvePolicy({
     callerIsAgent: caller.context === "agent",
@@ -243,6 +153,7 @@ function contextFor(args: ParsedArgs, io: Io, caller: Ctx["caller"], format: Out
   return {
     args,
     io,
+    named,
     target,
     format,
     color: colorEnabled(io.stdoutIsTty, args.flags.noColor, io.env),
@@ -250,62 +161,13 @@ function contextFor(args: ParsedArgs, io: Io, caller: Ctx["caller"], format: Out
     // Pseudonymization active means an agent gets surrogates rather than a refusal (AC-51.4).
     openData: makeDataOpener(caller, args.flags.allowAgentData, io.out, privacy.mode !== "off"),
     privacy,
+    declaredFlags: declaredFlagsFor(args),
   };
 }
 
-type Subject = { kind: "query"; key: string } | { kind: "operation" };
 
-/** `query <key> --help`, `help query <key>`, or an operation's `--help`: help with an application half. */
-function applicationSubject(args: ParsedArgs): Subject | undefined {
-  if (args.kind === "operation-key" || args.kind === "verb-noun") return { kind: "operation" };
-  const path = args.command === "help" ? args.positionals : [args.command ?? "", ...args.positionals];
-  if (path[0]?.toLowerCase() === "query" && path[1] !== undefined) return { kind: "query", key: path[1] };
-  return undefined;
-}
 
-/**
- * The static help, then what the application says about the subject (AC-61.1, AC-61.2), from the
- * cache when it can (AC-61.3). Help never fails for want of an application: without one, or without
- * the metadata, the static part is printed with one line saying what could not be described and how
- * to fix it, and the exit is 0 (AC-61.5).
- */
-async function showApplicationHelp(args: ParsedArgs, io: Io, subject: Subject, context: () => Ctx): Promise<ExitCode> {
-  const asJson = args.flags.output === "json" || args.flags.output === "ndjson";
-  const named = subject.kind === "query" ? `query ${subject.key}` : `${String(args.command)}${args.kind === "verb-noun" && args.positionals[0] !== undefined ? ` ${args.positionals[0]}` : ""}`;
-  let described: AppHelp | undefined;
-  let unavailable: string | undefined;
-  let remedy = "name the application with --url or -i, log in, or run the command online once to fill the cache";
-  try {
-    // Metadata and permission reads only; --explain does not apply to help, which sends no request of its own.
-    args.flags.explain = false;
-    const ctx = context();
-    described = subject.kind === "query" ? await describeQuery(ctx, subject.key) : await describeOperation(ctx);
-  } catch (err) {
-    unavailable = err instanceof Error ? err.message : String(err);
-    // An error that knows its own way out says it; the generic remedy is for a missing application.
-    if (err instanceof CliError && err.hint !== undefined) remedy = err.hint;
-  }
 
-  if (asJson) {
-    const help = staticHelpDocument(subject);
-    renderDocument(
-      { ...help, application: described?.doc ?? null, ...(unavailable !== undefined ? { applicationUnavailable: unavailable } : {}) },
-      { format: args.flags.output as OutputFormat, write: io.out },
-    );
-    return ExitCode.Ok;
-  }
-  showHelp(args, io);
-  if (described !== undefined) io.out(described.text);
-  else io.err(`\nnote: could not describe ${named} for this application: ${unavailable ?? "unknown"}\n${remedy.replace(/\n?$/, "\n")}`);
-  return ExitCode.Ok;
-}
-
-/** The structured static help a subject's JSON help starts from: the query command, or the operations topic. */
-function staticHelpDocument(subject: Subject): Record<string, unknown> {
-  if (subject.kind === "operation") return { schemaVersion: 1, topic: "operations", text: TOPICS["operations"] };
-  const spec = findCommand(["query"]);
-  return { schemaVersion: 1, ...(spec !== undefined ? { command: helpAsJson(spec) } : {}) };
-}
 
 type Handler = (ctx: Ctx, command: string) => Promise<ExitCode> | ExitCode;
 
@@ -351,74 +213,10 @@ function report(err: unknown, io: Io): ExitCode {
   return code;
 }
 
-/**
- * Read one line from the terminal, optionally without echoing it.
- *
- * Only offered when stdin is a TTY, so it can never hang a pipeline. A hidden read uses raw mode and
- * writes nothing back, so a pasted credential reaches neither the screen nor the shell's history —
- * which is what AC-12.1 is protecting, and why refusing to prompt at all was the wrong reading of it.
- *
- * The prompt goes to STDERR: stdout is reserved for data (AC-22.2), and a prompt is not data.
- */
-async function promptAtTerminal(question: string, opts: { hidden?: boolean; signal?: AbortSignal } = {}): Promise<string> {
-  const stdin = process.stdin;
-  process.stderr.write(question);
 
-  const hidden = opts.hidden === true;
-  const wasRaw = stdin.isRaw === true;
-  if (hidden) stdin.setRawMode(true);
-  stdin.resume();
-
-  try {
-    return await new Promise<string>((resolve, reject) => {
-      let buffer = "";
-      const onData = (chunk: Buffer | string): void => {
-        for (const ch of chunk.toString("utf8")) {
-          if (ch === "\r" || ch === "\n") { cleanup(); resolve(buffer); return; }
-          if (ch === "\u0003") { cleanup(); reject(new UsageError("cancelled")); return; } // Ctrl-C
-          if (ch === "\u007f" || ch === "\b") { buffer = buffer.slice(0, -1); continue; }
-          if (ch < " ") continue; // ignore other control characters rather than storing them
-          buffer += ch;
-        }
-        // Not raw: the terminal delivers whole lines, so anything here is already complete.
-        if (!hidden) { cleanup(); resolve(buffer); }
-      };
-      const onAbort = (): void => { cleanup(); resolve(""); };
-      const cleanup = (): void => {
-        stdin.off("data", onData);
-        opts.signal?.removeEventListener("abort", onAbort);
-        if (hidden) { stdin.setRawMode(wasRaw); process.stderr.write("\n"); }
-        stdin.pause();
-      };
-      // Withdrawn: the answer came another way (AC-12.9), so stop reading the terminal.
-      if (opts.signal?.aborted === true) { cleanup(); resolve(""); return; }
-      opts.signal?.addEventListener("abort", onAbort, { once: true });
-      stdin.on("data", onData);
-    });
-  } finally {
-    if (hidden && stdin.isRaw !== wasRaw) stdin.setRawMode(wasRaw);
-  }
-}
 
 export async function main(argv: readonly string[]): Promise<number> {
-  const io: Io = {
-    out: (s) => process.stdout.write(s),
-    err: (s) => process.stderr.write(s),
-    stdoutIsTty: process.stdout.isTTY === true,
-    stdinIsTty: process.stdin.isTTY === true,
-    env: process.env,
-    readStdin: async () => {
-      const chunks: Buffer[] = [];
-      for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
-      // UTF-8 strictly, whatever the platform's codepage: invalid bytes are refused, not replaced (#120).
-      return decodeUtf8(Buffer.concat(chunks), "stdin");
-    },
-    ...(process.stdin.isTTY === true ? { prompt: promptAtTerminal } : {}),
-    onInterrupt: (handler) => {
-      process.on("SIGINT", handler);
-      return () => { process.off("SIGINT", handler); };
-    },
-  };
+  const io = terminalIo();
   try {
     return await run(argv, io);
   } catch (err) {

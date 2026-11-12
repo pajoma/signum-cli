@@ -11,13 +11,12 @@
  * table path: a Lite is an identity and becomes a handle, an entity is walked as a document.
  */
 
+import { emitData } from "../core/emit.ts";
 import type { Ctx } from "../core/ctx.ts";
 import { flag, opt } from "../core/ctx.ts";
 import { ExitCode, UsageError } from "../core/errors.ts";
 import { liteKey, renderDataDocument } from "../core/output.ts";
-import { disclosure, pseudonymizeDocument } from "../core/privacy.ts";
-import { persistHandles } from "../core/handles.ts";
-import type { DataWriter } from "../core/policy.ts";
+import { pseudonymizeDocument } from "../core/privacy.ts";
 import type { Target } from "../core/target.ts";
 
 export type Variant = "lites" | "entities";
@@ -87,7 +86,7 @@ export function pseudonymizeEntities(ctx: Ctx, items: readonly unknown[]): {
 }
 
 export async function runVariant(
-  ctx: Ctx, target: Target, variant: Variant, request: Record<string, unknown>, open: () => DataWriter,
+  ctx: Ctx, target: Target, variant: Variant, request: Record<string, unknown>, dataKind: string,
 ): Promise<ExitCode> {
   const res = await target.http.request<unknown>({
     method: "POST",
@@ -113,28 +112,27 @@ export async function runVariant(
         return r.value as unknown[];
       })();
 
-  persistHandles(ctx, handleDetails); // before emitting — see the note in query.ts
-  const out = open();
   const format = ctx.format;
-  if (format === "json") {
-    renderDataDocument(values, { format: "json", write: out });
-  } else if (format === "ndjson") {
-    for (const v of values) renderDataDocument(v, { format: "ndjson", write: out });
-  } else if (variant === "entities") {
-    // `table` here is the non-explicit default; an entity is a document (as in `get`).
-    renderDataDocument(values, { format: "json", write: out });
-  } else {
-    // table and name: one reference per line; table adds the display string when one was sent.
-    for (const v of values) {
-      if (typeof v === "string") { out(`${v}\n`); continue; } // a handle
-      const key = liteKey(v) ?? JSON.stringify(v);
-      const model = (v as Record<string, unknown> | null)?.["model"];
-      out(format === "table" && typeof model === "string" ? `${key}  ${model}\n` : `${key}\n`);
+  emitData(ctx, dataKind, { handles: handleDetails, pseudonymized: [...pseudonymized] }, (out) => {
+    if (format === "json") {
+      renderDataDocument(values, { format: "json", write: out });
+    } else if (format === "ndjson") {
+      for (const v of values) renderDataDocument(v, { format: "ndjson", write: out });
+    } else if (variant === "entities") {
+      // `table` here is the non-explicit default; an entity is a document (as in `get`).
+      renderDataDocument(values, { format: "json", write: out });
+    } else {
+      // table and name: one reference per line; table adds the display string when one was sent.
+      for (const v of values) {
+        if (typeof v === "string") { out(`${v}\n`); continue; } // a handle
+        const key = liteKey(v) ?? JSON.stringify(v);
+        const model = (v as Record<string, unknown> | null)?.["model"];
+        out(format === "table" && typeof model === "string" ? `${key}  ${model}\n` : `${key}\n`);
+      }
     }
-  }
+  });
 
-  const note = disclosure(ctx.privacy, [...pseudonymized]);
-  if (note !== "") ctx.io.err("\n" + note);
+
   if (format === "table" && request["count"] !== undefined && items.length === request["count"]) {
     ctx.io.err(`\n${items.length} ${variant} shown, the --top limit; there may be more visible to you (use --all)\n`);
   }

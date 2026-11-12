@@ -8,7 +8,6 @@
 import type { Ctx } from "../core/ctx.ts";
 import { ExitCode } from "../core/errors.ts";
 import { renderDocument } from "../core/output.ts";
-import { defaultCredentialUrl } from "../core/credentials.ts";
 import { appVersionFrom, Explained, SignumHttp } from "../core/http.ts";
 import { explainSink } from "../core/target.ts";
 
@@ -19,7 +18,7 @@ import pkg from "../../package.json" with { type: "json" };
 export const CLI_VERSION: string = pkg.version;
 
 export async function runVersion(ctx: Ctx): Promise<ExitCode> {
-  const url = ctx.args.flags.url ?? defaultCredentialUrl(ctx.io.env);
+  const url = ctx.target;
 
   let server: {
     url: string; reachable: boolean; detail: string | undefined;

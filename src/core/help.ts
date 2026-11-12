@@ -22,6 +22,12 @@ export interface FlagSpec {
   formats?: readonly OutputFormat[];
 }
 
+/** A section of help only the target application can supply (STORY-61), in both renderings. */
+export interface AppHelp {
+  doc: Record<string, unknown>;
+  text: string;
+}
+
 export interface CommandSpec {
   name: string;
   summary: string;
@@ -64,6 +70,40 @@ const PROFILE_FLAGS: FlagSpec[] = [
   { name: "unprotected", summary: "Remove the protection" },
   { name: "auth-header", arg: "<name>", summary: "The header the token goes in (default: Authorization)" },
 ];
+
+/**
+ * What an operation takes besides the global flags. Operations are not built-ins, so they have no
+ * `CommandSpec`; this is their flag list, read by the parser for arity and by `operate.ts` to refuse
+ * an unknown flag (`signum help operations` explains each in prose).
+ */
+export const OPERATION_FLAGS: FlagSpec[] = [
+  { name: "lite", arg: "<Type;id|ref_…|@file|->", summary: "A record by Lite key or handle; repeatable, or a list from a file or stdin" },
+  { name: "id", arg: "<id|@file|->", summary: "A record by id, for the type the command names; repeatable" },
+  { name: "edit", arg: "<Member=value>", summary: "Change a member before an operation that saves the entity; over many records, set it on each" },
+  { name: "setters-json", arg: "<json|@file|->", summary: "The property setters for an operation over many records" },
+  { name: "filename", alias: "f", arg: "<file|@file|->", summary: "An edited entity document to save" },
+  { name: "arg", arg: "<v>", summary: "An argument: true, false, null, a number, a Lite key or a handle; else text" },
+  { name: "arg-string", arg: "<v>", summary: "An argument, always text" },
+  { name: "arg-lite", arg: "<Type;id|ref_…>", summary: "An argument that is a Lite" },
+  { name: "arg-json", arg: "<json>", summary: "An argument as raw JSON" },
+  { name: "allow-custom-arg", summary: "Send an --arg-json object the app converts itself" },
+  { name: "dry-run", summary: "Ask whether this login may run it; send no operation" },
+  { name: "progress", summary: "Run one record through executeLiteWithProgress and show its progress" },
+  { name: "yes", alias: "y", summary: "Confirm without asking (required without a terminal)" },
+];
+
+/** Every flag the CLI knows, global, per command and per operation: where the parser learns each one's arity. */
+export function allFlagSpecs(): FlagSpec[] {
+  const specs: FlagSpec[] = [...GLOBAL_FLAGS, ...OPERATION_FLAGS];
+  const walk = (commands: readonly CommandSpec[]): void => {
+    for (const c of commands) {
+      specs.push(...(c.flags ?? []));
+      walk(c.subcommands ?? []);
+    }
+  };
+  walk(COMMANDS);
+  return specs;
+}
 
 export const COMMANDS: CommandSpec[] = [
   {

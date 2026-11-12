@@ -69,7 +69,7 @@ function show(ctx: Ctx): ExitCode {
 
 function clear(ctx: Ctx): ExitCode {
   // Scoping to --url is the only filter offered; a target is the unit a user thinks in.
-  const url = ctx.args.flags.url;
+  const url = ctx.named;
   const removed = clearMetadataCache(url, ctx.io.env);
 
   if (ctx.format === "json" || ctx.format === "ndjson") {

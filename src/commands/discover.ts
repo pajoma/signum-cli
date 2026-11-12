@@ -18,15 +18,14 @@ import {
   TYPE_KINDS, unknownTypeError, type Metadata, type OperationInfo, type TypeInfo,
 } from "../core/metadata.ts";
 import { loadQueryDescription } from "../core/metadata-cache.ts";
-import { operationFacts, type AppHelp } from "./operate.ts";
+import { operationFacts } from "../core/operations.ts";
+import type { AppHelp } from "../core/help.ts";
 import { loginCommand } from "../core/handoff.ts";
 import { flag, opt } from "../core/ctx.ts";
 import { resolveTarget } from "../core/target.ts";
 import { sensitivity } from "../core/privacy.ts";
-import {
-  defaultColumns, descriptionColumns, fetchQueryDescription, fetchSubTokens, filterUnusableReason, validateTokens,
-  type QueryTokenInfo,
-} from "../core/tokens.ts";
+import { defaultColumns, descriptionColumns, filterUnusableReason, type QueryTokenInfo } from "../core/tokens.ts";
+import { fetchQueryDescription, fetchSubTokens, validateTokens } from "../core/token-requests.ts";
 
 async function metadata(ctx: Ctx): Promise<Metadata> {
   const target = resolveTarget(ctx);

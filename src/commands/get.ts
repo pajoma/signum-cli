@@ -4,6 +4,7 @@
  * STORY-30 (retrieve), STORY-51 (agent data gate). `--pack` and the listing are REQ-030's m2 half (#138).
  */
 
+import { emitData } from "../core/emit.ts";
 import type { Ctx } from "../core/ctx.ts";
 import { opt } from "../core/ctx.ts";
 import { ExitCode, NotFoundError, UsageError } from "../core/errors.ts";
@@ -11,11 +12,10 @@ import { renderDataDocument, renderDocument } from "../core/output.ts";
 import { findType, isEntityTypeInfo, loadMetadata, unknownTypeError } from "../core/metadata.ts";
 import { flag } from "../core/ctx.ts";
 import { resolveTarget } from "../core/target.ts";
-import { persistHandles } from "../core/handles.ts";
 import { emitCommandEcho } from "../core/commandline.ts";
 import { loadHandles } from "../core/handles.ts";
 import { parseLiteKey } from "../core/text.ts";
-import { disclosure, pseudonymizeDocument } from "../core/privacy.ts";
+import { pseudonymizeDocument } from "../core/privacy.ts";
 import { isHandle, resolveHandle } from "../core/reidentify.ts";
 import { asEntity, entityPath, fetchEntity } from "../core/entity.ts";
 import type { TypeInfo } from "../core/metadata.ts";
@@ -142,13 +142,8 @@ export async function runGet(ctx: Ctx): Promise<ExitCode> {
   // pseudonymized by member name rather than by column (REQ-057). Without this the m2 gate change
   // would be a leak: pseudonymization opens the agent path, and `get` would walk through it raw.
   const { value, pseudonymized, handleDetails } = pseudonymizeDocument(body, ctx.privacy);
-  persistHandles(ctx, handleDetails); // before emitting — see the note in query.ts
-  renderDataDocument(value, {
-    format: ctx.format === "table" ? "json" : ctx.format,
-    write: ctx.openData(dataKind),
-  });
-  const note = disclosure(ctx.privacy, pseudonymized);
-  if (note !== "") ctx.io.err("\n" + note);
+  emitData(ctx, dataKind, { handles: handleDetails, pseudonymized }, (out) =>
+    renderDataDocument(value, { format: ctx.format === "table" ? "json" : ctx.format, write: out }));
   return ExitCode.Ok;
 }
 
@@ -165,13 +160,14 @@ async function renderPack(ctx: Ctx, target: Target, path: string, dataKind: stri
   const { entity: rawEntity, canExecute, ...extension } = (res.body ?? {}) as Record<string, unknown>;
   const entity = pseudonymizeDocument(asEntity(rawEntity), ctx.privacy);
   const extra = Object.keys(extension).length > 0 ? pseudonymizeDocument(extension, ctx.privacy) : undefined;
-  persistHandles(ctx, { ...entity.handleDetails, ...(extra?.handleDetails ?? {}) }); // before emitting
-  renderDataDocument({ entity: entity.value, canExecute: canExecute ?? {}, ...((extra?.value as Record<string, unknown> | undefined) ?? {}) }, {
-    format: ctx.format === "table" ? "json" : ctx.format,
-    write: ctx.openData(dataKind),
-  });
-  const note = disclosure(ctx.privacy, [...entity.pseudonymized, ...(extra?.pseudonymized ?? [])]);
-  if (note !== "") ctx.io.err("\n" + note);
+  const minted = {
+    handles: { ...entity.handleDetails, ...(extra?.handleDetails ?? {}) },
+    pseudonymized: [...entity.pseudonymized, ...(extra?.pseudonymized ?? [])],
+  };
+  emitData(ctx, dataKind, minted, (out) => renderDataDocument(
+    { entity: entity.value, canExecute: canExecute ?? {}, ...((extra?.value as Record<string, unknown> | undefined) ?? {}) },
+    { format: ctx.format === "table" ? "json" : ctx.format, write: out },
+  ));
   if (ctx.format === "table") {
     ctx.io.err("\nA key absent from canExecute was withheld for this login; it does not mean the operation does not exist.\n");
   }
@@ -206,12 +202,10 @@ async function fetchAll(ctx: Ctx, target: Target, type: TypeInfo, cleanName: str
   const all = (Array.isArray(res.body) ? res.body : []).map((e) => asEntity(e));
   const shown = bound === null ? all : all.slice(0, bound);
   const { values, pseudonymized, handleDetails } = pseudonymizeEntities(ctx, shown);
-  persistHandles(ctx, handleDetails); // before emitting
-  const out = ctx.openData("entity data");
-  if (ctx.format === "ndjson") for (const v of values) renderDataDocument(v, { format: "ndjson", write: out });
-  else renderDataDocument(values, { format: "json", write: out });
-  const note = disclosure(ctx.privacy, pseudonymized);
-  if (note !== "") ctx.io.err("\n" + note);
+  emitData(ctx, "entity data", { handles: handleDetails, pseudonymized }, (out) => {
+    if (ctx.format === "ndjson") for (const v of values) renderDataDocument(v, { format: "ndjson", write: out });
+    else renderDataDocument(values, { format: "json", write: out });
+  });
   if (shown.length < all.length) {
     // The total is an aggregate over the records (AC-51.3), so a pseudonymized run is not told it.
     ctx.io.err(ctx.privacy.mode === "off"
