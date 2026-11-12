@@ -3,7 +3,13 @@
 Notable changes to signum-cli. Versions are [SemVer](https://semver.org/), and `package.json` is the
 source of truth: a release tag `v<version>` must match it (see the README's release section).
 
-## Unreleased
+## 0.3.0 — 2026-11-12
+
+Milestone **m2**: writes, all through operations, and the ergonomics around them — many records at
+once, structured input, profiles, `--explain` everywhere, help that knows the application. The
+write paths were run against a live, non-production Signum application with every change restored
+(`test/operations.live.test.ts`). One breaking change: handles and surrogates are now per target
+application (below).
 
 ### Changed
 

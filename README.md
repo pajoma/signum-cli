@@ -4,9 +4,10 @@ A command-line client for [Signum Framework](https://github.com/signumsoftware/f
 applications — run dynamic queries, retrieve and save entities, and execute operations
 against a running Signum app.
 
-> **Status: `v0.2.1`, milestone `m1` (read-only core).** A patch release of `v0.2.0`, the first
-> full release, which followed the pre-releases `v0.1.0-b.*`; see [`CHANGELOG.md`](CHANGELOG.md). It can discover, query and read;
-> it cannot write yet — saving entities and executing operations are milestone `m2`. Requirements live in
+> **Status: `v0.3.0`, milestone `m2` (writes).** It can discover, query and read, and change data
+> through operations — saving included, over one record or many, with confirmation, dry runs and an
+> audit log; see [`CHANGELOG.md`](CHANGELOG.md). MCP mode and the remaining auth mechanisms are
+> milestone `m3`. Requirements live in
 > [`docs/requirements.md`](docs/requirements.md) and the issues labelled
 > [`requirement`](https://github.com/pajoma/signum-cli/labels/requirement).
 
@@ -24,16 +25,19 @@ signum queries                                       # what can I query?
 signum explain Order.Entity.Customer                 # walk the query-token schema
 signum query Order --filter 'Customer.Name ~ "Acme"' --json
 signum get Order 42
+signum ship order 42 --dry-run                       # may I? (operations are verb-noun)
+signum save order 42 --edit Name=Acme                # asks first; --yes in a script
 signum help                                          # commands, topics, exit codes
 ```
 
 | Command | Purpose |
 |---|---|
-| `auth login` / `status` / `logout` | Store, check or remove a credential for a target |
+| `auth login` / `status` / `switch` / `logout` | Store, check, choose or remove a credential for a target |
 | `types`, `queries`, `operations` | Discover what the application exposes |
 | `explain` | Describe a type, a query-token path, or an operation |
 | `query` | Run a dynamic query (filter syntax: `signum help filter`) |
-| `get` | Retrieve one entity by type and id, or by Lite key |
+| `get` | Retrieve one entity by type and id or Lite key (`--pack`: with what you may do to it), or list a master-data type |
+| `<verb> <Type> [id…]` | Run an operation — the only way anything changes: `signum help operations` |
 | `unmask` | Resolve local `ref_` pseudonym handles back to the records they stand for |
 | `cache` | Inspect or clear cached application metadata |
 | `instance` | Register short names for target URLs, then use `-i <name>` instead of `--url` |
