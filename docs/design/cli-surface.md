@@ -271,6 +271,7 @@ to distinguish "retry might help" from "stop".
 | 7 | Concurrency conflict (`ConcurrencyException`) | **yes**, after refetch |
 | 8 | Transport/timeout | yes |
 | 9 | Blocked by policy (agent context without acknowledgement, AC-51.1) | no |
+| 10 | Partial failure — some records of a bulk operation failed; the output lists which (AC-45.3). All failing is 1 | for the failed ones, after reading why |
 
 3 and 4 must be distinguished even though **the server returns 403 for both** — the discriminator is
 `exceptionType` (AC-08.2). This is the single most important thing the exit-code table encodes.

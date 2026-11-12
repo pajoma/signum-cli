@@ -40,6 +40,7 @@ const REFLECTION = {
       "OrderOperation.Clone": { operationType: "ConstructorFrom" },
       "OrderOperation.Generate": { operationType: "Constructor", resultIsSaved: true },
       "OrderOperation.Decline": { operationType: "Constructor" },
+      "OrderOperation.Merge": { operationType: "ConstructorFromMany" },
     },
   },
   HolidayCalendar: {
@@ -159,6 +160,11 @@ let seen: Seen[] = [];
 let answer: "pack" | "validation" | "concurrency" | "forbidden" = "pack";
 /** `canExecute` the entity pack reports for a dry run. */
 let canExecute: Record<string, string | null> = {};
+/** Per record id, for the bulk dry run; falls back to `canExecute`. */
+let canExecuteById: Record<string, Record<string, string | null>> = {};
+/** Ids whose bulk outcome is an error, and ids the stream leaves out. */
+let failIds: string[] = [];
+let silentIds: string[] = [];
 
 const ORDER_42 = `{"Type":"Order","id":42,"ticks":"638500000000000017","toStr":"Order 42","modified":false,"name":"Acme","customer":{"EntityType":"Customer","id":9,"model":"Erika Mustermann"}}`;
 
@@ -172,6 +178,21 @@ beforeAll(() => {
       const headers = { "content-type": "application/json" };
       if (url.pathname === "/api/reflection/types") return new Response(JSON.stringify(REFLECTION), { headers });
       if (url.pathname === "/api/entity/Order/42") return new Response(ORDER_42, { headers });
+      const multi = /^\/api\/operation\/(executeMultiple|deleteMultiple|constructFromMultiple)\//.exec(url.pathname);
+      if (multi !== null) {
+        const { lites } = JSON.parse(body) as { lites: Array<{ EntityType: string; id: number }> };
+        const lines = lites
+          .filter((l) => !silentIds.includes(String(l.id)))
+          .map((l) => JSON.stringify({ entity: { EntityType: l.EntityType, id: l.id, model: `Order ${l.id}` }, error: failIds.includes(String(l.id)) ? `Order ${l.id} cannot be approved` : null }));
+        return new Response(lines.join("\n") + "\n", { headers: { "content-type": "application/x-ndjson" } });
+      }
+      if (url.pathname === "/api/operation/constructFromMany/OrderOperation.Merge") {
+        return new Response(`{"entity":{"Type":"Order","id":null,"isNew":true,"toStr":"","modified":true,"name":null},"canExecute":{}}`, { headers });
+      }
+      const pack = /^\/api\/entityPack\/Order\/(\d+)$/.exec(url.pathname);
+      if (pack !== null && pack[1] !== "42") {
+        return new Response(`{"entity":${ORDER_42.replace('"id":42', `"id":${pack[1]}`)},"canExecute":${JSON.stringify(canExecuteById[pack[1] as string] ?? canExecute)}}`, { headers });
+      }
       if (url.pathname === "/api/exists/Order/42") return new Response("true", { headers });
       if (url.pathname === "/api/exists/Order/99") return new Response("false", { headers });
       if (url.pathname === "/api/entityPackEntity") {
@@ -213,6 +234,9 @@ beforeEach(() => {
   seen = [];
   answer = "pack";
   canExecute = {};
+  canExecuteById = {};
+  failIds = [];
+  silentIds = [];
 });
 afterEach(() => rmSync(configDir, { recursive: true, force: true }));
 
@@ -577,6 +601,100 @@ describe("construct and delete (STORY-44, #118)", () => {
     const fresh = await cli(["save", "order", "--edit", "Name=New", "--dry-run", "--json"]);
     expect(fresh.code).toBe(ExitCode.Ok);
     expect(seen.map((s) => s.path)).toContain("/api/entityPackEntity");
+    expect(operationCalls()).toEqual([]);
+  });
+});
+
+describe("operations over many records (STORY-45, #119)", () => {
+  const two = ["OrderOperation.Approve", "--lite", "Order;42", "--lite", "Order;43"];
+  const auditLines = () => readFileSync(auditLogPath({ SIGNUM_CONFIG_DIR: configDir } as NodeJS.ProcessEnv), "utf8").trim().split("\n")
+    .map((l) => JSON.parse(l) as Record<string, unknown>);
+
+  it("sends one request with every Lite, and reports each record (AC-45.1)", async () => {
+    const r = await cli([...two, "--yes", "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    const [call] = operationCalls();
+    expect(call?.path).toBe("/api/operation/executeMultiple/OrderOperation.Approve");
+    expect(call?.body).toBe(`{"lites":[{"EntityType":"Order","id":42},{"EntityType":"Order","id":43}],"args":null}`);
+    expect(JSON.parse(r.out)).toEqual([{ target: "Order;42", ok: true }, { target: "Order;43", ok: true }]);
+    expect(r.err).toContain("on 2 records");
+  });
+
+  it("a partial failure lists which failed and why, and exits 10; all failing is 1 (AC-45.3)", async () => {
+    failIds = ["43"];
+    const partial = await cli([...two, "--yes", "--json"]);
+    expect(partial.code).toBe(ExitCode.PartialFailure);
+    expect(JSON.parse(partial.out)).toEqual([
+      { target: "Order;42", ok: true }, { target: "Order;43", ok: false, error: "Order 43 cannot be approved" },
+    ]);
+    failIds = ["42", "43"];
+    expect((await cli([...two, "--yes"])).code).toBe(ExitCode.Unexpected);
+  });
+
+  it("a record the server never reports on counts as failed, not as done", async () => {
+    silentIds = ["43"];
+    const r = await cli([...two, "--yes", "--json"]);
+    expect(r.code).toBe(ExitCode.PartialFailure);
+    expect(r.out).toContain("no outcome reported by the server");
+  });
+
+  it("logs one line per record with its own outcome (AC-46.6)", async () => {
+    failIds = ["43"];
+    await cli([...two, "--yes"]);
+    expect(auditLines().map((l) => [l["target"], l["ok"]])).toEqual([["Order;42", true], ["Order;43", false]]);
+  });
+
+  it("states the count when it refuses without --yes, and when it asks (AC-45.5)", async () => {
+    const refused = await cli(two);
+    expect(refused.code).toBe(ExitCode.Usage);
+    expect(refused.err).toContain("2 records without --yes");
+    const asked = await cli(two, { tty: true, reply: "y" });
+    expect(asked.prompts[0]).toContain("2 records");
+    expect(asked.code).toBe(ExitCode.Ok);
+  });
+
+  it("asks for the count to be typed from 10 records, and for any delete of several (AC-46.5)", async () => {
+    const ten = ["OrderOperation.Approve", ...Array.from({ length: 10 }, (_, i) => ["--lite", `Order;${100 + i}`]).flat()];
+    const yes = await cli(ten, { tty: true, reply: "y" });
+    expect(yes.prompts[0]).toContain("Type 10 to confirm");
+    expect(yes.code).toBe(ExitCode.Usage);
+    expect(operationCalls()).toEqual([]);
+    expect((await cli(ten, { tty: true, reply: "10" })).code).toBe(ExitCode.Ok);
+
+    const del = await cli(["delete", "order", "42", "43"], { tty: true, reply: "y" });
+    expect(del.prompts[0]).toContain("cannot be undone");
+    expect(del.prompts[0]).toContain("Type 2 to confirm");
+    expect(del.code).toBe(ExitCode.Usage);
+    expect((await cli(["delete", "order", "42", "43"], { tty: true, reply: "2" })).code).toBe(ExitCode.Ok);
+    expect(operationCalls().map((c) => c.path)).toContain("/api/operation/deleteMultiple/OrderOperation.Delete");
+  });
+
+  it("--dry-run answers per record from each entity pack, sending no operation", async () => {
+    canExecuteById = { "43": { "OrderOperation.Approve": "Order 43 is closed" }, "44": { "OrderOperation.Approve": null } };
+    const r = await cli(["OrderOperation.Approve", "--lite", "Order;43", "--lite", "Order;44", "--dry-run", "--json"]);
+    expect(r.code).toBe(ExitCode.NotAuthorized);
+    expect(JSON.parse(r.out)).toEqual([
+      { target: "Order;43", ok: false, error: "Order 43 is closed" }, { target: "Order;44", ok: true },
+    ]);
+    expect(operationCalls()).toEqual([]);
+  });
+
+  it("constructs one record from many as a pack (constructFromMany)", async () => {
+    const r = await cli(["merge", "order", "42", "43", "--yes", "--json"]);
+    expect(r.code).toBe(ExitCode.Ok);
+    expect(operationCalls()[0]?.body).toBe(`{"lites":[{"EntityType":"Order","id":42},{"EntityType":"Order","id":43}],"args":null,"type":"Order"}`);
+    expect(r.err).toContain("NOT saved");
+  });
+
+  it("refuses --edit over many records, and a record named twice", async () => {
+    expect((await cli([...two, "--edit", "Name=X", "--yes"])).code).toBe(ExitCode.Usage);
+    expect((await cli(["OrderOperation.Approve", "--lite", "Order;42", "--lite", "Order;42", "--yes"])).code).toBe(ExitCode.Usage);
+    expect(operationCalls()).toEqual([]);
+  });
+
+  it("--explain prints the bulk request and sends nothing", async () => {
+    const r = await cli([...two, "--explain"]);
+    expect(JSON.parse(r.out)).toMatchObject({ body: { lites: [{ EntityType: "Order", id: 42 }, { EntityType: "Order", id: 43 }] } });
     expect(operationCalls()).toEqual([]);
   });
 });

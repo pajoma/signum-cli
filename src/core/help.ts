@@ -569,7 +569,11 @@ export const TOPICS: Record<string, string> = {
     "  A stale record is exit 7: refetch, then retry; signum never retries for you.",
     "  A constructor's result may be unsaved, and is reported so. A delete asks first and",
     "  says it cannot be undone; a missing record is a clean not-found (exit 5).",
-    "  Operations over many records are not invokable yet (#119).",
+    "",
+    "  Many records: name several (signum approve order 42 43 44, or repeat --lite). One",
+    "  request, one outcome per record. Exit 0 if all succeeded, 10 if some failed (the",
+    "  output lists which and why), 1 if none did. From 10 records, and for any delete",
+    "  of several, the count must be typed back to confirm. --dry-run answers per record.",
   ].join("\n"),
   "exit-codes": [
     "EXIT CODES",

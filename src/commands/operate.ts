@@ -73,24 +73,36 @@ function parseTarget(written: string, typeHint: string | undefined, handles: Rea
   return { type: typeHint, id: written, shown: written };
 }
 
-/** Where the record comes from: positional after the noun, `--lite`, or `--id`, never two of them. */
-function targetOf(ctx: Ctx, noun: string | undefined, positional: string | undefined): OperationTarget | undefined {
+/**
+ * The records an operation runs on: positionals after the noun, repeated `--lite`, or repeated `--id`
+ * — one of the three, so a list is never half of one kind and half of another. More than one record
+ * makes it a bulk operation (#119).
+ */
+function targetsOf(ctx: Ctx, noun: string | undefined, positionals: readonly string[]): OperationTarget[] {
   const handles = loadHandles(ctx.io.env);
-  const given = [
-    positional !== undefined ? { from: "position", v: positional } : undefined,
-    ...optAll(ctx, "lite").map((v) => ({ from: "--lite", v })),
-    ...optAll(ctx, "id").map((v) => ({ from: "--id", v })),
-  ].filter((x): x is { from: string; v: string } => x !== undefined);
-  if (given.length > 1) {
-    throw new UsageError(`name the record once; got ${given.map((g) => g.from).join(" and ")}`);
+  const sources = [
+    { from: "position", values: [...positionals] },
+    { from: "--lite", values: optAll(ctx, "lite") },
+    { from: "--id", values: optAll(ctx, "id") },
+  ].filter((s) => s.values.length > 0);
+  if (sources.length > 1) {
+    throw new UsageError(`name the records one way; got ${sources.map((s) => s.from).join(" and ")}`);
   }
-  const one = given[0];
-  if (one === undefined) return undefined;
-  const t = parseTarget(one.v, noun, handles);
-  if (one.from === "--id" && parseLiteKey(one.v) !== undefined) {
-    throw new UsageError(`--id takes a bare id; '${one.v}' is a Lite key`, { hint: `Use --lite "${one.v}".` });
+  const source = sources[0];
+  if (source === undefined) return [];
+  const targets = source.values.map((v) => {
+    if (source.from === "--id" && parseLiteKey(v) !== undefined) {
+      throw new UsageError(`--id takes a bare id; '${v}' is a Lite key`, { hint: `Use --lite "${v}".` });
+    }
+    return parseTarget(v, noun, handles);
+  });
+  const seen = new Set<string>();
+  for (const t of targets) {
+    const key = `${cleanName(t.type).toLowerCase()};${t.id}`;
+    if (seen.has(key)) throw new UsageError(`${t.shown} is named twice`, { hint: "Each record once: a bulk operation runs once per record." });
+    seen.add(key);
   }
-  return t;
+  return targets;
 }
 
 /** `--edit Member.Path=value`: the path addresses members, `entity`, and list indices (AC-31.7). */
@@ -161,6 +173,15 @@ interface Plan {
   edits: ReturnType<typeof parseEdits>;
 }
 
+/** An operation over many records (#119): one request, one outcome per record. */
+interface BulkPlan {
+  many: true;
+  op: ResolvedOperation;
+  targets: OperationTarget[];
+  route: "executeMultiple" | "deleteMultiple" | "constructFromMultiple" | "constructFromMany";
+  args: ArgValue[] | null;
+}
+
 function cleanName(typeName: string): string {
   return typeName.replace(/Entity$/, "");
 }
@@ -192,11 +213,11 @@ function routeOf(op: ResolvedOperation, hasTarget: boolean): Route {
   }
 }
 
-function plan(ctx: Ctx, md: Metadata): Plan {
+function plan(ctx: Ctx, md: Metadata): Plan | BulkPlan {
   const isKey = ctx.args.kind === "operation-key";
   const command = String(ctx.args.command);
   const noun = isKey ? undefined : ctx.args.positionals[0];
-  const positional = isKey ? ctx.args.positionals[0] : ctx.args.positionals[1];
+  const positionals = isKey ? ctx.args.positionals : ctx.args.positionals.slice(1);
   if (!isKey && noun === undefined) {
     throw new UsageError(`'${command}' needs a type: signum ${command} <Type> [id]`, {
       hint: "Run `signum operations` to see the operations and the types they run on.",
@@ -208,11 +229,13 @@ function plan(ctx: Ctx, md: Metadata): Plan {
     });
   }
 
-  const target = targetOf(ctx, noun, positional);
+  const targets = targetsOf(ctx, noun, positionals);
   // A key alone names no type; for a constructor the noun or the key's only type does (AC-44.1).
   const op = isKey
-    ? resolveKey(md, command, target?.type)
+    ? resolveKey(md, command, targets[0]?.type)
     : resolveVerbNoun(md, command, noun as string);
+  if (targets.length > 1 || op.info.kind === "ConstructorFromMany") return bulkPlan(ctx, op, targets);
+  const target = targets[0];
   const route = routeOf(op, target !== undefined);
 
   if (route === "construct" && target !== undefined) {
@@ -254,6 +277,41 @@ function plan(ctx: Ctx, md: Metadata): Plan {
   });
 
   return { op, target, route, args, edits };
+}
+
+function bulkPlan(ctx: Ctx, op: ResolvedOperation, targets: OperationTarget[]): BulkPlan {
+  const kind = op.info.kind ?? "Execute";
+  if (targets.length === 0) {
+    throw new UsageError(`${op.key} runs on records; name them`, {
+      hint: `signum ${op.key} --lite "${op.type.name};1" --lite "${op.type.name};2"`,
+    });
+  }
+  for (const t of targets) {
+    if (cleanName(t.type).toLowerCase() !== cleanName(op.type.name).toLowerCase()) {
+      throw new UsageError(`${t.shown} is not a ${op.type.name}`, { hint: `${op.key} runs on ${op.type.name}.` });
+    }
+    t.type = op.type.name;
+  }
+  if (optAll(ctx, "edit").length > 0) {
+    // The multi endpoints take property setters, not entities (AC-45.4); an --edit has nowhere to go.
+    throw new UsageError("--edit is for one record; over many records it would be discarded", {
+      hint: "Run the operation once per record, or wait for property setters over many records.",
+    });
+  }
+  const route = kind === "Execute" ? "executeMultiple"
+    : kind === "Delete" ? "deleteMultiple"
+    : kind === "ConstructorFrom" ? "constructFromMultiple"
+    : kind === "ConstructorFromMany" ? "constructFromMany"
+    : undefined;
+  if (route === undefined) {
+    throw new UsageError(`${op.key} is a constructor, which runs on no record`, { hint: `signum ${kebab(op.info.verb)} ${kebab(op.type.name)}` });
+  }
+  const args = encodeArgs(ctx.args.sequence, {
+    handles: loadHandles(ctx.io.env),
+    allowCustomObjects: flag(ctx, "allow-custom-arg"),
+    warn: (line) => ctx.io.err(line),
+  });
+  return { many: true, op, targets, route, args };
 }
 
 function operationPath(p: Plan): string {
@@ -446,7 +504,9 @@ export async function runOperation(ctx: Ctx): Promise<ExitCode> {
     url: target.url, http: target.http, offline: ctx.args.flags.offline,
     env: ctx.io.env, warn: (l) => ctx.io.err(l),
   });
-  const p = plan(ctx, md);
+  const planned = plan(ctx, md);
+  if ("many" in planned) return await runBulk(ctx, target, planned, { explain, dry });
+  const p = planned;
 
   if (explain && !dry) return explainPlan(ctx, target, p);
   if (dry) {
@@ -504,4 +564,152 @@ export async function runOperation(ctx: Ctx): Promise<ExitCode> {
   describeResult(ctx, p, pack);
   renderPack(ctx, pack);
   return ExitCode.Ok;
+}
+
+// ─── many records (#119) ───────────────────────────────────────────────────────
+
+/** One record's outcome, as the multi endpoints stream it (`OperationController.OperationResult`). */
+interface BulkOutcome {
+  /** As the caller named it: a handle stays a handle. */
+  target: string;
+  ok: boolean;
+  error?: string;
+}
+
+function bulkPath(p: BulkPlan): string {
+  return `api/operation/${p.route}/${encodeURIComponent(p.op.key)}`;
+}
+
+/** `MultiOperationRequest`: the Lites, the args, and for constructFromMany the type when no Lite says it. */
+function bulkBody(p: BulkPlan, lite: (t: OperationTarget) => Record<string, unknown>): Record<string, unknown> {
+  return {
+    lites: p.targets.map(lite),
+    args: p.args,
+    ...(p.route === "constructFromMany" ? { type: cleanName(p.op.type.name) } : {}),
+  };
+}
+
+/**
+ * The NDJSON the multi endpoints answer with: one `{entity, error}` line per record, in no promised
+ * order. Matched back to the records by `Type;id`, so each outcome is reported under the name the
+ * caller used. A record the stream never mentions is reported as failed — silence is not success.
+ */
+function parseOutcomes(p: BulkPlan, text: string): BulkOutcome[] {
+  const byKey = new Map(p.targets.map((t) => [`${cleanName(t.type).toLowerCase()};${t.id}`, t]));
+  const outcomes = new Map<string, BulkOutcome>();
+  for (const line of text.split("\n")) {
+    if (line.trim() === "") continue;
+    const o = JSON.parse(line) as { entity?: { EntityType?: string; id?: unknown }; error?: string | null };
+    const key = `${String(o.entity?.EntityType ?? "").toLowerCase()};${String(o.entity?.id ?? "")}`;
+    const t = byKey.get(key);
+    if (t === undefined) continue;
+    outcomes.set(key, { target: t.shown, ok: o.error === null || o.error === undefined || o.error === "", ...(o.error ? { error: o.error } : {}) });
+  }
+  return p.targets.map((t) => outcomes.get(`${cleanName(t.type).toLowerCase()};${t.id}`)
+    ?? { target: t.shown, ok: false, error: "no outcome reported by the server" });
+}
+
+/** 0 when every record succeeded, 10 when some did, 1 when none did (AC-45.3). */
+function bulkExit(outcomes: readonly BulkOutcome[]): ExitCode {
+  const failed = outcomes.filter((o) => !o.ok).length;
+  if (failed === 0) return ExitCode.Ok;
+  return failed === outcomes.length ? ExitCode.Unexpected : ExitCode.PartialFailure;
+}
+
+function renderOutcomes(ctx: Ctx, outcomes: readonly BulkOutcome[], verdictWord: { ok: string; failed: string }): void {
+  if (ctx.format === "json") {
+    renderDocument(outcomes, { format: "json", write: ctx.io.out });
+  } else if (ctx.format === "ndjson") {
+    for (const o of outcomes) ctx.io.out(JSON.stringify(o) + "\n");
+  } else {
+    for (const o of outcomes) ctx.io.out(o.ok ? `${verdictWord.ok}  ${o.target}\n` : `${verdictWord.failed}  ${o.target}: ${o.error}\n`);
+  }
+  const failed = outcomes.filter((o) => !o.ok).length;
+  ctx.io.err(`${outcomes.length - failed} of ${outcomes.length} ${verdictWord.ok === "permitted" ? "permitted" : "succeeded"}` +
+    (failed > 0 ? `; ${failed} ${verdictWord.ok === "permitted" ? "not permitted" : "failed"}` : "") + "\n");
+}
+
+/**
+ * `--dry-run` over many records: each record's own `canExecute` from its entity pack (AC-45.5,
+ * #119). `stateCanExecutes` answers for the SET as a whole, which is the blanket answer a per-record
+ * dry run must not give. Reads only; no `api/operation/*` request.
+ */
+async function bulkDryRun(ctx: Ctx, target: Target, p: BulkPlan): Promise<ExitCode> {
+  const outcomes: BulkOutcome[] = [];
+  for (const t of p.targets) {
+    const res = await target.http.request<unknown>({
+      method: "GET",
+      path: `api/entityPack/${encodeURIComponent(cleanName(t.type))}/${encodeURIComponent(t.id)}`,
+      lossless: true,
+    });
+    const canExecute = (((res.body ?? {}) as Record<string, unknown>)["canExecute"] ?? {}) as Record<string, unknown>;
+    const present = Object.hasOwn(canExecute, p.op.key);
+    const r = present ? canExecute[p.op.key] : undefined;
+    const ok = present && (r === null || r === undefined || r === "");
+    outcomes.push({ target: t.shown, ok, ...(!ok ? { error: !present ? "not permitted for this login; the server gives no reason" : String(r) } : {}) });
+  }
+  renderOutcomes(ctx, outcomes, { ok: "permitted", failed: "blocked" });
+  ctx.io.err("note: a dry run checks permission, not success: a permitted operation can still fail when run.\n");
+  const blocked = outcomes.filter((o) => !o.ok).length;
+  return blocked === 0 ? ExitCode.Ok : ExitCode.NotAuthorized;
+}
+
+async function runBulk(ctx: Ctx, target: Target, p: BulkPlan, mode: { explain: boolean; dry: boolean }): Promise<ExitCode> {
+  if (mode.explain) {
+    renderDocument({ method: "POST", url: `${target.url}/${bulkPath(p)}`, body: bulkBody(p, shownTarget) },
+      { format: ctx.format === "table" ? "json" : ctx.format, write: ctx.io.out });
+    if (!mode.dry) return ExitCode.Ok;
+  }
+  if (mode.dry) return await bulkDryRun(ctx, target, p);
+
+  const real = (t: OperationTarget) => `${cleanName(t.type)};${t.id}`;
+  const isDelete = p.route === "deleteMultiple";
+  // The count first, before anything else can scroll it away (AC-45.5).
+  ctx.io.err(`${p.op.key} on ${p.targets.length} records\n`);
+  const permit = await confirmMutation(ctx, {
+    operation: p.op.key,
+    target: `${p.targets.length} records`,
+    realTarget: p.targets.map(real).join(", "),
+    url: target.url,
+    destructive: isDelete,
+    count: p.targets.length,
+  });
+
+  let response: unknown;
+  try {
+    response = (await target.http.request<unknown>({
+      method: "POST", path: bulkPath(p), rawBody: JSON.stringify(bulkBody(p, liteJson)), lossless: true,
+    })).body;
+  } catch (err) {
+    // The request as a whole failed: every record in it did.
+    for (const t of p.targets) {
+      recordMutation(ctx, permit, {
+        ok: false, error: err instanceof Error ? err.message : String(err),
+        exitCode: err instanceof CliError ? err.exitCode : ExitCode.Unexpected,
+      }, { realTarget: real(t), target: t.shown });
+    }
+    throw err;
+  }
+
+  if (p.route === "constructFromMany") {
+    // One new entity from many records: a pack, not a stream.
+    recordMutation(ctx, permit, { ok: true });
+    if (response === null || response === undefined || response === "") {
+      ctx.io.err(`note: ${p.op.key} declined to construct anything; nothing was returned.\n`);
+      return ExitCode.Ok;
+    }
+    if (!p.op.info.resultIsSaved) ctx.io.err(`note: ${p.op.key} returned a new ${p.op.type.name} that is NOT saved; nothing was stored.\n`);
+    renderPack(ctx, response);
+    return ExitCode.Ok;
+  }
+
+  const text = typeof response === "string" ? response : JSON.stringify(response);
+  const outcomes = parseOutcomes(p, text);
+  p.targets.forEach((t, i) => {
+    const o = outcomes[i] as BulkOutcome;
+    recordMutation(ctx, permit, o.ok ? { ok: true } : { ok: false, error: o.error ?? "", exitCode: ExitCode.PartialFailure },
+      { realTarget: real(t), target: t.shown });
+  });
+  renderOutcomes(ctx, outcomes, { ok: isDelete ? "deleted" : "ok", failed: "FAILED" });
+  return bulkExit(outcomes);
 }

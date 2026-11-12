@@ -147,6 +147,7 @@ per-item outcomes, so that I can act at scale and know exactly what happened.
 - AC-45.4: Declarative property setters are supported — `MultiOperationRequest.Setters` is a list of `PropertySetter { Property, Setters, … }` applied via `MultiSetter.SetSetters` (`OperationController.cs:222,304-320`), including nesting for embedded entities and `MList` rows.
 - AC-45.5: Bulk operations always require confirmation on a TTY, always print the target count first, and support `--dry-run` across the whole set.
 - AC-45.6: Interrupting mid-batch leaves already-emitted per-item results valid, and the CLI reports how many were processed.
+- AC-45.7: *(Added with #119.)* Each record's outcome is matched back to it by `Type;id` and reported under the name the caller used, a handle included; a record the server's stream never mentions is reported as **failed**, never as done. A partial failure is exit **10**, all failing exit 1 (cli-surface §5). `--dry-run` asks each record's entity pack, because `stateCanExecutes` answers for the set as a whole. **Deferred, deliberately:** property setters over many records (AC-45.4) and `executeLiteWithProgress` (one long operation's progress, not a bulk one); `--edit` over many records is refused until setters exist.
 
 ---
 

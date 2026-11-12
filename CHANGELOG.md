@@ -31,7 +31,11 @@ source of truth: a release tag `v<version>` must match it (see the README's rele
     creates one when no record is named: `signum save order --edit Name=Acme --yes`. A constructor's
     result is reported as unsaved when it is; a delete's prompt says it cannot be undone, and a
     missing record is a clean not-found.
-  - Bulk operations (#119) are not invokable yet.
+  - Operations over many records (#119): name several, `signum approve order 42 43 44` or repeated
+    `--lite`, and one request reports one outcome per record. A partial failure is the new exit
+    code 10 and lists which failed and why; all failing is 1. The confirmation names the count, and
+    from 10 records (or any delete of several) the count must be typed back. `--dry-run` answers per
+    record. Not yet: property setters over many records (AC-45.4) and `executeLiteWithProgress`.
 
 ## 0.2.1 — 2026-10-23
 

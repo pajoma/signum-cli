@@ -47,7 +47,15 @@ export interface MutationDescription {
   url: string;
   /** A delete: the least reversible thing the CLI does, and the prompt says so (#118). */
   destructive?: boolean;
+  /** How many records a bulk operation touches; the prompt names it (#119, AC-45.5). */
+  count?: number;
 }
+
+/**
+ * From this many records a bare y/N is not enough: the count must be typed back (AC-46.5). A delete
+ * of more than one record needs it at any size, because nothing about it can be undone.
+ */
+export const TYPED_CONFIRMATION_FROM = 10;
 
 /** Ask, or refuse, before anything that changes the application. */
 export async function confirmMutation(ctx: Ctx, m: MutationDescription): Promise<MutationPermit> {
@@ -70,7 +78,7 @@ export async function confirmMutation(ctx: Ctx, m: MutationDescription): Promise
 
   // A prompt needs a terminal on both ends: one to show it, one to answer it.
   if (!ctx.io.stdoutIsTty || ctx.io.prompt === undefined) {
-    throw new UsageError(`refusing to run ${m.operation} on ${m.target} without --yes`, {
+    throw new UsageError(`refusing to run ${m.operation} on ${m.count !== undefined && m.count > 1 ? `${m.count} records` : m.target} without --yes`, {
       hint:
         "There is no terminal to confirm at, so nothing was sent. A command that changes data never\n" +
         "runs by default from a script or an agent. Check it first with --dry-run, then pass --yes.",
@@ -79,6 +87,20 @@ export async function confirmMutation(ctx: Ctx, m: MutationDescription): Promise
 
   // Show the real target: this is a person at their own terminal, and the wrong record is the
   // mistake a confirmation exists to catch. The URL is there for the wrong-environment mistake.
+  const count = m.count ?? 1;
+  if (count > 1) {
+    const shown = m.realTarget.split(", ");
+    const listed = shown.slice(0, 5).join(", ") + (shown.length > 5 ? `, … (${shown.length - 5} more)` : "");
+    const typed = count >= TYPED_CONFIRMATION_FROM || m.destructive === true;
+    const question = `${m.destructive === true ? "DELETE" : "Run " + m.operation + " on"} ${count} records at ${m.url}: ${listed}` +
+      (m.destructive === true ? ". This cannot be undone." : ".") +
+      (typed ? ` Type ${count} to confirm: ` : " [y/N] ");
+    const answer = (await ctx.io.prompt(question)).trim();
+    if (typed ? answer !== String(count) : !/^y(es)?$/i.test(answer)) {
+      throw new CliError("not confirmed; nothing was sent", ExitCode.Usage);
+    }
+    return permit;
+  }
   const answer = await ctx.io.prompt(m.destructive === true
     ? `DELETE ${m.realTarget} with ${m.operation} at ${m.url}? This cannot be undone. [y/N] `
     : `Run ${m.operation} on ${m.realTarget} at ${m.url}? [y/N] `);
@@ -117,15 +139,17 @@ export function recordMutation(
   ctx: Ctx,
   permit: MutationPermit,
   outcome: { ok: true } | { ok: false; error: string; exitCode: number },
+  /** One record of a bulk operation, logged on its own line so each outcome is reconstructable. */
+  record?: { realTarget: string; target: string },
 ): void {
   const path = auditLogPath(ctx.io.env);
   const line = JSON.stringify({
     time: new Date().toISOString(),
     url: permit.url,
     operation: permit.operation,
-    target: permit.realTarget,
+    target: record?.realTarget ?? permit.realTarget,
     caller: ctx.caller.context,
-    ...(permit.target !== permit.realTarget ? { via: permit.target } : {}),
+    ...((record?.target ?? permit.target) !== (record?.realTarget ?? permit.realTarget) ? { via: record?.target ?? permit.target } : {}),
     ...outcome,
   }) + "\n";
   try {

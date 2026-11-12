@@ -246,4 +246,23 @@ describe.skipIf(!createWrites)("live create and delete (#118)", () => {
       if (!deleted) await cli([createDelete as string, "--lite", `${type};${id}`, "--yes"]);
     }
   });
+
+  it("deletes two records in one bulk request, reporting each (#119)", async () => {
+    const type = createType as string;
+    const ids: string[] = [];
+    try {
+      for (const n of [1, 2]) {
+        const made = await cli([createSave as string, "--edit", `${createMember}=signum live bulk ${n} ${new Date().toISOString()}`, "--yes", "-o", "json"]);
+        expect(made.code).toBe(ExitCode.Ok);
+        ids.push(String((JSON.parse(made.out) as { entity: { id: unknown } }).entity.id));
+      }
+      const r = await cli([createDelete as string, ...ids.flatMap((id) => ["--lite", `${type};${id}`]), "--yes", "-o", "json"]);
+      expect(r.code).toBe(ExitCode.Ok);
+      const clean = type.replace(/Entity$/, "");
+      expect(JSON.parse(r.out)).toEqual(ids.map((id) => ({ target: `${clean};${id}`, ok: true })));
+      ids.length = 0;
+    } finally {
+      for (const id of ids) await cli([createDelete as string, "--lite", `${type};${id}`, "--yes"]);
+    }
+  });
 });
