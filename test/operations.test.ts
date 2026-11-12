@@ -165,6 +165,8 @@ let canExecuteById: Record<string, Record<string, string | null>> = {};
 /** Ids whose bulk outcome is an error, and ids the stream leaves out. */
 let failIds: string[] = [];
 let silentIds: string[] = [];
+/** Cut the multi endpoints' last NDJSON line in half, as a stream that broke off would. */
+let truncateStream = false;
 
 const ORDER_42 = `{"Type":"Order","id":42,"ticks":"638500000000000017","toStr":"Order 42","modified":false,"name":"Acme","customer":{"EntityType":"Customer","id":9,"model":"Erika Mustermann"}}`;
 
@@ -180,11 +182,16 @@ beforeAll(() => {
       if (url.pathname === "/api/entity/Order/42") return new Response(ORDER_42, { headers });
       const multi = /^\/api\/operation\/(executeMultiple|deleteMultiple|constructFromMultiple)\//.exec(url.pathname);
       if (multi !== null) {
+        if (answer === "forbidden") {
+          return new Response(JSON.stringify({ exceptionType: "System.UnauthorizedAccessException", exceptionMessage: "Approve is not allowed" }), { status: 403, headers });
+        }
         const { lites } = JSON.parse(body) as { lites: Array<{ EntityType: string; id: number }> };
         const lines = lites
           .filter((l) => !silentIds.includes(String(l.id)))
           .map((l) => JSON.stringify({ entity: { EntityType: l.EntityType, id: l.id, model: `Order ${l.id}` }, error: failIds.includes(String(l.id)) ? `Order ${l.id} cannot be approved` : null }));
-        return new Response(lines.join("\n") + "\n", { headers: { "content-type": "application/x-ndjson" } });
+        const text = lines.join("\n") + "\n";
+        return new Response(truncateStream ? text.slice(0, text.length - Math.floor((lines.at(-1)?.length ?? 0) / 2)) : text,
+          { headers: { "content-type": "application/x-ndjson" } });
       }
       if (url.pathname === "/api/operation/constructFromMany/OrderOperation.Merge") {
         return new Response(`{"entity":{"Type":"Order","id":null,"isNew":true,"toStr":"","modified":true,"name":null},"canExecute":{}}`, { headers });
@@ -237,6 +244,7 @@ beforeEach(() => {
   canExecuteById = {};
   failIds = [];
   silentIds = [];
+  truncateStream = false;
 });
 afterEach(() => rmSync(configDir, { recursive: true, force: true }));
 
@@ -636,6 +644,25 @@ describe("operations over many records (STORY-45, #119)", () => {
     const r = await cli([...two, "--yes", "--json"]);
     expect(r.code).toBe(ExitCode.PartialFailure);
     expect(r.out).toContain("no outcome reported by the server");
+  });
+
+  it("an answer cut off mid-line still reports and logs every record, the unread one as failed", async () => {
+    truncateStream = true;
+    const r = await cli([...two, "--yes", "--json"]);
+    expect(r.code).toBe(ExitCode.PartialFailure);
+    expect(JSON.parse(r.out)).toEqual([
+      { target: "Order;42", ok: true },
+      { target: "Order;43", ok: false, error: "no readable outcome: the server's answer was cut off or malformed; check the record" },
+    ]);
+    expect(auditLines().map((l) => [l["target"], l["ok"]])).toEqual([["Order;42", true], ["Order;43", false]]);
+  });
+
+  it("a 403 for the whole request gets the same hint as for one record, and every record is logged", async () => {
+    answer = "forbidden";
+    const r = await cli([...two, "--yes"]);
+    expect(r.code).toBe(ExitCode.NotAuthorized);
+    expect(r.err).toContain("hidden from the UI");
+    expect(auditLines().map((l) => [l["target"], l["ok"], l["exitCode"]])).toEqual([["Order;42", false, 4], ["Order;43", false, 4]]);
   });
 
   it("logs one line per record with its own outcome (AC-46.6)", async () => {
