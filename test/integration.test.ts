@@ -398,10 +398,14 @@ beforeAll(() => {
         return new Response(EXACT_RESULT_TABLE, { headers });
       }
       if (url.pathname.startsWith("/api/query/executeQuery/")) {
-        executeQueryRequests.push(
-          (await req.json()) as { queryKey: string; columns: Array<{ token: string }> },
+        const body = (await req.json()) as { queryKey: string; columns: Array<{ token: string }>; pagination?: { mode: string } };
+        executeQueryRequests.push(body);
+        // As the server does (DQueryable.cs:957-1008): `Firsts` issues no count, so the total is null.
+        // A mock that counted anyway hid #149: the default page never said it was partial.
+        return new Response(
+          JSON.stringify(body.pagination?.mode === "Firsts" ? { ...RESULT_TABLE, totalElements: null } : RESULT_TABLE),
+          { headers },
         );
-        return new Response(JSON.stringify(RESULT_TABLE), { headers });
       }
       if (url.pathname.startsWith("/api/query/queryValue/")) {
         return new Response("7", { headers });
@@ -1141,7 +1145,18 @@ describe("query (STORY-20, STORY-21, STORY-22)", () => {
     expect(r.code).toBe(ExitCode.Ok);
     const doc = JSON.parse(r.out) as { method: string; body: { pagination: unknown } };
     expect(doc.method).toBe("POST");
-    expect(doc.body.pagination).toEqual({ mode: "Firsts", elementsPerPage: 50 });
+    expect(doc.body.pagination).toEqual({ mode: "Paginate", elementsPerPage: 50, currentPage: 1 });
+  });
+
+  it("the default page is counted, so a partial one says so; --top is not (AC-21.5, #149)", async () => {
+    const page = await cli(["query", "Order", "--json"]);
+    expect(page.code).toBe(ExitCode.Ok);
+    expect(page.err).toContain("2 of 7 rows visible to you");
+    // The caller asked for n; `Firsts` is what the server answers without a COUNT(*).
+    const top = await cli(["query", "Order", "--top", "2", "--json"]);
+    expect(top.code).toBe(ExitCode.Ok);
+    expect(top.err).not.toContain("rows visible to you");
+    expect(JSON.parse(top.out)).toHaveLength(2);
   });
 
   it("defaults to a bounded page, never All (AC-23.2)", async () => {

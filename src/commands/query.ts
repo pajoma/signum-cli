@@ -30,7 +30,7 @@ import { flag, interruptible, opt, optAll } from "../core/ctx.ts";
 import { resolveTarget, type Target } from "../core/target.ts";
 import type { SignumHttp } from "../core/http.ts";
 import { inputReader, type InputReader } from "../core/input.ts";
-import { countFrom, requestedVariant, runVariant, variantRequest } from "./query-variants.ts";
+import { countFrom, DEFAULT_PAGE, requestedVariant, runVariant, variantRequest } from "./query-variants.ts";
 
 interface OrderSpec { token: string; orderType: "Ascending" | "Descending" }
 
@@ -81,7 +81,8 @@ function parsePagination(ctx: Ctx): unknown {
     if (!Number.isInteger(size) || size <= 0) throw new UsageError("--page-size must be a positive integer");
     return { mode: "All", elementsPerPage: size };
   }
-  return { mode: "Firsts", elementsPerPage: 50 };
+  // Bounded, and counted: see DEFAULT_PAGE (#149). `--top` stays `Firsts`: the caller asked for n rows.
+  return DEFAULT_PAGE;
 }
 
 /** `--filter-json <file|@file|->`: read through the one input reader (#120), so `-` is stdin. */

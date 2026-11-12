@@ -19,6 +19,10 @@ source of truth: a release tag `v<version>` must match it (see the README's rele
 
 ### Fixed
 
+- `query` without a paging flag now says when the page is partial (#149, in place of PR #161). The
+  default page was `Firsts`, for which the server issues no count, so against a live application
+  the "N of M rows visible to you" line from 0.2.1 never appeared, in any format. The default is now
+  `Paginate` page 1 of 50: the same rows, plus the count. `--top` stays `Firsts`, uncounted.
 - `--dry-run` and an operation's `--help`, for a record named by a `ref_` handle that no longer
   exists, printed the server's not-found message, which names the real id. They now name the
   handle, as `get` and a sent operation already did.

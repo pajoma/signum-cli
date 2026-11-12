@@ -45,8 +45,17 @@ export function requestedVariant(ctx: Ctx): Variant | undefined {
   return variant;
 }
 
+/**
+ * The page a table query gets when no paging flag is given. `Paginate`, not `Firsts`: only
+ * `Paginate` makes the server count (`DQueryable.cs:957-1008`), and without that count a cut-off
+ * page cannot be told from a complete result (AC-21.5, #149). Compared by identity in `countFrom`,
+ * so an explicit `--page 1` is still refused by the variants.
+ */
+export const DEFAULT_PAGE = Object.freeze({ mode: "Paginate", elementsPerPage: 50, currentPage: 1 });
+
 /** `count` from the already-validated pagination: --top n → n, --all → unbounded, default bounded. */
 export function countFrom(pagination: unknown): number | null {
+  if (pagination === DEFAULT_PAGE) return DEFAULT_PAGE.elementsPerPage;
   const p = pagination as { mode: string; elementsPerPage?: number };
   if (p.mode === "All") return null;
   if (p.mode === "Firsts") return p.elementsPerPage ?? 50;
