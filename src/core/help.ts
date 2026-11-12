@@ -58,6 +58,13 @@ export const GLOBAL_FLAGS: FlagSpec[] = [
   { name: "help", alias: "h", summary: "Show help for any command" },
 ];
 
+/** What a profile is beyond its URL (AC-05.1, AC-05.5), as `instance add` and `instance set` take it. */
+const PROFILE_FLAGS: FlagSpec[] = [
+  { name: "protected", summary: "Writes against it are confirmed by typing its name, --yes or not" },
+  { name: "unprotected", summary: "Remove the protection" },
+  { name: "auth-header", arg: "<name>", summary: "The header the token goes in (default: Authorization)" },
+];
+
 export const COMMANDS: CommandSpec[] = [
   {
     name: "help",
@@ -385,14 +392,18 @@ export const COMMANDS: CommandSpec[] = [
   {
     name: "instance",
     summary: "Register short names for target applications, used as -i <name>",
-    usage: "signum instance <add|list|remove|path>",
+    usage: "signum instance <add|set|list|remove|path>",
     milestone: "m2",
     description:
       "A registered name stands in for --url anywhere: `signum -i renew types`. The name is always " +
       "yours to choose; it is never derived from the URL.\n\n" +
       "Names are stored in instances.json in the config directory, owner-only. A stored login " +
       "is still matched by URL, so -i reaches it exactly when --url with the same address would. " +
-      "Nothing here touches the network.",
+      "Nothing here touches the network.\n\n" +
+      "An instance is a profile: besides its URL it may be protected, so a write is confirmed by " +
+      "typing its name, and may name the header its token goes in. The credential stays where " +
+      "`auth login` put it, matched by URL; the mechanism is the token handed over from a browser " +
+      "session, the only one until API keys.",
     examples: [
       "signum instance add renew https://renew.example.org",
       "signum instance add staging https://staging.example.org",
@@ -402,9 +413,31 @@ export const COMMANDS: CommandSpec[] = [
       {
         name: "add",
         summary: "Register a URL under a name you choose",
-        usage: "signum instance add <name> <url>",
+        usage: "signum instance add <name> <url> [--protected] [--auth-header <name>]",
         milestone: "m2",
-        examples: ["signum instance add renew https://renew.example.org", "signum instance add local http://localhost:5000"],
+        flags: PROFILE_FLAGS,
+        examples: [
+          "signum instance add renew https://renew.example.org",
+          "signum instance add prod https://app.example.org --protected",
+          "signum instance add ad https://ad.example.org --auth-header Signum_Authorization",
+        ],
+      },
+      {
+        name: "set",
+        summary: "Protect a profile, or change the header its token goes in",
+        usage: "signum instance set <name> [--protected | --unprotected] [--auth-header <name|default>]",
+        milestone: "m2",
+        description:
+          "A protected profile is the one a write must not reach by accident. At a terminal, every " +
+          "operation against it asks, and is confirmed only by typing the profile's name back — " +
+          "--yes does not skip that, so a command recalled from the test instance's history stops " +
+          "there. Without a terminal, --yes is required, as for every target.\n\n" +
+          "--auth-header names the header the token goes in, for an application that moved it: a " +
+          "Windows-AD application reads it from Signum_Authorization (AuthTokensServer.cs:57-62). " +
+          "SIGNUM_AUTH_HEADER does the same for a run without a profile. The value is redacted " +
+          "wherever the request is shown, as Authorization is.",
+        flags: PROFILE_FLAGS,
+        examples: ["signum instance set prod --protected", "signum instance set ad --auth-header Signum_Authorization", "signum instance set ad --auth-header default"],
       },
       {
         name: "list",
@@ -589,6 +622,8 @@ export const TOPICS: Record<string, string> = {
     "  unless --yes (-y) is given. Every attempt is logged to <config-dir>/audit.log.",
     "  A detected AI agent also needs --i-understand-an-agent-is-writing (or",
     "  SIGNUM_ALLOW_AGENT_WRITES=1). The acknowledgement for reading data does not count.",
+    "  A protected instance (signum instance set prod --protected) is asked at a terminal",
+    "  even with --yes, and only its name typed back confirms.",
     "",
     "  The record:  positional id, --lite \"Type;id\", --id <id>, or a ref_ handle.",
     "  Edits:       --edit Member.Path=value, for an operation that takes the entity",

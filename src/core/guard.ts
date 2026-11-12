@@ -9,7 +9,8 @@
  * runtime because TypeScript erases.
  *
  * The rules (AC-46.1 to AC-46.3):
- *   - `--yes` (or `-y`) confirms, in every context.
+ *   - `--yes` (or `-y`) confirms, in every context — except at a terminal, against a protected
+ *     profile, where the profile's name must be typed back whatever the flags (AC-05.5).
  *   - At a terminal, ask — naming the operation, the target and the application — and stop on
  *     anything but yes.
  *   - Anywhere else, fail. A script must never hang on a prompt it cannot answer, and must never
@@ -26,7 +27,7 @@ import { dirname, join } from "node:path";
 import { configDir } from "./config.ts";
 import { flag, type Ctx } from "./ctx.ts";
 import { CliError, ExitCode, PolicyError, UsageError } from "./errors.ts";
-import { instanceForUrl } from "./instances.ts";
+import { profileForUrl } from "./instances.ts";
 
 const PERMIT: unique symbol = Symbol("signum.mutationPermit");
 
@@ -79,22 +80,38 @@ export async function confirmMutation(ctx: Ctx, m: MutationDescription): Promise
         "--dry-run and --explain need neither: they change nothing.",
     });
   }
-  if (flag(ctx, "yes") || flag(ctx, "y")) return permit;
+  // A protected profile (AC-05.5) is asked at a terminal whatever the flags say: a `--yes` recalled
+  // from the shell history of the test instance is exactly the accident it is there for.
+  const profile = profileForUrl(m.url, ctx.io.env);
+  const canAsk = ctx.io.stdoutIsTty && ctx.io.prompt !== undefined;
+  if ((flag(ctx, "yes") || flag(ctx, "y")) && !(profile?.protected === true && canAsk)) return permit;
 
   // A prompt needs a terminal on both ends: one to show it, one to answer it.
-  if (!ctx.io.stdoutIsTty || ctx.io.prompt === undefined) {
+  if (!canAsk || ctx.io.prompt === undefined) {
     throw new UsageError(`refusing to run ${m.operation} on ${count > 1 ? `${count} records` : m.target} without --yes`, {
       hint:
         "There is no terminal to confirm at, so nothing was sent. A command that changes data never\n" +
-        "runs by default from a script or an agent. Check it first with --dry-run, then pass --yes.",
+        "runs by default from a script or an agent. Check it first with --dry-run, then pass --yes." +
+        (profile?.protected === true ? `\n${profile.slug} is a protected profile: at a terminal its name must be typed back.` : ""),
     });
   }
 
   // Show the real target: this is a person at their own terminal, and the wrong record is the
   // mistake a confirmation exists to catch. The instance and URL are there for the wrong-environment
   // mistake (AC-05.6), the likeliest of all: `testwork` and `work` differ by four letters.
-  const instance = instanceForUrl(m.url, ctx.io.env);
+  const instance = profile?.slug;
   const where = instance !== undefined ? `${instance} (${m.url})` : m.url;
+  if (profile?.protected === true) {
+    const listed = (m.records ?? []).slice(0, 5).join(", ") + (count > 5 ? `, … (${count - 5} more)` : "");
+    const what = count > 1
+      ? `${m.destructive === true ? "DELETE" : `Run ${m.operation} on`} ${count} records (${listed})`
+      : `${m.destructive === true ? `DELETE ${m.realTarget} with ${m.operation}` : `Run ${m.operation} on ${m.realTarget}`}`;
+    const answer = (await ctx.io.prompt(
+      `${profile.slug} is PROTECTED. ${what} at ${where}${m.destructive === true ? "; this cannot be undone" : ""}. Type ${profile.slug} to confirm: `,
+    )).trim();
+    if (answer !== profile.slug) throw new CliError("not confirmed; nothing was sent", ExitCode.Usage);
+    return permit;
+  }
   if (m.records !== undefined && count > 1) {
     const listed = m.records.slice(0, 5).join(", ") + (count > 5 ? `, … (${count - 5} more)` : "");
     const typed = count >= TYPED_CONFIRMATION_FROM || m.destructive === true;

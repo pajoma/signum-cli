@@ -13,7 +13,7 @@ import {
   defaultCredentialUrl, deleteAllCredentials, deleteCredential, loadCredential, permissionsAreUnenforceable, saveCredential,
   setDefaultTarget, storedCredentialUrls,
 } from "../core/credentials.ts";
-import { instanceForUrl, listInstances, resolveInstance, validateUrl } from "../core/instances.ts";
+import { authHeaderFor, DEFAULT_AUTH_HEADER, instanceForUrl, listInstances, resolveInstance, validateUrl } from "../core/instances.ts";
 import { normalizeUrl } from "../core/text.ts";
 import { appVersionFrom, Explained, SignumHttp } from "../core/http.ts";
 import { flag } from "../core/ctx.ts";
@@ -124,6 +124,7 @@ async function login(ctx: Ctx): Promise<ExitCode> {
   const http = new SignumHttp({
     baseUrl: url,
     token,
+    authHeader: authHeaderFor(url, ctx.io.env),
     timeoutMs: ctx.args.flags.timeoutMs,
     trace: ctx.args.flags.verbose ? (l) => ctx.io.err(l) : undefined,
     onTokenRotated: (fresh) => { rotated = fresh; },
@@ -221,18 +222,22 @@ function userName(user: unknown): string | undefined {
  * and what is kept per target: the metadata cache and the handle store. Only local state is read;
  * no other target is contacted, and no token is shown.
  */
-function profiles(ctx: Ctx): Array<{ instance: string | null; url: string; credential: "stored" | "none"; active: boolean; default: boolean }> {
+function profiles(ctx: Ctx): Array<{
+  instance: string | null; url: string; credential: "stored" | "none"; active: boolean; default: boolean;
+  protected: boolean; authHeader: string;
+}> {
   const env = ctx.io.env;
   const active = ctx.target !== undefined ? normalizeUrl(ctx.target) : undefined;
   const fallback = defaultCredentialUrl(env);
-  const byUrl = new Map<string, { instance: string | null; url: string }>();
-  for (const i of listInstances(env)) byUrl.set(normalizeUrl(i.url), { instance: i.slug, url: i.url });
-  for (const u of storedCredentialUrls(env)) if (!byUrl.has(normalizeUrl(u))) byUrl.set(normalizeUrl(u), { instance: null, url: u });
+  const byUrl = new Map<string, { instance: string | null; url: string; protected: boolean }>();
+  for (const i of listInstances(env)) byUrl.set(normalizeUrl(i.url), { instance: i.slug, url: i.url, protected: i.protected === true });
+  for (const u of storedCredentialUrls(env)) if (!byUrl.has(normalizeUrl(u))) byUrl.set(normalizeUrl(u), { instance: null, url: u, protected: false });
   return [...byUrl.entries()].map(([key, p]) => ({
     ...p,
     credential: loadCredential(p.url, env) !== undefined ? "stored" as const : "none" as const,
     active: key === active,
     default: fallback !== undefined && key === normalizeUrl(fallback),
+    authHeader: authHeaderFor(p.url, env),
   }));
 }
 
@@ -240,7 +245,11 @@ function renderProfiles(ctx: Ctx, list: ReturnType<typeof profiles>): void {
   if (list.length === 0) return;
   ctx.io.out("\nProfiles      (* this command's target; default: used when none is named)\n");
   for (const p of list) {
-    const marks = [p.default ? "default" : "", p.credential === "stored" ? "credential stored" : "no credential"].filter((m) => m !== "").join(", ");
+    const marks = [
+      p.default ? "default" : "", p.protected ? "protected" : "",
+      p.credential === "stored" ? "credential stored" : "no credential",
+      p.authHeader !== DEFAULT_AUTH_HEADER ? `token in ${p.authHeader}` : "",
+    ].filter((m) => m !== "").join(", ");
     ctx.io.out(`  ${p.active ? "*" : " "} ${(p.instance ?? "-").padEnd(14)} ${p.url}  (${marks})\n`);
   }
 }

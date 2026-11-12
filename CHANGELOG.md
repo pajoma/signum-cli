@@ -89,6 +89,12 @@ source of truth: a release tag `v<version>` must match it (see the README's rele
   cached too, and `cache show` and `cache clear` include them. Without an application, help prints
   as before plus one note saying why it could not describe the subject, and exits 0. `explain
   <OperationKey>` prints the same description and no longer says operations are m2.
+- **Protected profiles and the token's header** (AC-05.1, AC-05.5). `signum instance add prod <url>
+  --protected` (or `instance set prod --protected`) makes every write against it, at a terminal,
+  ask and wait for `prod` to be typed back, even with `--yes`; without a terminal `--yes` is needed
+  as everywhere. `--auth-header Signum_Authorization` sends the token in the header a Windows-AD
+  application reads it from; `SIGNUM_AUTH_HEADER` does the same without a profile. `instance list`
+  and `auth status` show both.
 
 ## 0.2.1 — 2026-10-23
 

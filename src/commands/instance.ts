@@ -1,5 +1,5 @@
 /**
- * `signum instance add|list|remove` — named instances (REQ-001, first half).
+ * `signum instance add|set|list|remove` — named instances, which are profiles (REQ-001, STORY-05).
  *
  * Purely local: nothing here touches the network, so an instance can be registered before the
  * application is reachable. A registered slug is then usable anywhere `--url` is, as `-i <slug>`.
@@ -8,8 +8,10 @@
 import type { Ctx } from "../core/ctx.ts";
 import { ExitCode, NotFoundError, UsageError } from "../core/errors.ts";
 import { renderDocument } from "../core/output.ts";
+import { flag, opt } from "../core/ctx.ts";
 import {
-  addInstance, instancesPath, listInstances, removeInstance, validateSlug, validateUrl,
+  addInstance, instancesPath, listInstances, removeInstance, updateInstance, validateHeaderName, validateSlug, validateUrl,
+  type Instance, type ProfileSettings,
 } from "../core/instances.ts";
 
 function isJson(ctx: Ctx): ctx is Ctx & { format: "json" | "ndjson" } {
@@ -35,14 +37,51 @@ function add(ctx: Ctx): ExitCode {
     throw new UsageError("`instance add` needs a name and a URL", { hint: usage });
   }
   const url = validateUrl(rawUrl);
-  const added = addInstance(validateSlug(rawSlug), url, ctx.io.env);
+  if (flag(ctx, "unprotected")) throw new UsageError("a new instance is unprotected unless --protected says otherwise");
+  const added = addInstance(validateSlug(rawSlug), url, ctx.io.env, settingsOf(ctx));
 
   if (isJson(ctx)) {
     renderDocument(added, { format: ctx.format, write: ctx.io.out });
   } else {
-    ctx.io.out(`added  ${added.slug}  ${added.url}\n`);
+    ctx.io.out(`added  ${describe(added)}\n`);
     ctx.io.err(`Use it with: signum -i ${added.slug} <command>\n`);
   }
+  return ExitCode.Ok;
+}
+
+/** `--protected`, `--unprotected` and `--auth-header`, as `instance add` and `instance set` take them. */
+function settingsOf(ctx: Ctx): ProfileSettings {
+  const on = flag(ctx, "protected");
+  const off = flag(ctx, "unprotected");
+  if (on && off) throw new UsageError("choose one of --protected and --unprotected");
+  const header = opt(ctx, "auth-header");
+  return {
+    ...(on ? { protected: true } : off ? { protected: false } : {}),
+    ...(header !== undefined ? { authHeader: header.toLowerCase() === "default" ? null : validateHeaderName(header) } : {}),
+  };
+}
+
+/** One profile on one line: name, URL, and what is not the default about it. */
+function describe(i: Instance): string {
+  const marks = [i.protected === true ? "protected" : "", i.authHeader !== undefined ? `token in ${i.authHeader}` : ""].filter((m) => m !== "");
+  return `${i.slug}  ${i.url}${marks.length > 0 ? `  (${marks.join(", ")})` : ""}`;
+}
+
+/** `instance set <name>`: what a profile does, never where it points (remove and add for that). */
+function set(ctx: Ctx): ExitCode {
+  const slug = ctx.args.positionals[1];
+  if (slug === undefined) {
+    throw new UsageError("`instance set` needs a name", { hint: "signum instance set prod --protected" });
+  }
+  const settings = settingsOf(ctx);
+  if (Object.keys(settings).length === 0) {
+    throw new UsageError("`instance set` needs something to set", {
+      hint: "--protected, --unprotected, or --auth-header <name> (default restores Authorization)",
+    });
+  }
+  const updated = updateInstance(slug.toLowerCase(), settings, ctx.io.env);
+  if (isJson(ctx)) renderDocument(updated, { format: ctx.format, write: ctx.io.out });
+  else ctx.io.out(`set  ${describe(updated)}\n`);
   return ExitCode.Ok;
 }
 
@@ -59,7 +98,7 @@ function list(ctx: Ctx): ExitCode {
     return ExitCode.Ok;
   }
   const w = Math.max(...all.map((i) => i.slug.length));
-  for (const i of all) ctx.io.out(`${i.slug.padEnd(w)}  ${i.url}\n`);
+  for (const i of all) ctx.io.out(describe({ ...i, slug: i.slug.padEnd(w) }).trimEnd() + "\n");
   return ExitCode.Ok;
 }
 
@@ -96,11 +135,12 @@ export function runInstance(ctx: Ctx): ExitCode {
     case undefined: // bare `signum instance` is the harmless, informative one
       return list(ctx);
     case "add": return add(ctx);
+    case "set": return set(ctx);
     case "remove": return remove(ctx);
     case "path": return path(ctx);
     default:
       throw new UsageError(`unknown instance subcommand '${sub}'`, {
-        hint: "Valid subcommands: add, list, remove, path.",
+        hint: "Valid subcommands: add, set, list, remove, path.",
       });
   }
 }

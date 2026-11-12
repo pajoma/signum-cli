@@ -8,6 +8,7 @@ import { SignumHttp, type ExplainedRequest } from "./http.ts";
 import { renderDocument } from "./output.ts";
 import { loadCredential, type StoredCredential } from "./credentials.ts";
 import { NotAuthenticatedError, UsageError } from "./errors.ts";
+import { authHeaderFor } from "./instances.ts";
 
 export interface Target {
   url: string;
@@ -76,6 +77,7 @@ export function resolveTarget(ctx: Ctx, options: { requireAuth?: boolean } = {})
   const http = new SignumHttp({
     baseUrl: url,
     token,
+    authHeader: authHeaderFor(url, ctx.io.env),
     timeoutMs: ctx.args.flags.timeoutMs,
     trace: ctx.args.flags.verbose ? (line) => ctx.io.err(line) : undefined,
     explain: explainSink(ctx),

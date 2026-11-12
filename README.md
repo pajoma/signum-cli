@@ -41,8 +41,10 @@ signum help                                          # commands, topics, exit co
 
 Configuration is flags and environment variables — `SIGNUM_URL`, `SIGNUM_INSTANCE`, `SIGNUM_TOKEN`,
 `SIGNUM_OFFLINE`, `SIGNUM_CONFIG_DIR`, `SIGNUM_CALLER_CONTEXT`, `SIGNUM_PSEUDONYMIZE`,
-`SIGNUM_ALLOW_AGENT_DATA` — plus named instances (`signum instance add app https://app.example.org`,
-then `signum -i app types`), stored in the config directory. Output is a table on a terminal and JSON when piped; override with `-o`.
+`SIGNUM_ALLOW_AGENT_DATA`, `SIGNUM_AUTH_HEADER` — plus named instances (`signum instance add app
+https://app.example.org`, then `signum -i app types`), stored in the config directory. An instance
+can be protected (`--protected`: a write is confirmed by typing its name) and can name the header
+its token goes in (`--auth-header`). Output is a table on a terminal and JSON when piped; override with `-o`.
 
 **Under an AI agent.** The CLI detects agent callers (e.g. `CLAUDECODE`, `AI_AGENT`) and then
 refuses to print row data unless pseudonymization is on or the data is explicitly acknowledged

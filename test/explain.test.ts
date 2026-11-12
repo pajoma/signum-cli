@@ -132,6 +132,7 @@ const CASES: Record<string, Case[]> = {
   "cache clear": [{ sends: false, why: "deletes the local cache" }],
   "cache path": [{ sends: false, why: "prints a local path" }],
   "instance add": [{ sends: false, why: "writes the local registry" }],
+  "instance set": [{ sends: false, why: "writes the local registry" }],
   "instance list": [{ sends: false, why: "reads the local registry" }],
   "instance remove": [{ sends: false, why: "writes the local registry" }],
   "instance path": [{ sends: false, why: "prints a local path" }],

@@ -25,6 +25,8 @@ export const REDACTED = "<redacted>";
 export interface HttpOptions {
   baseUrl: string;
   token?: string | undefined;
+  /** The header the token goes in, as `Bearer <token>`; `Authorization` unless the profile says otherwise (AC-05.1). */
+  authHeader?: string | undefined;
   timeoutMs?: number | undefined;
   /** Trace to stderr with credentials redacted (AC-11.2). */
   trace?: ((line: string) => void) | undefined;
@@ -96,10 +98,12 @@ export interface HttpResponse<T = unknown> {
 
 const SENSITIVE_HEADERS = new Set(["authorization", "x-apikey", "new_token", "cookie"]);
 
-function redactHeaders(headers: Record<string, string>): Record<string, string> {
+/** `authHeader`: a profile's own header name for the token is as secret as `Authorization`. */
+function redactHeaders(headers: Record<string, string>, authHeader?: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(headers)) {
-    out[k] = SENSITIVE_HEADERS.has(k.toLowerCase()) ? REDACTED : v;
+    const secret = SENSITIVE_HEADERS.has(k.toLowerCase()) || k.toLowerCase() === authHeader?.toLowerCase();
+    out[k] = secret ? REDACTED : v;
   }
   return out;
 }
@@ -175,6 +179,10 @@ export class SignumHttp {
 
   get baseUrl(): string {
     return this.opts.baseUrl;
+  }
+
+  private get authHeader(): string {
+    return this.opts.authHeader ?? "Authorization";
   }
 
   /**
@@ -272,7 +280,7 @@ export class SignumHttp {
   /** The request as `--explain` shows it. `body` replaces the real one where it would disclose more. */
   describe(spec: RequestSpec, body?: unknown): ExplainedRequest {
     const headers: Record<string, string> = { accept: "application/json", ...(spec.headers ?? {}) };
-    if (this.opts.token !== undefined && this.opts.token !== "") headers["Authorization"] = `Bearer ${this.opts.token}`;
+    if (this.opts.token !== undefined && this.opts.token !== "") headers[this.authHeader] = `Bearer ${this.opts.token}`;
     const payload = spec.rawBody ?? (spec.body !== undefined ? JSON.stringify(spec.body) : undefined);
     if (payload !== undefined) headers["content-type"] = "application/json";
     if (spec.ifModifiedSince !== undefined) headers["if-modified-since"] = spec.ifModifiedSince;
@@ -287,7 +295,7 @@ export class SignumHttp {
     return {
       method: spec.method,
       url: buildUrl(this.opts.baseUrl, spec.path, spec.query),
-      headers: redactHeaders(headers),
+      headers: redactHeaders(headers, this.authHeader),
       ...(shown !== undefined ? { body: shown } : {}),
     };
   }
@@ -308,7 +316,7 @@ export class SignumHttp {
     };
 
     if (this.opts.token !== undefined && this.opts.token !== "") {
-      headers["Authorization"] = `Bearer ${this.opts.token}`;
+      headers[this.authHeader] = `Bearer ${this.opts.token}`;
     } else if (spec.allowAnonymous !== true) {
       throw new NotAuthenticatedError("no stored credential for this target", {
         loginHint: { url: this.opts.baseUrl, render: (login) => "Run `" + login + " --with-token`. See `signum help auth`." },
@@ -321,7 +329,7 @@ export class SignumHttp {
 
     this.opts.trace?.(`> ${spec.method} ${url}\n`);
     if (this.opts.trace !== undefined) {
-      for (const [k, v] of Object.entries(redactHeaders(headers))) {
+      for (const [k, v] of Object.entries(redactHeaders(headers, this.authHeader))) {
         this.opts.trace(`> ${k}: ${v}\n`);
       }
     }
