@@ -328,7 +328,17 @@ possible.
   closes. **[TEST]** — a cross-origin POST from an HTTPS page to `http://127.0.0.1` may be blocked by
   Private Network Access preflight rules depending on browser version. **AC-12.1's manual stdin paste
   is mandatory and always available as the fallback**; assisted capture is an optimisation that must
-  never become a dependency.
+  never become a dependency. *(Delivered: at a terminal `auth login` binds 127.0.0.1 on an OS-chosen
+  port and prints `fetch("http://127.0.0.1:<port>/<nonce>",{method:"POST",body:sessionStorage.getItem("authToken")})`
+  beside the paste prompt; whichever brings a token first wins, and the other is withdrawn. The
+  path carries a 128-bit random nonce printed only on the terminal, the request's `Origin` must be
+  the target application's (a request with none is refused), the Private Network Access preflight
+  is answered with `Access-Control-Allow-Private-Network: true`, a tab that is not signed in
+  (`null`) is told so, and the first valid token closes the listener; the token is never echoed.
+  It is validated exactly as a pasted one (AC-12.3). Not under `--explain`, and not when stdin is
+  piped. **Still [TEST]:** the browser side is tested with a scripted client, not a real browser,
+  so whether a given browser version lets the snippet reach loopback is unverified; the paste
+  beside it is what keeps that from mattering.)*
 - AC-12.10: The token is validated and the resolved user echoed before the old credential is
   discarded, so a failed re-handoff never leaves the profile in a worse state than before.
 - AC-12.11: When the stored token stops working, the message states plainly that a fresh handoff is

@@ -357,7 +357,7 @@ function report(err: unknown, io: Io): ExitCode {
  *
  * The prompt goes to STDERR: stdout is reserved for data (AC-22.2), and a prompt is not data.
  */
-async function promptAtTerminal(question: string, opts: { hidden?: boolean } = {}): Promise<string> {
+async function promptAtTerminal(question: string, opts: { hidden?: boolean; signal?: AbortSignal } = {}): Promise<string> {
   const stdin = process.stdin;
   process.stderr.write(question);
 
@@ -380,11 +380,16 @@ async function promptAtTerminal(question: string, opts: { hidden?: boolean } = {
         // Not raw: the terminal delivers whole lines, so anything here is already complete.
         if (!hidden) { cleanup(); resolve(buffer); }
       };
+      const onAbort = (): void => { cleanup(); resolve(""); };
       const cleanup = (): void => {
         stdin.off("data", onData);
+        opts.signal?.removeEventListener("abort", onAbort);
         if (hidden) { stdin.setRawMode(wasRaw); process.stderr.write("\n"); }
         stdin.pause();
       };
+      // Withdrawn: the answer came another way (AC-12.9), so stop reading the terminal.
+      if (opts.signal?.aborted === true) { cleanup(); resolve(""); return; }
+      opts.signal?.addEventListener("abort", onAbort, { once: true });
       stdin.on("data", onData);
     });
   } finally {

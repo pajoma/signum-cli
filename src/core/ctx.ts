@@ -19,13 +19,15 @@ export interface Io {
   env: NodeJS.ProcessEnv;
   readStdin: () => Promise<string>;
   /**
-   * Ask the person at the terminal something. `hidden` suppresses echo, for a credential.
+   * Ask the person at the terminal something. `hidden` suppresses echo, for a credential. `signal`
+   * withdraws the question when the answer arrived another way (AC-12.9): the prompt then resolves
+   * with "" and stops reading the terminal.
    *
    * Absent when there is nothing to ask — no TTY, or a test that has not opted in — so every caller
    * must handle its absence rather than assume an interactive human is there (STORY-09: never hang
    * waiting for input that cannot arrive).
    */
-  prompt?: ((question: string, opts?: { hidden?: boolean }) => Promise<string>) | undefined;
+  prompt?: ((question: string, opts?: { hidden?: boolean; signal?: AbortSignal }) => Promise<string>) | undefined;
   /**
    * Run `handler` on the caller's interrupt (Ctrl-C) instead of dying at once, until the returned
    * function is called. For a request whose server keeps working: what it already did must still be

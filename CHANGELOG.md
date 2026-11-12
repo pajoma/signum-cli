@@ -95,6 +95,11 @@ source of truth: a release tag `v<version>` must match it (see the README's rele
   as everywhere. `--auth-header Signum_Authorization` sends the token in the header a Windows-AD
   application reads it from; `SIGNUM_AUTH_HEADER` does the same without a profile. `instance list`
   and `auth status` show both.
+- **The browser can hand the token over itself** (AC-12.9). At a terminal, `auth login` prints a
+  one-line snippet to run in the console of the signed-in application; it sends the token to a
+  one-shot listener on 127.0.0.1, so it is never copied by hand. The listener takes it only from
+  that application's origin and at a random path, and closes on the first token. Pasting at the
+  prompt works as before, beside it.
 
 ## 0.2.1 — 2026-10-23
 

@@ -105,6 +105,10 @@ export const COMMANDS: CommandSpec[] = [
           "The target application uses Entra SSO with no Signum.Rest module, so a browser token " +
           "handoff is the only viable mechanism. Sign in to the web app, then in the browser " +
           "console run:\n\n    sessionStorage.getItem(\"authToken\")\n\n" +
+          "At a terminal it also prints a one-line console snippet that sends the token to a " +
+          "listener on 127.0.0.1, so nothing is copied by hand: run it in any tab of the signed-in " +
+          "application. The listener takes the token from that application's origin only, at a " +
+          "random path, and closes on the first one. Pasting at the prompt works all the same.\n\n" +
           "At a terminal you are prompted for it and it is not echoed. Piping works too. It is " +
           "never read from an argument, which would leave it in your shell history and the process " +
           "list — passing one there is refused, not ignored.\n\n" +

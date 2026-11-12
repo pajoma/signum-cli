@@ -19,6 +19,7 @@ import { appVersionFrom, Explained, SignumHttp } from "../core/http.ts";
 import { flag } from "../core/ctx.ts";
 import { explainSink, resolveTarget } from "../core/target.ts";
 import { handoffInstructions, loginCommand } from "../core/handoff.ts";
+import { listenForToken } from "../core/capture.ts";
 
 /** Generic form, for error hints where no target URL is known (`auth status` on a fresh install). */
 
@@ -32,14 +33,29 @@ import { handoffInstructions, loginCommand } from "../core/handoff.ts";
  *   • it prints the CONCRETE url, which is clickable in most terminals, instead of `<url>`
  *   • it prompts inline, so the next thing you do is on the line your cursor is already on
  */
-function handoffPreamble(url: string): string {
+function handoffPreamble(url: string, snippet: string | undefined): string {
+  if (snippet === undefined) {
+    return [
+      "Browser will not be opened automatically.",
+      "Please sign in at",
+      `  ${url}`,
+      "",
+      "Then open the browser console and run",
+      '  sessionStorage.getItem("authToken")',
+      "",
+      "",
+    ].join("\n");
+  }
+  // AC-12.9: the snippet hands the token over itself; pasting stays offered beside it (AC-12.1).
   return [
     "Browser will not be opened automatically.",
     "Please sign in at",
     `  ${url}`,
     "",
-    "Then open the browser console and run",
-    '  sessionStorage.getItem("authToken")',
+    "Then, in the browser console of a tab on that site, run this line to send the token here:",
+    `  ${snippet}`,
+    "",
+    'Or run sessionStorage.getItem("authToken") there and paste the value below.',
     "",
     "",
   ].join("\n");
@@ -98,12 +114,29 @@ async function login(ctx: Ctx): Promise<ExitCode> {
         hint: "The token is read from stdin so it never appears in shell history.\n\n" + handoff,
       });
     }
-    ctx.io.err(handoffPreamble(url));
-    token = (await ctx.io.prompt("Enter the token displayed in your browser: ", { hidden: true })).trim();
-    // Silence is safe but disorienting for a value this long — you cannot see a truncated paste.
-    // A character count confirms something arrived without putting the token on screen or in
-    // scrollback. The immediate currentUser check is what catches a bad one either way (AC-12.3).
-    if (token !== "") ctx.io.err(`Received ${token.length} characters.\n`);
+    // Assisted capture (AC-12.9) races the paste: whichever brings a token first wins, and the other
+    // is withdrawn. Not under --explain, which stores nothing and so has nothing to wait for.
+    const listener = ctx.args.flags.explain ? undefined : listenForToken(url);
+    ctx.io.err(handoffPreamble(url, listener?.snippet));
+    const withdraw = new AbortController();
+    try {
+      const pasted = ctx.io.prompt(
+        listener !== undefined ? "Waiting for the token; or paste it: " : "Enter the token displayed in your browser: ",
+        { hidden: true, signal: withdraw.signal },
+      ).then((t) => ({ token: t, via: "paste" as const }));
+      const sent = listener?.token.then((t) => ({ token: t, via: "browser" as const }));
+      const first = await (sent !== undefined ? Promise.race([pasted, sent]) : pasted);
+      token = first.token.trim();
+      // Silence is safe but disorienting for a value this long — you cannot see a truncated paste.
+      // A character count confirms something arrived without putting the token on screen or in
+      // scrollback. The immediate currentUser check is what catches a bad one either way (AC-12.3).
+      if (token !== "") {
+        ctx.io.err(first.via === "browser" ? "\nReceived the token from the browser.\n" : `Received ${token.length} characters.\n`);
+      }
+    } finally {
+      withdraw.abort();
+      listener?.close();
+    }
   } else {
     token = (await ctx.io.readStdin()).trim();
   }
