@@ -108,6 +108,37 @@ function parseEdits(ctx: Ctx): Array<{ path: MemberPath; value: ArgValue; writte
   });
 }
 
+/**
+ * Spell an `--edit` path the way the WIRE does. Members are camelCase on the wire (`name`, `rASCI`)
+ * while people, help and reflection say `Name`, `RASCI`; `setMember` is exact, so without this the
+ * documented `--edit Name=…` would be refused. Matched case-insensitively against the fetched entity,
+ * exact first, and an index into an MList steps into the row's element as `setMember` does.
+ */
+function wirePath(entity: EntityJson, path: MemberPath): MemberPath {
+  const out: Array<string | number> = [];
+  let node: unknown = entity;
+  for (const segment of path) {
+    if (typeof segment === "number") {
+      out.push(segment);
+      const item = Array.isArray(node) ? (node as unknown[])[segment] : undefined;
+      node = item !== null && typeof item === "object" && Object.hasOwn(item, "rowId") && Object.hasOwn(item, "element")
+        ? (item as Record<string, unknown>)["element"]
+        : item;
+      continue;
+    }
+    if (node === null || typeof node !== "object" || Array.isArray(node)) {
+      out.push(segment);
+      node = undefined;
+      continue;
+    }
+    const o = node as Record<string, unknown>;
+    const key = Object.hasOwn(o, segment) ? segment : Object.keys(o).find((k) => k.toLowerCase() === segment.toLowerCase()) ?? segment;
+    out.push(key);
+    node = o[key];
+  }
+  return out;
+}
+
 /** The `--explain` / request body, built once for both. */
 interface Plan {
   op: ResolvedOperation;
@@ -245,7 +276,7 @@ async function body(target: Target, p: Plan): Promise<string> {
   // string: a stale one is the server's concurrency check, never something to refresh away (#117).
   const entity: EntityJson = await fetchEntity(target.http, cleanName(p.target.type), p.target.id);
   let changed = false;
-  for (const e of p.edits) changed = setMember(entity, e.path, e.value) || changed;
+  for (const e of p.edits) changed = setMember(entity, wirePath(entity, e.path), e.value) || changed;
   if (p.edits.length > 0 && !changed) {
     // Saving nothing is not a save (AC-32.4): say so and send nothing.
     throw new CliError("every --edit already holds that value; nothing was sent", ExitCode.Usage);

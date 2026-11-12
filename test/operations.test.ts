@@ -235,7 +235,8 @@ describe("executing an operation (STORY-40, #114)", () => {
   });
 
   it("sends a canBeModified operation the fresh entity with the edit marked, ticks as a string (AC-32.1, #117)", async () => {
-    const r = await cli(["save", "order", "42", "--edit", "name=Beta", "--yes"]);
+    // `Name` as people and help write it; `name` on the wire.
+    const r = await cli(["save", "order", "42", "--edit", "Name=Beta", "--yes"]);
     expect(r.code).toBe(ExitCode.Ok);
     const [call] = operationCalls();
     expect(call?.path).toBe("/api/operation/executeEntity/OrderOperation.Save");
