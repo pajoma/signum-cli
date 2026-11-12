@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from "bun:test";
 import { BUILT_INS, builtInsSatisfyDispatchInvariant, flagCheckPath, flagSetsAreDisjoint, parseArgs } from "../src/core/args.ts";
-import { COMMANDS, GLOBAL_FLAGS } from "../src/core/help.ts";
+import { allFlagSpecs, COMMANDS, GLOBAL_FLAGS } from "../src/core/help.ts";
 import { HANDLERS } from "../src/cli.ts";
 import { flag, optAll, type Ctx } from "../src/core/ctx.ts";
 import { detectCallerContext } from "../src/core/caller.ts";
@@ -22,6 +22,21 @@ describe("dispatch invariant", () => {
 
   it("a flag cannot both require a value and be boolean-only", () => {
     expect(flagSetsAreDisjoint()).toBe(true);
+  });
+
+  // The parser learns each flag's arity from its FlagSpec, so no second list can drift (audit, R3).
+  it("parses every declared flag with the arity its FlagSpec gives it", () => {
+    // The globals the parser peels into typed fields are checked by their own tests.
+    for (const f of allFlagSpecs().filter((g) => !GLOBAL_FLAGS.includes(g))) {
+      for (const name of [f.name, ...(f.alias !== undefined ? [f.alias] : [])]) {
+        const dash = name.length === 1 ? "-" : "--";
+        const parsed = parseArgs(["query", "Order", `${dash}${name}`, "x"], {});
+        if (f.arg !== undefined) expect([name, parsed.options.get(name)]).toEqual([name, ["x"]]);
+        else expect([name, parsed.booleans.has(name), parsed.positionals]).toEqual([name, true, ["Order", "x"]]);
+      }
+    }
+    // `--pack=true` used to land among the values, where `flag()` never looks, and was ignored.
+    expect(parseArgs(["get", "Order", "42", "--pack=true"], {}).booleans.has("pack")).toBe(true);
   });
 
   // #124: the help tree, the built-in list and the dispatcher must name the same commands, or a

@@ -14,7 +14,7 @@
 
 import { UsageError, type ExitCode } from "./errors.ts";
 import { parseOutputFormat, type OutputFormat } from "./output.ts";
-import { COMMANDS, findCommand, formatSupport, knownFlagNames } from "./help.ts";
+import { allFlagSpecs, COMMANDS, findCommand, formatSupport, knownFlagNames, type FlagSpec } from "./help.ts";
 import { nearest } from "./text.ts";
 
 /**
@@ -104,20 +104,20 @@ export interface ParsedArgs {
   rawFlagNames: Set<string>;
 }
 
-const FLAGS_WITH_VALUE = new Set([
-  "url", "instance", "i", "output", "o", "timeout", "caller-context", "pseudonymize",
-  "filter", "filter-json", "column", "order", "top", "page", "page-size",
-  "context", "pseudonymize", "arg", "arg-string", "arg-lite", "arg-json",
-  "lite", "id", "filename", "f", "edit", "setters-json",
-  "in", "glob", "labels", "kind", "auth-header",
-]);
+/** A flag's name and alias, as typed after the dashes. */
+function spellings(f: FlagSpec): string[] {
+  return [f.name, ...(f.alias !== undefined ? [f.alias] : [])].map((n) => n.toLowerCase());
+}
 
-/** Boolean flags — listing one above would make it demand a value. */
-export const BOOLEAN_FLAGS = new Set([
-  "with-token", "exists", "count", "all", "yes", "y", "raw", "group",
-  "resolve", "privacy", "list", "clear", "as-command", "dry-run", "in-place", "forget-labels", "lites", "entities",
-  "allow-custom-arg", "progress", "protected", "unprotected",
-]);
+/**
+ * Which flags take a value, derived from the help registry: a `FlagSpec` with an `arg` takes one.
+ * Declaring a flag there is the only step; a second hand-kept list here drifted twice in m2, and a
+ * flag missing from it parsed its value as a positional.
+ */
+const FLAGS_WITH_VALUE = new Set(allFlagSpecs().filter((f) => f.arg !== undefined).flatMap(spellings));
+
+/** Boolean flags, from the same registry — listing one above would make it demand a value. */
+export const BOOLEAN_FLAGS = new Set(allFlagSpecs().filter((f) => f.arg === undefined).flatMap(spellings));
 
 /** Invariant: a flag cannot need a value and be boolean-only at once. Checked by test. */
 export function flagSetsAreDisjoint(): boolean {

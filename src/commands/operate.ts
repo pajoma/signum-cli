@@ -35,7 +35,7 @@ import { findType, loadMetadata, type Metadata } from "../core/metadata.ts";
 import {
   kebab, operationFacts, resolveKey, resolveVerbNoun, ROUTES, routeOf, type ArgValue, type ResolvedOperation, type Route,
 } from "../core/operations.ts";
-import type { AppHelp } from "../core/help.ts";
+import { OPERATION_FLAGS, type AppHelp } from "../core/help.ts";
 import { renderDocument } from "../core/output.ts";
 import { looksLikeSurrogate, pseudonymizeDocument } from "../core/privacy.ts";
 import { isHandle, resolveHandle } from "../core/reidentify.ts";
@@ -47,14 +47,11 @@ import {
   recordKey, renderPack, shownTarget, type Edit, type OperationTarget,
 } from "./operate-common.ts";
 
-/** What an operation command accepts besides the global flags. */
-export const OPERATION_FLAGS = [
-  "arg", "arg-string", "arg-lite", "arg-json", "allow-custom-arg",
-  "lite", "id", "edit", "setters-json", "f", "filename", "yes", "y", "dry-run", "progress",
-] as const;
+/** What an operation command accepts besides the global flags: declared once, in the help registry. */
+const OPERATION_FLAG_NAMES: readonly string[] = OPERATION_FLAGS.flatMap((f) => [f.name, ...(f.alias !== undefined ? [f.alias] : [])]);
 
 function assertOperationFlags(ctx: Ctx): void {
-  const known = new Set<string>(OPERATION_FLAGS);
+  const known = new Set<string>(OPERATION_FLAG_NAMES);
   const unknown = [...ctx.args.options.keys(), ...ctx.args.booleans].filter((f) => !known.has(f));
   if (unknown.length === 0) return;
   const described = unknown.map((u) => {
@@ -62,7 +59,7 @@ function assertOperationFlags(ctx: Ctx): void {
     return near !== undefined ? `--${u} (did you mean --${near}?)` : `--${u}`;
   });
   throw new UsageError(`unknown flag${unknown.length > 1 ? "s" : ""} for an operation: ${described.join(", ")}`, {
-    hint: `An operation takes: ${OPERATION_FLAGS.map((f) => (f.length === 1 ? `-${f}` : `--${f}`)).join(", ")}.`,
+    hint: `An operation takes: ${OPERATION_FLAG_NAMES.map((f) => (f.length === 1 ? `-${f}` : `--${f}`)).join(", ")}.`,
   });
 }
 
