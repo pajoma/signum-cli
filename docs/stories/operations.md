@@ -118,7 +118,7 @@ it, so that I can check safely against production.
 
 ## STORY-44 — Create and delete
 
-Traces to: REQ-044 · Priority: `m3`
+Traces to: REQ-044 · Priority: `m2` *(moved from m3: delivered in 0.3.0, #118)*
 
 **As an operator**, I want to construct new records and delete existing ones, so that the CLI covers
 the full lifecycle rather than only updates.
@@ -135,7 +135,7 @@ the full lifecycle rather than only updates.
 
 ## STORY-45 — Act on many records
 
-Traces to: REQ-045 · Priority: `m3`
+Traces to: REQ-045 · Priority: `m2` *(moved from m3: delivered in 0.3.0, #119)*
 
 **As an operator** fixing a batch, I want to run one operation across many records with progress and
 per-item outcomes, so that I can act at scale and know exactly what happened.
@@ -178,6 +178,6 @@ deliberate, so that a mistyped command cannot quietly cause damage.
 | STORY-41 Name an operation | REQ-041 | `m2` |
 | STORY-42 Pass arguments correctly | REQ-042 | `m2` |
 | STORY-43 Find out before doing | REQ-043 | `m2` |
-| STORY-44 Create and delete | REQ-044 | `m3` |
-| STORY-45 Act on many records | REQ-045 | `m3` |
+| STORY-44 Create and delete | REQ-044 | `m2` |
+| STORY-45 Act on many records | REQ-045 | `m2` |
 | STORY-46 Destructive-action guard | REQ-046 | `m2` |
