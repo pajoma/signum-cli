@@ -33,9 +33,10 @@ The two axes are deliberately independent, and they disagree often:
 - `m3` + **P2** — REQ-002/003/004/005, the auth mechanisms that **cannot work on the target
   application** and are retained only because REQ-075 says the CLI must work against any Signum app.
 
-A requirement is closed only once **delivered**, not once implemented — and nothing here has been
-verified against a live Signum application yet (REQ-077, itself P0 for that reason). Implemented
-requirements sit at Status *In review* on the board.
+A requirement is closed only once **delivered**, not once implemented. m1 and m2 were run against a
+live, non-production Signum application before their releases (`test/*.live.test.ts`, REQ-077), and
+their requirements are closed: m1 with `v0.2.0`, m2 with `v0.3.0`. Implemented requirements sit at
+Status *In review* on the board until then.
 
 ---
 
@@ -104,8 +105,8 @@ release — it was the whole product. This replaces it.
 | | Count | Meaning |
 |---|---|---|
 | **m1** | 14 | **Read-only core.** The smallest CLI that is genuinely useful and safe to point at production. No mutations at all. |
-| **m2** | 16 | **Writes and ergonomics.** Operations, entity round-trip fidelity, concurrency, profiles, tracing, pseudonymization. |
-| **m3** | 18 | **MCP, scale, and other deployments.** Includes the four auth mechanisms unreachable on the target app. |
+| **m2** | 18 | **Writes and ergonomics.** Operations, entity round-trip fidelity, concurrency, profiles, tracing, pseudonymization. Released as `v0.3.0`; REQ-044 and REQ-045 moved here from m3 when they were delivered with it. |
+| **m3** | 16 | **MCP, scale, and other deployments.** Includes the four auth mechanisms unreachable on the target app. |
 | **always** | 6 | **Cross-cutting constraints**, not scheduled features. They apply from the first commit and are never "done". |
 
 **Why m1 is read-only.** Every write hazard in this API is a *quiet* one — `modified` propagation
@@ -195,8 +196,8 @@ The owner's guidance: **behave like `gh`** — authenticate either by pasting an
 | REQ-041 | m2 | **operationKey resolution.** Keys are `ContainerClassName.FieldName`, **not** namespace-qualified (`Signum/Basics/Symbol.cs:22`). **Operations are first-class commands** in verb-noun form — `signum ship order 42`, `signum create order` — resolved against metadata, with the dotted key as the canonical unambiguous equivalent. Built-ins win dispatch, so a shadowed operation verb must be flagged in discovery output ([CLI surface](design/cli-surface.md) §2.1). Resolve friendly input against cached metadata; disambiguate rather than guess. |
 | REQ-042 | m2 | **`args` encoding.** `args` is discriminated **by JSON shape** (`BaseOperationRequest.ConvertObject`, `OperationController.cs:~165-200`): object with `EntityType` → `Lite`, with `Type` → `ModifiableEntity`, number → **always `decimal`**, array → recursive list. **Two silent traps the CLI must guard:** a string that parses as a date is coerced to `DateTime`, so a date-shaped value can never be sent as a string; and an object carrying neither `EntityType` nor `Type` falls through to app-registered `CustomOperationArgsConverters` and becomes **`null`** if none exists — no error, no warning. See [STORY-42](stories/operations.md). |
 | REQ-043 | m2 | **Dry-run.** `--dry-run` using `canExecute` from `entityPack` (and `stateCanExecutes`) to report whether an operation would be permitted, without invoking it. Essential for both ops safety and agent use. |
-| REQ-044 | m3 | **Construct and delete.** `construct`, `constructFromEntity`/`Lite`/`Many`, `deleteEntity`/`Lite`. |
-| REQ-045 | m3 | **Bulk operations with progress.** `executeMultiple`, `deleteMultiple`, `constructFromMultiple`, and the NDJSON-streaming `executeLiteWithProgress`. Must stream progress, report per-item outcomes, and not abort the batch on one failure. |
+| REQ-044 | m2 | **Construct and delete.** *(Moved from m3: delivered in 0.3.0, #118.)* `construct`, `constructFromEntity`/`Lite`/`Many`, `deleteEntity`/`Lite`. |
+| REQ-045 | m2 | **Bulk operations with progress.** *(Moved from m3: delivered in 0.3.0, #119.)* `executeMultiple`, `deleteMultiple`, `constructFromMultiple`, and the NDJSON-streaming `executeLiteWithProgress`. Must stream progress, report per-item outcomes, and not abort the batch on one failure. |
 | REQ-046 | m2 | **Destructive-action guard.** Confirm before mutating when stdout is a TTY; `--yes` to bypass; never prompt when not a TTY (fail instead, so a script cannot hang). |
 
 ---
@@ -322,8 +323,8 @@ Requirement IDs are stable; issue numbers are not a substitute for them.
 | REQ-041 | [#25](https://github.com/pajoma/signum-cli/issues/25) | `m2` | operationKey resolution |
 | REQ-042 | [#26](https://github.com/pajoma/signum-cli/issues/26) | `m2` | `args` encoding |
 | REQ-043 | [#27](https://github.com/pajoma/signum-cli/issues/27) | `m2` | Dry-run |
-| REQ-044 | [#28](https://github.com/pajoma/signum-cli/issues/28) | `m3` | Construct and delete |
-| REQ-045 | [#29](https://github.com/pajoma/signum-cli/issues/29) | `m3` | Bulk operations with progress |
+| REQ-044 | [#28](https://github.com/pajoma/signum-cli/issues/28) | `m2` | Construct and delete |
+| REQ-045 | [#29](https://github.com/pajoma/signum-cli/issues/29) | `m2` | Bulk operations with progress |
 | REQ-046 | [#30](https://github.com/pajoma/signum-cli/issues/30) | `m2` | Destructive-action guard |
 
 **F. Output, errors, and UX**

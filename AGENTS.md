@@ -41,8 +41,8 @@ document is the source of truth; keep it and the issues in sync, via
 | | Count | Scope |
 |---|---|---|
 | [`m1`](https://github.com/pajoma/signum-cli/labels/m1) | 14 | **Read-only core.** No mutations. Safe to point at production. |
-| [`m2`](https://github.com/pajoma/signum-cli/labels/m2) | 16 | Writes, entity fidelity, concurrency, profiles, tracing, pseudonymization. |
-| [`m3`](https://github.com/pajoma/signum-cli/labels/m3) | 18 | MCP, scale, and the auth paths unreachable on the target app. |
+| [`m2`](https://github.com/pajoma/signum-cli/labels/m2) | 18 | Writes, entity fidelity, concurrency, profiles, tracing, pseudonymization. |
+| [`m3`](https://github.com/pajoma/signum-cli/labels/m3) | 16 | MCP, scale, and the auth paths unreachable on the target app. |
 | [`always`](https://github.com/pajoma/signum-cli/labels/always) | 6 | Cross-cutting constraints; apply from the first commit, never "done". |
 
 **Build m1 first, and do not smuggle writes into it.** Every write hazard in this API fails *quietly*
